@@ -1,0 +1,70 @@
+{
+  "account_ref": "hashed_customer_123",
+  "loan": {
+    "principal": 2100,
+    "accrued_interest": 15,
+    "fees": 0,
+    "currency": "USD"
+  },
+  "policy": {
+    "risk_appetite": "balanced",
+    "base_ltv": {
+      "cash": 0.95,
+      "bond": 0.8,
+      "bond_fund": 0.78,
+      "etf": 0.7,
+      "listed_equity": 0.65,
+      "high_volatility_equity": 0.45,
+      "crypto": 0.2,
+      "option": 0.05,
+      "private_asset": 0.0,
+      "other": 0.0
+    }
+  },
+  "holdings": [
+    {"asset_id": "AAPL", "asset_type": "listed_equity", "quantity": 10, "currency": "USD"},
+    {"asset_id": "NVDA", "asset_type": "high_volatility_equity", "quantity": 3, "currency": "USD"}
+  ],
+  "market_data": {
+    "AAPL": {
+      "asset_id": "AAPL",
+      "last_price": 190,
+      "bid": 189.98,
+      "ask": 190.02,
+      "average_daily_volume": 60000000,
+      "average_dollar_volume": 11400000000,
+      "volatility_30d": 0.28,
+      "volatility_90d": 0.31,
+      "recent_return_1d": -0.012,
+      "data_quality_score": 0.99,
+      "order_book": {
+        "bids": [
+          {"price": 189.98, "quantity": 5000},
+          {"price": 189.95, "quantity": 10000}
+        ],
+        "asks": []
+      }
+    },
+    "NVDA": {
+      "asset_id": "NVDA",
+      "last_price": 900,
+      "bid": 899.5,
+      "ask": 900.5,
+      "average_daily_volume": 45000000,
+      "average_dollar_volume": 40500000000,
+      "volatility_30d": 0.72,
+      "volatility_90d": 0.68,
+      "intraday_volatility": 0.85,
+      "recent_return_1d": -0.055,
+      "data_quality_score": 0.98,
+      "order_book": {
+        "bids": [
+          {"price": 899.5, "quantity": 300},
+          {"price": 898.8, "quantity": 700},
+          {"price": 897.2, "quantity": 2000}
+        ],
+        "asks": []
+      }
+    }
+  }
+}

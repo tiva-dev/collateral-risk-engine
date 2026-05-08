@@ -1,0 +1,14 @@
+[project]
+name = "collateral-risk-engine"
+version = "0.1.0"
+description = "Dynamic collateral risk and liquidation intelligence engine for investment-backed lending."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110.0",
+  "uvicorn[standard]>=0.27.0",
+  "pydantic>=2.5.0"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["app/tests"]
