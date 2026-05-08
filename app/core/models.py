@@ -4,7 +4,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from app.core.enums import AssetType, MarginState, RiskAppetite
+from app.core.enums import (
+    AssetType,
+    MarginState,
+    PortfolioActionType,
+    RiskAppetite,
+    RiskDecision,
+    TransferDirection,
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +32,16 @@ class Loan:
     @property
     def balance(self) -> float:
         return max(0.0, self.principal + self.accrued_interest + self.fees)
+
+
+@dataclass(frozen=True)
+class PortfolioAction:
+    action_type: PortfolioActionType
+    asset_id: str | None = None
+    asset_type: AssetType | None = None
+    quantity: float = 0.0
+    amount: float = 0.0
+    direction: TransferDirection = TransferDirection.OUT
 
 
 @dataclass(frozen=True)
@@ -186,8 +203,14 @@ class PortfolioEvaluation:
     approved_credit_limit: float
     stressed_liquidation_value: float
     loan_balance: float
+    outstanding_balance: float
     available_credit: float
+    requested_draw_amount: float
+    projected_loan_balance: float
+    projected_available_credit: float
     recovery_coverage_ratio: float | None
+    dynamic_safety_requirement: float
+    minimum_stressed_liquidation_value: float
     portfolio_risk_score: float
     margin_state: MarginState
     trigger_levels: TriggerLevels
@@ -195,4 +218,26 @@ class PortfolioEvaluation:
     liquidation_plan: LiquidationPlan | None
     audit_id: str
     model_version: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class PreTradeRiskCheckResult:
+    account_ref: str
+    decision: RiskDecision
+    approved: bool
+    reason: str
+    outstanding_balance: float
+    available_credit: float
+    requested_draw_amount: float
+    projected_loan_balance: float
+    projected_available_credit: float
+    projected_stressed_liquidation_value: float
+    dynamic_safety_requirement: float
+    minimum_stressed_liquidation_value: float
+    required_repayment_amount: float
+    reduced_available_credit: float
+    projected_margin_state: MarginState
+    projected_holdings: list[Holding]
+    projected_evaluation: PortfolioEvaluation
     created_at: datetime
