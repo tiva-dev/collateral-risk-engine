@@ -336,6 +336,9 @@ class CreditLifecycleEngine:
         return PortfolioActionCheckResult(
             decision=decision,
             reason=reason,
+            current_outstanding_balance=pre_evaluation.current_outstanding_balance,
+            current_available_credit=pre_evaluation.current_available_credit,
+            projected_outstanding_balance=projected_evaluation.current_outstanding_balance,
             projected_loan_balance=projected_evaluation.loan_balance,
             projected_approved_credit_limit=projected_evaluation.approved_credit_limit,
             projected_available_credit=projected_state.available_credit,

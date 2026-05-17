@@ -242,6 +242,10 @@ class PortfolioActionControlsTests(unittest.TestCase):
         )
 
         self.assertEqual(response.result.decision, RiskDecision.APPROVE)
+        self.assertEqual(response.result.current_outstanding_balance, 2_500.0)
+        self.assertGreater(response.result.current_available_credit, 0.0)
+        self.assertEqual(response.result.projected_outstanding_balance, 2_500.0)
+        self.assertEqual(response.result.projected_loan_balance, 2_500.0)
         self.assertEqual(response.result.projected_margin_state, MarginState.SAFE)
 
 

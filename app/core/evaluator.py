@@ -141,6 +141,8 @@ class CollateralRiskEngine:
             ),
             "approved_credit_limit": round_money(approved_credit_limit),
             "stressed_liquidation_value": round_money(stressed_liquidation_value),
+            "current_outstanding_balance": round_money(outstanding_balance),
+            "current_available_credit": round_money(available_credit),
             "outstanding_balance": round_money(outstanding_balance),
             "available_credit": round_money(available_credit),
             "requested_draw_amount": round_money(requested_draw_amount),
@@ -177,6 +179,8 @@ class CollateralRiskEngine:
             risk_adjusted_collateral_value=round_money(risk_adjusted_collateral_value),
             approved_credit_limit=round_money(approved_credit_limit),
             stressed_liquidation_value=round_money(stressed_liquidation_value),
+            current_outstanding_balance=round_money(outstanding_balance),
+            current_available_credit=round_money(available_credit),
             loan_balance=round_money(projected_loan_balance),
             outstanding_balance=round_money(outstanding_balance),
             available_credit=round_money(available_credit),
@@ -215,6 +219,13 @@ class CollateralRiskEngine:
             raise RiskEvaluationError("at least one portfolio action is required")
 
         outstanding_balance = loan.balance
+        current_evaluation = self.evaluate(
+            account_ref=account_ref,
+            holdings=holdings,
+            loan=loan,
+            policy=policy,
+            market_data=market_data,
+        )
         try:
             projected_holdings, requested_draw_amount, repayment_amount = (
                 self._project_actions(
@@ -224,20 +235,16 @@ class CollateralRiskEngine:
                 )
             )
         except RiskEvaluationError as exc:
-            projected_evaluation = self.evaluate(
-                account_ref=account_ref,
-                holdings=holdings,
-                loan=loan,
-                policy=policy,
-                market_data=market_data,
-            )
+            projected_evaluation = current_evaluation
             return PreTradeRiskCheckResult(
                 account_ref=account_ref,
                 decision=RiskDecision.REJECT,
                 approved=False,
                 reason=str(exc),
+                current_outstanding_balance=round_money(outstanding_balance),
+                current_available_credit=current_evaluation.current_available_credit,
                 outstanding_balance=round_money(outstanding_balance),
-                available_credit=projected_evaluation.available_credit,
+                available_credit=current_evaluation.current_available_credit,
                 requested_draw_amount=0.0,
                 projected_loan_balance=projected_evaluation.projected_loan_balance,
                 projected_available_credit=projected_evaluation.projected_available_credit,
@@ -271,8 +278,10 @@ class CollateralRiskEngine:
             decision=decision,
             approved=decision == RiskDecision.APPROVE,
             reason=reason,
+            current_outstanding_balance=round_money(outstanding_balance),
+            current_available_credit=current_evaluation.current_available_credit,
             outstanding_balance=round_money(outstanding_balance),
-            available_credit=projected_evaluation.available_credit,
+            available_credit=current_evaluation.current_available_credit,
             requested_draw_amount=projected_evaluation.requested_draw_amount,
             projected_loan_balance=projected_evaluation.projected_loan_balance,
             projected_available_credit=projected_evaluation.projected_available_credit,

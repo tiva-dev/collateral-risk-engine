@@ -8,7 +8,8 @@ The engine calculates dynamic collateral value, effective LTV, margin state, str
 
 - Python risk engine
 - FastAPI endpoint: `POST /risk/evaluate`
-- Pre-trade risk check endpoint: `POST /risk/pre-trade-check`
+- Preferred portfolio action endpoint: `POST /portfolio/action/check`
+- Legacy pre-trade risk check endpoint: `POST /risk/pre-trade-check`
 - Lifecycle endpoints: `POST /credit/originate`, `POST /credit/draw/check`, `POST /loan/monitor`
 - Dynamic LTV adjustments for volatility, liquidity, spread, concentration, stress, and data quality
 - Credit lifecycle fields for origination and monitoring
@@ -49,9 +50,11 @@ The payload contains:
 The response contains:
 
 - `approved_credit_limit`
-- `loan_balance`
-- `outstanding_balance`
-- `available_credit`
+- `current_outstanding_balance`
+- `current_available_credit`
+- `loan_balance` (legacy alias for the projected loan balance)
+- `outstanding_balance` (legacy alias for `current_outstanding_balance`)
+- `available_credit` (legacy alias for `current_available_credit`)
 - `requested_draw_amount`
 - `projected_loan_balance`
 - `projected_available_credit`
@@ -66,13 +69,43 @@ The response contains:
 - `liquidation_plan`
 - `audit_id`
 
+## Portfolio action checks
+
+```http
+POST /portfolio/action/check
+```
+
+Use `POST /portfolio/action/check` for new portfolio action integrations. It is the preferred endpoint for validating single portfolio actions because it accepts the full `account_state`, supports pledged cash, and returns explicit `current_*` and `projected_*` response fields.
+
+Supported canonical action types are:
+
+- `buy`
+- `sell`
+- `withdraw_cash`
+- `withdraw_security`
+- `transfer_security`
+- `repay`
+- `rebalance`
+- `draw`
+
+Legacy action aliases are still accepted for backward compatibility but should not be used in new clients:
+
+- `withdrawal` is an alias for `withdraw_security`
+- `transfer` is an alias for `transfer_security`
+- `repayment` is an alias for `repay`
+- `credit_draw` remains supported by the legacy pre-trade endpoint; use `draw` with `POST /portfolio/action/check` for new clients
+
+The response separates current and projected state with fields such as `current_outstanding_balance`, `current_available_credit`, `projected_outstanding_balance`, `projected_loan_balance`, `projected_available_credit`, and `projected_margin_state`.
+
 ## Pre-trade check
 
 ```http
 POST /risk/pre-trade-check
 ```
 
-Submit current holdings, current outstanding balance, market data, and proposed actions. Supported action types are:
+`POST /risk/pre-trade-check` is a legacy endpoint retained for existing integrations. New portfolio action clients should use `POST /portfolio/action/check`.
+
+Submit current holdings, current outstanding balance, market data, and proposed actions. Legacy supported action types are:
 
 - `buy`
 - `sell`
@@ -81,7 +114,7 @@ Submit current holdings, current outstanding balance, market data, and proposed 
 - `repayment`
 - `credit_draw`
 
-The engine projects the post-action portfolio and loan balance. It only approves the action when projected stressed liquidation value remains above projected loan balance plus the dynamic safety requirement. Otherwise it returns one of:
+The engine projects the post-action portfolio and loan balance. Its response includes `current_outstanding_balance` and `current_available_credit` alongside legacy aliases `outstanding_balance` and `available_credit`. It only approves the action when projected stressed liquidation value remains above projected loan balance plus the dynamic safety requirement. Otherwise it returns one of:
 
 - `reject`
 - `require_repayment`
