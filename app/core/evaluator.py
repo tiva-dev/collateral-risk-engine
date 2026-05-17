@@ -77,6 +77,7 @@ class CollateralRiskEngine:
         recovery_coverage_ratio = None if loan_balance <= 0 else stressed_liquidation_value / loan_balance
         portfolio_risk_score = self._portfolio_risk_score(asset_results)
         trigger_levels = self._trigger_levels(stressed_liquidation_value, loan_balance, portfolio_risk_score)
+        minimum_stressed_liquidation_value = loan_balance * trigger_levels.dynamic_warning_coverage
         margin_state = self._margin_state(
             approved_credit_limit=approved_credit_limit,
             loan_balance=loan_balance,
@@ -101,6 +102,7 @@ class CollateralRiskEngine:
             "risk_adjusted_collateral_value": round_money(risk_adjusted_collateral_value),
             "approved_credit_limit": round_money(approved_credit_limit),
             "stressed_liquidation_value": round_money(stressed_liquidation_value),
+            "minimum_stressed_liquidation_value": round_money(minimum_stressed_liquidation_value),
             "loan_balance": round_money(loan_balance),
             "recovery_coverage_ratio": recovery_coverage_ratio,
             "portfolio_risk_score": portfolio_risk_score,
@@ -123,6 +125,7 @@ class CollateralRiskEngine:
             risk_adjusted_collateral_value=round_money(risk_adjusted_collateral_value),
             approved_credit_limit=round_money(approved_credit_limit),
             stressed_liquidation_value=round_money(stressed_liquidation_value),
+            minimum_stressed_liquidation_value=round_money(minimum_stressed_liquidation_value),
             loan_balance=round_money(loan_balance),
             available_credit=round_money(available_credit),
             recovery_coverage_ratio=None if recovery_coverage_ratio is None else round(recovery_coverage_ratio, 4),

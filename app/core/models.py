@@ -185,6 +185,7 @@ class PortfolioEvaluation:
     risk_adjusted_collateral_value: float
     approved_credit_limit: float
     stressed_liquidation_value: float
+    minimum_stressed_liquidation_value: float
     loan_balance: float
     available_credit: float
     recovery_coverage_ratio: float | None

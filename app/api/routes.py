@@ -72,6 +72,7 @@ def check_credit_draw(request: DrawCheckRequest) -> LifecycleResponse:
             account_ref=request.account_ref,
             current_loan=request.current_loan.to_domain(),
             requested_draw_amount=request.requested_draw_amount,
+            requested_repayment_amount=request.requested_repayment_amount,
             holdings=[holding.to_domain() for holding in request.holdings],
             policy=request.policy.to_domain(),
             market_data={k: v.to_domain() for k, v in request.market_data.items()},

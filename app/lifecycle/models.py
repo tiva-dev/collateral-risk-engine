@@ -3,21 +3,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from app.core.enums import MarginState
-from app.core.models import PortfolioEvaluation
+from app.core.enums import LifecycleDecisionValue, MarginState
+from app.core.models import Loan, PortfolioEvaluation
 
 
 @dataclass(frozen=True)
 class LifecycleDecision:
-    decision: str
+    decision: LifecycleDecisionValue
     reason: str
-    current_loan_balance: float
-    projected_loan_balance: float | None
+    current_outstanding_balance: float
+    current_available_credit: float
+    projected_outstanding_balance: float | None
+    projected_available_credit: float | None
+    projected_margin_state: MarginState | None
     approved_credit_limit: float
-    available_credit: float
     margin_state: MarginState
     required_cure_amount: float
+    minimum_stressed_liquidation_value: float
     max_approved_draw_amount: float | None
+    current_loan: Loan
+    projected_loan: Loan | None
     liquidation_plan: object | None
     evaluation: PortfolioEvaluation
     audit_id: str
@@ -26,18 +31,23 @@ class LifecycleDecision:
 
 @dataclass(frozen=True)
 class OriginationResult:
-    decision: str
+    decision: LifecycleDecisionValue
     reason: str
-    current_loan_balance: float
-    projected_loan_balance: float | None
+    current_outstanding_balance: float
+    current_available_credit: float
+    projected_outstanding_balance: float | None
+    projected_available_credit: float | None
+    projected_margin_state: MarginState | None
     approved_credit_limit: float
-    available_credit: float
     risk_adjusted_collateral_value: float
     stressed_liquidation_value: float
+    minimum_stressed_liquidation_value: float
     asset_results: list
     margin_state: MarginState
     required_cure_amount: float
     max_approved_draw_amount: float | None
+    current_loan: Loan
+    projected_loan: Loan | None
     liquidation_plan: object | None
     evaluation: PortfolioEvaluation
     audit_id: str

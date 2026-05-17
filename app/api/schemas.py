@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.core.enums import AssetType, RiskAppetite
+from app.core.enums import AssetType, LifecycleDecisionValue, MarginState, RiskAppetite
 from app.core.models import (
     Holding,
     Loan,
@@ -144,6 +145,7 @@ class DrawCheckRequest(BaseModel):
     account_ref: str
     current_loan: LoanIn
     requested_draw_amount: float
+    requested_repayment_amount: float = 0.0
     policy: PolicyIn
     holdings: list[HoldingIn]
     market_data: dict[str, MarketDataIn]
@@ -157,5 +159,36 @@ class MonitorRequest(BaseModel):
     market_data: dict[str, MarketDataIn]
 
 
+class LoanOut(BaseModel):
+    principal: float
+    accrued_interest: float = 0.0
+    fees: float = 0.0
+    currency: str = "USD"
+
+
+class LifecycleResult(BaseModel):
+    decision: LifecycleDecisionValue
+    reason: str
+    current_outstanding_balance: float
+    current_available_credit: float
+    projected_outstanding_balance: float | None = None
+    projected_available_credit: float | None = None
+    projected_margin_state: MarginState | None = None
+    approved_credit_limit: float
+    margin_state: MarginState
+    required_cure_amount: float
+    minimum_stressed_liquidation_value: float
+    max_approved_draw_amount: float | None = None
+    current_loan: LoanOut | None = None
+    projected_loan: LoanOut | None = None
+    risk_adjusted_collateral_value: float | None = None
+    stressed_liquidation_value: float | None = None
+    asset_results: list[Any] | None = None
+    liquidation_plan: dict[str, Any] | None = None
+    evaluation: dict[str, Any]
+    audit_id: str
+    created_at: datetime
+
+
 class LifecycleResponse(BaseModel):
-    result: dict[str, Any]
+    result: LifecycleResult

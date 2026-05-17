@@ -19,6 +19,7 @@ The engine is a dynamic collateral risk and liquidation intelligence service. It
 - Effective LTV per asset
 - Risk adjusted collateral value
 - Stressed liquidation value
+- Minimum stressed liquidation value required to satisfy the dynamic safety requirement
 - Recovery coverage ratio
 - Dynamic trigger levels
 - Margin state
@@ -69,7 +70,8 @@ If order book depth is unavailable, it estimates stressed recovery with:
 
 The liquidation threshold is not client-fixed.
 
-The engine calculates dynamic coverage requirements from portfolio risk:
+The engine calculates dynamic coverage requirements from portfolio risk. The backward-compatible `/risk/evaluate` output reports the evaluated obligation as `loan_balance`; credit lifecycle outputs report top-level pre-trade and projected obligations as `current_outstanding_balance` and `projected_outstanding_balance`.
+
 
 ```text
 dynamic_liquidation_coverage = 1.01 + 0.34 × portfolio_risk_score
@@ -120,3 +122,10 @@ Core performance metrics:
 - Warning lead time
 - False trigger rate
 - Liquidation recovery ratio
+
+
+## Credit lifecycle v0.2
+
+The lifecycle layer reuses the existing evaluator for origination, draw checks, and monitoring. Lifecycle top-level response fields use `outstanding_balance` terminology and include `current_available_credit`, `projected_available_credit`, and `projected_margin_state` so projected values are not mixed with current fields. Draw decisions use the enum values `approved`, `partially_approved`, and `rejected`; monitoring decisions use the margin-state values `safe`, `watch`, `restrict_new_borrowing`, `margin_call`, and `liquidation`.
+
+For repayment included in a draw check, cash is applied to fees first, then accrued interest, then principal. Remaining principal, accrued interest, and fees are preserved separately in the projected loan.
