@@ -75,7 +75,7 @@ The response contains:
 POST /portfolio/action/check
 ```
 
-Use `POST /portfolio/action/check` for new portfolio action integrations. It is the preferred endpoint for validating single portfolio actions because it accepts the full `account_state`, supports pledged cash, and returns explicit `current_*` and `projected_*` response fields.
+Use `POST /portfolio/action/check` for new portfolio action integrations. It is the preferred endpoint for validating single portfolio actions because it accepts the full `account_state`, supports currency-aware pledged cash, and returns explicit `current_*` and `projected_*` response fields.
 
 Supported canonical action types are:
 
@@ -94,6 +94,8 @@ Legacy action aliases are still accepted for backward compatibility but should n
 - `transfer` is an alias for `transfer_security`
 - `repayment` is an alias for `repay`
 - `credit_draw` remains supported by the legacy pre-trade endpoint; use `draw` with `POST /portfolio/action/check` for new clients
+
+Buy actions must be funded by sufficient pledged cash or an explicit `funding_source` such as `draw`, `transfer_in`, or `external_cash`; unfunded buys are rejected rather than silently creating collateral. Pledged cash is modeled per currency with identities such as `PLEDGED_CASH_USD`, `PLEDGED_CASH_NGN`, and `PLEDGED_CASH_EUR`.
 
 The response separates current and projected state with fields such as `current_outstanding_balance`, `current_available_credit`, `projected_outstanding_balance`, `projected_loan_balance`, `projected_available_credit`, and `projected_margin_state`.
 
@@ -114,7 +116,7 @@ Submit current holdings, current outstanding balance, market data, and proposed 
 - `repayment`
 - `credit_draw`
 
-The engine projects the post-action portfolio and loan balance. Its response includes `current_outstanding_balance` and `current_available_credit` alongside legacy aliases `outstanding_balance` and `available_credit`. It only approves the action when projected stressed liquidation value remains above projected loan balance plus the dynamic safety requirement. Otherwise it returns one of:
+The legacy route is retained for existing integrations and now rejects buy actions that do not include an explicit draw or funding source. The engine projects the post-action portfolio and loan balance. Its response includes `current_outstanding_balance` and `current_available_credit` alongside legacy aliases `outstanding_balance` and `available_credit`. It only approves the action when projected stressed liquidation value remains above projected loan balance plus the dynamic safety requirement. Otherwise it returns one of:
 
 - `reject`
 - `require_repayment`

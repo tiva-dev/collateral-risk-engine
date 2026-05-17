@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+
+from pathlib import Path
 
 from app.api.routes import check_portfolio_action
 from app.api.schemas import PortfolioActionCheckRequest
@@ -14,7 +18,8 @@ from app.core.models import (
     Policy,
     PortfolioActionCheck,
 )
-from app.lifecycle.service import CreditLifecycleEngine
+from app.audit.logger import AuditLogger
+from app.lifecycle.service import CreditLifecycleEngine, pledged_cash_asset_id
 
 
 class PortfolioActionControlsTests(unittest.TestCase):
@@ -106,9 +111,9 @@ class PortfolioActionControlsTests(unittest.TestCase):
         self.assertEqual(result.projected_margin_state, MarginState.LIQUIDATION)
         self.assertGreater(result.required_repayment_amount, 0.0)
 
-    def test_buy_safer_asset_can_be_approved(self) -> None:
+    def test_buy_with_enough_pledged_cash_is_approved(self) -> None:
         result = self.check(
-            self.account(loan_principal=1_000.0),
+            self.account(loan_principal=0.0, pledged_cash=1_500.0),
             PortfolioActionCheck(
                 PortfolioActionType.BUY,
                 asset_id="BND",
@@ -119,6 +124,51 @@ class PortfolioActionControlsTests(unittest.TestCase):
 
         self.assertEqual(result.decision, RiskDecision.APPROVE)
         self.assertEqual(result.projected_margin_state, MarginState.SAFE)
+        self.assertEqual(result.projected_account_state.pledged_cash_balance, 500.0)
+
+    def test_buy_without_enough_pledged_cash_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "buy action requires sufficient pledged cash"
+        ):
+            self.check(
+                self.account(loan_principal=1_000.0, pledged_cash=100.0),
+                PortfolioActionCheck(
+                    PortfolioActionType.BUY,
+                    asset_id="BND",
+                    asset_type=AssetType.BOND,
+                    quantity=10.0,
+                ),
+            )
+
+    def test_buy_with_explicit_draw_funding_is_projected(self) -> None:
+        result = self.check(
+            self.account(loan_principal=1_000.0, pledged_cash=100.0),
+            PortfolioActionCheck(
+                PortfolioActionType.BUY,
+                asset_id="BND",
+                asset_type=AssetType.BOND,
+                quantity=10.0,
+                funding_source="draw",
+            ),
+        )
+
+        self.assertEqual(result.projected_loan_balance, 1_900.0)
+        self.assertEqual(result.projected_account_state.pledged_cash_balance, 0.0)
+
+    def test_buy_with_external_cash_funding_is_supported(self) -> None:
+        result = self.check(
+            self.account(loan_principal=1_000.0, pledged_cash=100.0),
+            PortfolioActionCheck(
+                PortfolioActionType.BUY,
+                asset_id="BND",
+                asset_type=AssetType.BOND,
+                quantity=10.0,
+                funding_source="external_cash",
+            ),
+        )
+
+        self.assertEqual(result.projected_loan_balance, 1_000.0)
+        self.assertEqual(result.projected_account_state.pledged_cash_balance, 0.0)
 
     def test_buy_riskier_asset_reduces_available_credit_when_safe(self) -> None:
         result = self.check(
@@ -247,6 +297,110 @@ class PortfolioActionControlsTests(unittest.TestCase):
         self.assertEqual(response.result.projected_outstanding_balance, 2_500.0)
         self.assertEqual(response.result.projected_loan_balance, 2_500.0)
         self.assertEqual(response.result.projected_margin_state, MarginState.SAFE)
+
+    def test_projection_keeps_same_asset_id_with_different_asset_type_separate(
+        self,
+    ) -> None:
+        account = AccountState(
+            account_ref="acct_identity",
+            holdings=[
+                Holding("DUP", AssetType.ETF, 10.0),
+                Holding("DUP", AssetType.LISTED_EQUITY, 5.0),
+            ],
+            pledged_cash_balance=0.0,
+            loan=Loan(principal=100.0),
+            approved_credit_limit=0.0,
+            available_credit=0.0,
+            last_margin_state=MarginState.SAFE,
+        )
+        market_data = {
+            **self.market_data,
+            "DUP": MarketData(
+                asset_id="DUP",
+                last_price=100.0,
+                bid=99.0,
+                ask=101.0,
+                average_daily_volume=1_000_000,
+                average_dollar_volume=100_000_000,
+                volatility_30d=0.15,
+                volatility_90d=0.15,
+                data_quality_score=1.0,
+            ),
+        }
+
+        result = self.lifecycle.check_portfolio_action(
+            account,
+            PortfolioActionCheck(
+                PortfolioActionType.WITHDRAW_SECURITY,
+                asset_id="DUP",
+                asset_type=AssetType.ETF,
+                quantity=3.0,
+            ),
+            self.policy,
+            market_data,
+        )
+
+        quantities = {
+            (holding.asset_id, holding.asset_type, holding.currency): holding.quantity
+            for holding in result.projected_account_state.holdings
+        }
+        self.assertEqual(quantities[("DUP", AssetType.ETF, "USD")], 7.0)
+        self.assertEqual(quantities[("DUP", AssetType.LISTED_EQUITY, "USD")], 5.0)
+
+    def test_non_usd_pledged_cash_uses_currency_specific_asset_id(self) -> None:
+        account = AccountState(
+            account_ref="acct_ngn_cash",
+            holdings=[],
+            pledged_cash_balance=500_000.0,
+            loan=Loan(principal=10_000.0, currency="NGN"),
+            approved_credit_limit=0.0,
+            available_credit=0.0,
+            last_margin_state=MarginState.SAFE,
+        )
+
+        result = self.lifecycle.check_portfolio_action(
+            account,
+            PortfolioActionCheck(PortfolioActionType.WITHDRAW_CASH, amount=100_000.0),
+            self.policy,
+            {},
+        )
+
+        cash_asset_id = pledged_cash_asset_id("NGN")
+        evaluation_ids = {
+            asset.asset_id for asset in result.evaluation_result.asset_results
+        }
+        self.assertIn(cash_asset_id, evaluation_ids)
+        self.assertEqual(result.projected_account_state.pledged_cash_balance, 400_000.0)
+
+    def test_invalid_action_writes_audit_record_before_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audit_path = Path(temp_dir) / "audit.jsonl"
+            lifecycle = CreditLifecycleEngine(
+                CollateralRiskEngine(audit_logger=AuditLogger(audit_path)),
+                audit_logger=AuditLogger(audit_path),
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "security action requires asset_id"
+            ):
+                lifecycle.check_portfolio_action(
+                    self.account(),
+                    PortfolioActionCheck(
+                        PortfolioActionType.WITHDRAW_SECURITY, quantity=1.0
+                    ),
+                    self.policy,
+                    self.market_data,
+                )
+
+            records = [json.loads(line) for line in audit_path.read_text().splitlines()]
+            rejected = [
+                record
+                for record in records
+                if record.get("event_type") == "portfolio_action_check_rejected"
+            ]
+            self.assertEqual(len(rejected), 1)
+            self.assertEqual(rejected[0]["decision"], "reject")
+            self.assertIn("security action requires asset_id", rejected[0]["reason"])
 
 
 if __name__ == "__main__":

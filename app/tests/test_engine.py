@@ -5,7 +5,15 @@ from dataclasses import replace
 
 from app.core.enums import AssetType, MarginState, PortfolioActionType, RiskDecision
 from app.core.evaluator import CollateralRiskEngine
-from app.core.models import Holding, Loan, MarketData, OrderBook, OrderBookLevel, Policy, PortfolioAction
+from app.core.models import (
+    Holding,
+    Loan,
+    MarketData,
+    OrderBook,
+    OrderBookLevel,
+    Policy,
+    PortfolioAction,
+)
 from app.market_data.mock_provider import MockMarketDataProvider
 
 
@@ -21,7 +29,9 @@ class CollateralRiskEngineTests(unittest.TestCase):
             Holding("SPY", AssetType.ETF, 10),
         ]
         market = self.provider.get_snapshot([h.asset_id for h in holdings])
-        result = self.engine.evaluate("acct_1", holdings, Loan(principal=1_000), self.policy, market)
+        result = self.engine.evaluate(
+            "acct_1", holdings, Loan(principal=1_000), self.policy, market
+        )
         self.assertGreater(result.approved_credit_limit, 0)
         self.assertIn(result.margin_state, {MarginState.SAFE, MarginState.WATCH})
         self.assertGreater(result.recovery_coverage_ratio or 0, 1.0)
@@ -29,7 +39,9 @@ class CollateralRiskEngineTests(unittest.TestCase):
     def test_volatile_concentrated_asset_has_lower_effective_ltv(self) -> None:
         holdings = [Holding("NVDA", AssetType.HIGH_VOLATILITY_EQUITY, 10)]
         market = self.provider.get_snapshot(["NVDA"])
-        result = self.engine.evaluate("acct_2", holdings, Loan(principal=500), self.policy, market)
+        result = self.engine.evaluate(
+            "acct_2", holdings, Loan(principal=500), self.policy, market
+        )
         nvda = result.asset_results[0]
         self.assertLess(nvda.effective_ltv, nvda.base_ltv)
         self.assertIn("volatility", nvda.risk_drivers)
@@ -53,9 +65,15 @@ class CollateralRiskEngineTests(unittest.TestCase):
             order_book=OrderBook(bids=[OrderBookLevel(price=9.50, quantity=100)]),
         )
         holding = Holding("XYZ", AssetType.LISTED_EQUITY, 1_000)
-        rich = self.engine.evaluate("acct_3a", [holding], Loan(principal=1), self.policy, {"XYZ": rich_book})
-        thin = self.engine.evaluate("acct_3b", [holding], Loan(principal=1), self.policy, {"XYZ": thin_book})
-        self.assertLess(thin.stressed_liquidation_value, rich.stressed_liquidation_value)
+        rich = self.engine.evaluate(
+            "acct_3a", [holding], Loan(principal=1), self.policy, {"XYZ": rich_book}
+        )
+        thin = self.engine.evaluate(
+            "acct_3b", [holding], Loan(principal=1), self.policy, {"XYZ": thin_book}
+        )
+        self.assertLess(
+            thin.stressed_liquidation_value, rich.stressed_liquidation_value
+        )
 
     def test_halted_asset_zero_lendable_value(self) -> None:
         holding = Holding("HALT", AssetType.LISTED_EQUITY, 100)
@@ -70,19 +88,29 @@ class CollateralRiskEngineTests(unittest.TestCase):
                 halted=True,
             )
         }
-        result = self.engine.evaluate("acct_4", [holding], Loan(principal=100), self.policy, market)
+        result = self.engine.evaluate(
+            "acct_4", [holding], Loan(principal=100), self.policy, market
+        )
         self.assertEqual(result.asset_results[0].lendable_value, 0.0)
         self.assertEqual(result.asset_results[0].stressed_liquidation_value, 0.0)
         self.assertEqual(result.margin_state, MarginState.LIQUIDATION)
 
-    def test_loan_above_dynamic_credit_limit_triggers_margin_call_or_liquidation(self) -> None:
+    def test_loan_above_dynamic_credit_limit_triggers_margin_call_or_liquidation(
+        self,
+    ) -> None:
         holdings = [Holding("THIN", AssetType.HIGH_VOLATILITY_EQUITY, 500)]
         market = self.provider.get_snapshot(["THIN"])
-        result = self.engine.evaluate("acct_5", holdings, Loan(principal=3_000), self.policy, market)
-        self.assertIn(result.margin_state, {MarginState.MARGIN_CALL, MarginState.LIQUIDATION})
+        result = self.engine.evaluate(
+            "acct_5", holdings, Loan(principal=3_000), self.policy, market
+        )
+        self.assertIn(
+            result.margin_state, {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}
+        )
         self.assertGreaterEqual(result.trigger_levels.required_cure_amount, 0.0)
 
-    def test_origination_separates_requested_draw_from_zero_outstanding_balance(self) -> None:
+    def test_origination_separates_requested_draw_from_zero_outstanding_balance(
+        self,
+    ) -> None:
         holdings = [
             Holding("AAPL", AssetType.LISTED_EQUITY, 10),
             Holding("SPY", AssetType.ETF, 10),
@@ -101,7 +129,10 @@ class CollateralRiskEngineTests(unittest.TestCase):
         self.assertEqual(result.requested_draw_amount, 1_000.0)
         self.assertEqual(result.projected_loan_balance, 1_000.0)
         self.assertEqual(result.available_credit, result.approved_credit_limit)
-        self.assertEqual(result.projected_available_credit, max(0.0, result.approved_credit_limit - 1_000.0))
+        self.assertEqual(
+            result.projected_available_credit,
+            max(0.0, result.approved_credit_limit - 1_000.0),
+        )
         self.assertGreater(result.dynamic_safety_requirement, 0.0)
 
     def test_active_monitoring_keeps_outstanding_balance_explicit(self) -> None:
@@ -110,18 +141,24 @@ class CollateralRiskEngineTests(unittest.TestCase):
             Holding("SPY", AssetType.ETF, 10),
         ]
         market = self.provider.get_snapshot([h.asset_id for h in holdings])
-        result = self.engine.evaluate("acct_monitor", holdings, Loan(principal=1_000), self.policy, market)
+        result = self.engine.evaluate(
+            "acct_monitor", holdings, Loan(principal=1_000), self.policy, market
+        )
 
         self.assertEqual(result.outstanding_balance, 1_000.0)
         self.assertEqual(result.requested_draw_amount, 0.0)
         self.assertEqual(result.projected_loan_balance, 1_000.0)
         self.assertEqual(result.loan_balance, result.projected_loan_balance)
-        self.assertEqual(result.available_credit, max(0.0, result.approved_credit_limit - 1_000.0))
+        self.assertEqual(
+            result.available_credit, max(0.0, result.approved_credit_limit - 1_000.0)
+        )
 
     def test_pre_trade_credit_draw_above_available_credit_is_reduced(self) -> None:
         holdings = [Holding("AAPL", AssetType.LISTED_EQUITY, 10)]
         market = self.provider.get_snapshot(["AAPL"])
-        baseline = self.engine.evaluate("acct_draw", holdings, Loan(principal=0), self.policy, market)
+        baseline = self.engine.evaluate(
+            "acct_draw", holdings, Loan(principal=0), self.policy, market
+        )
         result = self.engine.pre_trade_check(
             account_ref="acct_draw",
             holdings=holdings,
@@ -171,12 +208,126 @@ class CollateralRiskEngineTests(unittest.TestCase):
             loan=Loan(principal=3_000),
             policy=self.policy,
             market_data=market,
-            actions=[PortfolioAction(action_type=PortfolioActionType.REPAYMENT, amount=3_000)],
+            actions=[
+                PortfolioAction(action_type=PortfolioActionType.REPAYMENT, amount=3_000)
+            ],
         )
 
         self.assertTrue(result.approved)
         self.assertEqual(result.decision, RiskDecision.APPROVE)
         self.assertEqual(result.projected_loan_balance, 0.0)
+
+    def test_legacy_pre_trade_buy_without_explicit_funding_is_rejected(self) -> None:
+        holdings = [Holding("AAPL", AssetType.LISTED_EQUITY, 10)]
+        market = {
+            **self.provider.get_snapshot(["AAPL"]),
+            "BND": MarketData(
+                asset_id="BND",
+                last_price=100.0,
+                bid=99.0,
+                ask=101.0,
+                average_daily_volume=1_000_000,
+                average_dollar_volume=100_000_000,
+                volatility_30d=0.05,
+                volatility_90d=0.05,
+                data_quality_score=1.0,
+            ),
+        }
+        result = self.engine.pre_trade_check(
+            account_ref="acct_legacy_unfunded_buy",
+            holdings=holdings,
+            loan=Loan(principal=0),
+            policy=self.policy,
+            market_data=market,
+            actions=[
+                PortfolioAction(
+                    action_type=PortfolioActionType.BUY,
+                    asset_id="BND",
+                    asset_type=AssetType.BOND,
+                    quantity=1.0,
+                )
+            ],
+        )
+
+        self.assertEqual(result.decision, RiskDecision.REJECT)
+        self.assertIn("buy action requires", result.reason)
+
+    def test_legacy_pre_trade_buy_with_credit_draw_is_supported(self) -> None:
+        holdings = [Holding("AAPL", AssetType.LISTED_EQUITY, 10)]
+        market = {
+            **self.provider.get_snapshot(["AAPL"]),
+            "BND": MarketData(
+                asset_id="BND",
+                last_price=100.0,
+                bid=99.0,
+                ask=101.0,
+                average_daily_volume=1_000_000,
+                average_dollar_volume=100_000_000,
+                volatility_30d=0.05,
+                volatility_90d=0.05,
+                data_quality_score=1.0,
+            ),
+        }
+        result = self.engine.pre_trade_check(
+            account_ref="acct_legacy_funded_buy",
+            holdings=holdings,
+            loan=Loan(principal=0),
+            policy=self.policy,
+            market_data=market,
+            actions=[
+                PortfolioAction(
+                    action_type=PortfolioActionType.CREDIT_DRAW, amount=200.0
+                ),
+                PortfolioAction(
+                    action_type=PortfolioActionType.BUY,
+                    asset_id="BND",
+                    asset_type=AssetType.BOND,
+                    quantity=1.0,
+                ),
+            ],
+        )
+
+        self.assertNotEqual(result.decision, RiskDecision.REJECT)
+        self.assertEqual(result.requested_draw_amount, 200.0)
+        self.assertIn(
+            "BND", {holding.asset_id for holding in result.projected_holdings}
+        )
+
+    def test_legacy_projection_keeps_same_asset_id_different_currency_separate(
+        self,
+    ) -> None:
+        holdings = [
+            Holding("CASHX", AssetType.CASH, 100.0, "USD"),
+            Holding("CASHX", AssetType.CASH, 200.0, "EUR"),
+        ]
+        market = {
+            "CASHX": MarketData(
+                asset_id="CASHX",
+                last_price=1.0,
+                bid=1.0,
+                ask=1.0,
+                volatility_30d=0.0,
+                volatility_90d=0.0,
+                data_quality_score=1.0,
+            )
+        }
+        result = self.engine.pre_trade_check(
+            account_ref="acct_legacy_identity",
+            holdings=holdings,
+            loan=Loan(principal=0),
+            policy=self.policy,
+            market_data=market,
+            actions=[
+                PortfolioAction(action_type=PortfolioActionType.REPAYMENT, amount=1.0)
+            ],
+        )
+
+        quantities = {
+            (holding.asset_id, holding.asset_type, holding.currency): holding.quantity
+            for holding in result.projected_holdings
+        }
+        self.assertEqual(quantities[("CASHX", AssetType.CASH, "USD")], 100.0)
+        self.assertEqual(quantities[("CASHX", AssetType.CASH, "EUR")], 200.0)
 
 
 if __name__ == "__main__":
