@@ -8,6 +8,7 @@ from app.core.enums import AssetType, LifecycleDecisionValue, MarginState
 from app.core.evaluator import CollateralRiskEngine
 from app.core.models import Holding, Loan, MarketData, OrderBook, OrderBookLevel, Policy
 from app.lifecycle.service import CreditLifecycleEngine, aggregate_holdings, apply_repayment
+from app.risk.math_utils import round_money
 
 
 class CreditLifecycleEngineTests(unittest.TestCase):
@@ -38,8 +39,15 @@ class CreditLifecycleEngineTests(unittest.TestCase):
         self.assertEqual(result.current_outstanding_balance, 0.0)
         self.assertEqual(result.projected_outstanding_balance, 0.0)
         self.assertGreater(result.approved_credit_limit, 0.0)
-        self.assertEqual(result.current_available_credit, result.approved_credit_limit)
-        self.assertEqual(result.projected_available_credit, result.approved_credit_limit)
+        safe_credit_limit = round_money(
+            min(
+                result.approved_credit_limit,
+                result.evaluation.stressed_liquidation_value
+                / max(result.evaluation.trigger_levels.dynamic_warning_coverage, 1e-9),
+            )
+        )
+        self.assertEqual(result.current_available_credit, safe_credit_limit)
+        self.assertEqual(result.projected_available_credit, safe_credit_limit)
         self.assertEqual(result.margin_state, MarginState.SAFE)
         self.assertEqual(result.projected_margin_state, MarginState.SAFE)
         self.assertEqual(result.required_cure_amount, 0.0)
@@ -61,7 +69,14 @@ class CreditLifecycleEngineTests(unittest.TestCase):
         self.assertEqual(result.decision, LifecycleDecisionValue.APPROVED)
         self.assertEqual(result.current_outstanding_balance, 1_000.0)
         self.assertEqual(result.projected_outstanding_balance, 2_000.0)
-        self.assertEqual(result.projected_available_credit, result.approved_credit_limit - 2_000.0)
+        projected_safe_credit_limit = round_money(
+            min(
+                result.approved_credit_limit,
+                result.evaluation.stressed_liquidation_value
+                / max(result.evaluation.trigger_levels.dynamic_warning_coverage, 1e-9),
+            )
+        )
+        self.assertEqual(result.projected_available_credit, max(0.0, projected_safe_credit_limit - 2_000.0))
         self.assertEqual(result.projected_margin_state, MarginState.SAFE)
         self.assertIsNone(result.max_approved_draw_amount)
 

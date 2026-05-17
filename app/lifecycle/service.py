@@ -41,17 +41,20 @@ class CreditLifecycleEngine:
             policy=policy,
             market_data=market_data,
         )
+        safe_credit_limit = self._safe_credit_limit(evaluation)
+        safe_available_credit = round_money(max(0.0, safe_credit_limit))
         audit_id = self._write_lifecycle_audit(
             event_type="origination",
             account_ref=account_ref,
             payload={
                 "decision": LifecycleDecisionValue.APPROVED.value,
                 "current_outstanding_balance": 0.0,
-                "current_available_credit": evaluation.available_credit,
+                "current_available_credit": safe_available_credit,
                 "projected_outstanding_balance": 0.0,
-                "projected_available_credit": evaluation.available_credit,
+                "projected_available_credit": safe_available_credit,
                 "projected_margin_state": MarginState.SAFE.value,
                 "approved_credit_limit": evaluation.approved_credit_limit,
+                "safe_credit_limit": safe_credit_limit,
                 "minimum_stressed_liquidation_value": evaluation.minimum_stressed_liquidation_value,
                 "risk_evaluation_audit_id": evaluation.audit_id,
             },
@@ -60,9 +63,9 @@ class CreditLifecycleEngine:
             decision=LifecycleDecisionValue.APPROVED,
             reason="zero outstanding balance credit line originated from current collateral limit",
             current_outstanding_balance=0.0,
-            current_available_credit=evaluation.available_credit,
+            current_available_credit=safe_available_credit,
             projected_outstanding_balance=0.0,
-            projected_available_credit=evaluation.available_credit,
+            projected_available_credit=safe_available_credit,
             projected_margin_state=MarginState.SAFE,
             approved_credit_limit=evaluation.approved_credit_limit,
             risk_adjusted_collateral_value=evaluation.risk_adjusted_collateral_value,
@@ -118,10 +121,12 @@ class CreditLifecycleEngine:
         )
 
         safe_credit_limit = self._safe_credit_limit(current_evaluation)
+        projected_safe_credit_limit = self._safe_credit_limit(projected_evaluation)
         outstanding_after_repayment = round_money(loan_after_repayment.balance)
         max_approved_draw = round_money(max(0.0, safe_credit_limit - outstanding_after_repayment))
         projected_outstanding_balance = projected_evaluation.loan_balance
-        projected_available_credit = projected_evaluation.available_credit
+        current_available_credit = round_money(max(0.0, safe_credit_limit - current_outstanding_balance))
+        projected_available_credit = round_money(max(0.0, projected_safe_credit_limit - projected_outstanding_balance))
 
         if requested_draw_amount <= max_approved_draw and projected_evaluation.margin_state == MarginState.SAFE:
             decision = LifecycleDecisionValue.APPROVED
@@ -143,7 +148,7 @@ class CreditLifecycleEngine:
                 "decision": decision.value,
                 "reason": reason,
                 "current_outstanding_balance": current_outstanding_balance,
-                "current_available_credit": current_evaluation.available_credit,
+                "current_available_credit": current_available_credit,
                 "projected_outstanding_balance": projected_outstanding_balance,
                 "projected_available_credit": projected_available_credit,
                 "projected_margin_state": projected_evaluation.margin_state.value,
@@ -153,6 +158,7 @@ class CreditLifecycleEngine:
                 "projected_loan": asdict(projected_loan),
                 "approved_credit_limit": current_evaluation.approved_credit_limit,
                 "safe_credit_limit": safe_credit_limit,
+                "projected_safe_credit_limit": projected_safe_credit_limit,
                 "minimum_stressed_liquidation_value": projected_evaluation.minimum_stressed_liquidation_value,
                 "max_approved_draw_amount": max_approved_draw_amount,
                 "risk_evaluation_audit_id": current_evaluation.audit_id,
@@ -163,7 +169,7 @@ class CreditLifecycleEngine:
             decision=decision,
             reason=reason,
             current_outstanding_balance=current_outstanding_balance,
-            current_available_credit=current_evaluation.available_credit,
+            current_available_credit=current_available_credit,
             projected_outstanding_balance=projected_outstanding_balance,
             projected_available_credit=projected_available_credit,
             projected_margin_state=projected_evaluation.margin_state,
