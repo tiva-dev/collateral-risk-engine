@@ -102,7 +102,8 @@ def normalize_quote(
     fx_rate: FXRate | None = None,
     fx_quality_score: float | None = None,
 ) -> NormalizedMarketData:
-    fx_rate_value = None if fx_rate is None or fx_rate.rate == 1.0 and quote.instrument.currency.upper() == loan_currency.upper() else fx_rate.rate
+    same_currency = quote.instrument.currency.upper() == loan_currency.upper()
+    fx_rate_value = None if fx_rate is None or same_currency else fx_rate.rate
     converted_price = quote.local_price if fx_rate_value is None else quote.local_price * fx_rate_value
     average_dollar_volume = quote.average_dollar_volume
     if average_dollar_volume is not None and fx_rate_value is not None:
