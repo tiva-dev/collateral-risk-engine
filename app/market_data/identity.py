@@ -24,13 +24,41 @@ class InstrumentIdentity:
         return f"{self.exchange.upper()}:{self.symbol.upper()}:{self.currency.upper()}"
 
     @staticmethod
+    def _parse_holding_asset_id(asset_id: str, fallback_currency: str) -> tuple[str, str, str]:
+        parts = asset_id.split(":")
+
+        if len(parts) == 3:
+            exchange, symbol, currency = parts
+        elif len(parts) == 2:
+            exchange, symbol = parts
+            currency = fallback_currency
+        elif len(parts) == 1:
+            exchange = "UNKNOWN"
+            symbol = parts[0]
+            currency = fallback_currency
+        else:
+            raise ValueError(
+                "holding.asset_id must be in 'EXCHANGE:SYMBOL[:CURRENCY]' format"
+            )
+
+        if not exchange and len(parts) > 1:
+            raise ValueError("holding.asset_id exchange segment cannot be empty")
+        if not symbol:
+            raise ValueError("holding.asset_id symbol segment cannot be empty")
+        if len(parts) == 3 and not currency:
+            raise ValueError("holding.asset_id currency segment cannot be empty")
+
+        return exchange, symbol, currency
+
+    @staticmethod
     def from_holding(holding: Holding) -> "InstrumentIdentity":
-        symbol = holding.asset_id.split(":")[1] if ":" in holding.asset_id else holding.asset_id
-        exchange = holding.asset_id.split(":")[0] if ":" in holding.asset_id else "UNKNOWN"
+        exchange, symbol, currency = InstrumentIdentity._parse_holding_asset_id(
+            holding.asset_id, holding.currency
+        )
         return InstrumentIdentity(
             asset_id=holding.asset_id,
             symbol=symbol,
             exchange=exchange,
-            currency=holding.currency,
+            currency=currency,
             asset_type=holding.asset_type,
         )
