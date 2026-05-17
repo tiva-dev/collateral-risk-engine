@@ -4,6 +4,7 @@ import unittest
 
 from app.api.routes import check_credit_draw, monitor_loan, originate_credit, pre_trade_check
 from app.api.schemas import DrawCheckRequest, MonitorRequest, OriginateRequest, PreTradeRiskCheckRequest
+from app.main import app
 from app.core.enums import LifecycleDecisionValue, RiskDecision
 
 
@@ -134,7 +135,15 @@ class LifecycleEndpointTests(unittest.TestCase):
             )
         )
         self.assertEqual(reduce_response.result.decision, RiskDecision.REDUCE_AVAILABLE_CREDIT)
-        self.assertEqual(reduce_response.result.reduced_available_credit, reduce_response.result.projected_available_credit)
+        self.assertEqual(reduce_response.result.current_outstanding_balance, 1_000.0)
+        self.assertEqual(
+            reduce_response.result.current_available_credit,
+            reduce_response.result.available_credit,
+        )
+        self.assertEqual(
+            reduce_response.result.reduced_available_credit,
+            reduce_response.result.projected_available_credit,
+        )
 
         approve_response = pre_trade_check(
             PreTradeRiskCheckRequest.model_validate(
@@ -150,6 +159,11 @@ class LifecycleEndpointTests(unittest.TestCase):
         )
         self.assertEqual(approve_response.result.decision, RiskDecision.APPROVE)
         self.assertIsNone(approve_response.result.reduced_available_credit)
+
+    def test_legacy_pre_trade_endpoint_is_marked_deprecated_in_openapi(self) -> None:
+        operation = app.openapi()["paths"]["/risk/pre-trade-check"]["post"]
+
+        self.assertTrue(operation["deprecated"])
 
 
 if __name__ == "__main__":

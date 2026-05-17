@@ -55,7 +55,11 @@ def evaluate_risk(request: EvaluateRequest) -> EvaluateResponse:
     return EvaluateResponse(result=jsonable_encoder(asdict(result)))
 
 
-@router.post("/risk/pre-trade-check", response_model=PreTradeRiskCheckResponse)
+@router.post(
+    "/risk/pre-trade-check",
+    response_model=PreTradeRiskCheckResponse,
+    deprecated=True,
+)
 def pre_trade_check(request: PreTradeRiskCheckRequest) -> PreTradeRiskCheckResponse:
     try:
         result = engine.pre_trade_check(

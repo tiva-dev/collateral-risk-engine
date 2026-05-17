@@ -188,9 +188,15 @@ class CreditLifecycleEngineTests(unittest.TestCase):
         readme = Path("README.md").read_text(encoding="utf-8")
 
         self.assertIn("/risk/evaluate", readme)
+        self.assertIn("/portfolio/action/check", readme)
+        self.assertIn("preferred endpoint", readme)
+        self.assertIn("legacy endpoint", readme)
         self.assertIn("loan_balance", readme)
+        self.assertIn("current_outstanding_balance", readme)
+        self.assertIn("current_available_credit", readme)
         self.assertIn("outstanding_balance", readme)
         self.assertIn("minimum_stressed_liquidation_value", readme)
+        self.assertIn("withdrawal` is an alias for `withdraw_security", readme)
         self.assertIn("rejected", readme)
 
 

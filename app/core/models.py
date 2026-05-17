@@ -75,6 +75,9 @@ class PortfolioActionCheck:
 class PortfolioActionCheckResult:
     decision: RiskDecision
     reason: str
+    current_outstanding_balance: float
+    current_available_credit: float
+    projected_outstanding_balance: float
     projected_loan_balance: float
     projected_approved_credit_limit: float
     projected_available_credit: float
@@ -244,6 +247,8 @@ class PortfolioEvaluation:
     risk_adjusted_collateral_value: float
     approved_credit_limit: float
     stressed_liquidation_value: float
+    current_outstanding_balance: float
+    current_available_credit: float
     loan_balance: float
     outstanding_balance: float
     available_credit: float
@@ -269,6 +274,8 @@ class PreTradeRiskCheckResult:
     decision: RiskDecision
     approved: bool
     reason: str
+    current_outstanding_balance: float
+    current_available_credit: float
     outstanding_balance: float
     available_credit: float
     requested_draw_amount: float
