@@ -333,7 +333,14 @@ class FXPolicyIn(BaseModel):
     def to_domain(self):
         from app.market_data.policy import FXPolicy
 
-        return FXPolicy(**self.model_dump())
+        return FXPolicy(
+            preferred_source=self.preferred_source,
+            allow_fallback_provider=self.allow_fallback_provider,
+            max_fx_age_minutes=self.max_fx_age_minutes,
+            stale_fx_haircut=self.stale_fx_haircut,
+            use_conservative_rate_when_sources_disagree=self.use_conservative_rate_when_sources_disagree,
+            minimum_fx_quality_score=self.minimum_fx_quality_score,
+        )
 
 
 class MarketDataPolicyIn(BaseModel):
