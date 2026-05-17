@@ -73,7 +73,7 @@ class ProviderRouter:
             warnings.extend(quote_warnings or ["client_quote_below_quality_threshold"])
         if policy.allow_fallback_provider and provider_quote is not None:
             status = self._provider_market_status(instrument.exchange)
-            return provider_quote, status, [*warnings, "fallback_provider_quote_used"] if warnings else []
+            return provider_quote, status, [*warnings, "fallback_provider_quote_used"]
         status = self._market_status(instrument.exchange)
         return client_quote, status, warnings or ["missing_quote"]
 
