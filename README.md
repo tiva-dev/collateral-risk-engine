@@ -2,18 +2,21 @@
 
 Institution-grade first-pass engine for investment-backed lending.
 
-The engine calculates dynamic collateral value, effective LTV, margin state, stressed liquidation recovery, and liquidation recommendations from portfolio, loan, policy, and market data inputs. v0.2 adds credit lifecycle endpoints for origination, draw checks, and active monitoring without replacing the existing v0.1 evaluator.
+The engine calculates dynamic collateral value, effective LTV, margin state, stressed liquidation recovery, and liquidation recommendations from portfolio, loan, policy, and market data inputs. v0.2 also adds credit lifecycle endpoints for origination, draw checks, and active loan monitoring.
 
 ## What is included
 
 - Python risk engine
-- FastAPI endpoints: `POST /risk/evaluate`, `POST /risk/pre-trade-check`, `POST /credit/originate`, `POST /credit/draw/check`, and `POST /loan/monitor`
+- FastAPI endpoint: `POST /risk/evaluate`
+- Pre-trade risk check endpoint: `POST /risk/pre-trade-check`
+- Lifecycle endpoints: `POST /credit/originate`, `POST /credit/draw/check`, `POST /loan/monitor`
 - Dynamic LTV adjustments for volatility, liquidity, spread, concentration, stress, and data quality
+- Credit lifecycle fields for origination and monitoring
 - Recovery-based margin state calculation
 - Order-book-aware recovery estimate when depth is available
 - Proxy recovery estimate when order book data is unavailable
 - Liquidation recommendation engine
-- JSONL audit logging for risk evaluations and lifecycle events
+- JSONL audit logging
 - Simulation hooks and stress scenarios
 - Unit tests
 - Dockerfile
@@ -29,9 +32,7 @@ python -m app.examples.run_evaluation
 uvicorn app.main:app --reload
 ```
 
-## API contract and terminology
-
-### Backward-compatible risk evaluation
+## API example
 
 ```http
 POST /risk/evaluate
@@ -45,14 +46,19 @@ The payload contains:
 - `holdings`
 - `market_data`
 
-The `/risk/evaluate` response remains backward compatible and continues to use the v0.1 `loan_balance` field. It also returns:
+The response contains:
 
 - `approved_credit_limit`
+- `loan_balance`
+- `outstanding_balance`
+- `available_credit`
+- `requested_draw_amount`
+- `projected_loan_balance`
+- `projected_available_credit`
 - `risk_adjusted_collateral_value`
 - `stressed_liquidation_value`
+- `dynamic_safety_requirement`
 - `minimum_stressed_liquidation_value`
-- `loan_balance`
-- `available_credit`
 - `recovery_coverage_ratio`
 - `margin_state`
 - `trigger_levels`
@@ -60,45 +66,30 @@ The `/risk/evaluate` response remains backward compatible and continues to use t
 - `liquidation_plan`
 - `audit_id`
 
-`minimum_stressed_liquidation_value` is the minimum stressed liquidation value required to satisfy the dynamic safety requirement. It is calculated from the evaluated balance and the dynamic warning coverage threshold.
+## Pre-trade check
 
-### Pre-trade risk check
+```http
+POST /risk/pre-trade-check
+```
 
-`POST /risk/pre-trade-check` is retained for portfolio-control workflows. It evaluates projected holdings and optional draw/repayment changes before an action proceeds. The response uses explicit current/projected fields: `current_outstanding_balance`, `current_available_credit`, `projected_outstanding_balance`, `projected_available_credit`, and `projected_margin_state`. The pre-trade decision enum is `approve`, `reject`, or `reduce_available_credit`. `RiskDecision.REJECT` (`reject`) means the action is invalid or unsafe and must not proceed. `reduced_available_credit` is only populated when the decision is `reduce_available_credit`; otherwise it is null.
+Submit current holdings, current outstanding balance, market data, and proposed actions. Supported action types are:
 
-Pre-trade holding changes are aggregated with existing holdings by `asset_id + asset_type + currency`, and duplicate quantities are summed.
+- `buy`
+- `sell`
+- `withdrawal`
+- `transfer`
+- `repayment`
+- `credit_draw`
 
-### Credit lifecycle endpoints
+The engine projects the post-action portfolio and loan balance. It only approves the action when projected stressed liquidation value remains above projected loan balance plus the dynamic safety requirement. Otherwise it returns one of:
 
-Lifecycle endpoints use `outstanding_balance` terminology at the top level instead of `loan_balance`:
-
-- `POST /credit/originate` evaluates a zero-outstanding-balance credit line and returns the approved limit, current/projected outstanding balances, current/projected available credit, collateral values, asset results, margin state, and `audit_id`.
-- `POST /credit/draw/check` evaluates requested draw activity, optional repayment activity, projected outstanding balance, projected available credit, and projected margin state before the action proceeds.
-- `POST /loan/monitor` evaluates an active loan using principal + accrued interest + fees as the current outstanding balance and returns the current/projected margin state, required cure amount, and liquidation recommendation where applicable.
-
-Lifecycle responses include these explicit pre-trade/projected fields:
-
-- `current_outstanding_balance`
-- `current_available_credit`
-- `projected_outstanding_balance`
-- `projected_available_credit`
-- `projected_margin_state`
-- `minimum_stressed_liquidation_value`
-
-Lifecycle decision values are:
-
-- `approved`
-- `partially_approved`
-- `rejected`
-- `safe`
-- `watch`
-- `restrict_new_borrowing`
+- `reject`
+- `require_repayment`
+- `reduce_available_credit`
 - `margin_call`
 - `liquidation`
 
-`rejected` means an unsafe requested action must not proceed. `reduced_available_credit` is not returned for lifecycle projected-state reporting; lifecycle projected state uses `projected_available_credit`.
-
-For draw checks with repayment, repayment is allocated to fees first, then accrued interest, then principal. Remaining principal, accrued interest, and fees are preserved separately in the projected loan fields.
+Lifecycle draw-check decisions include `approved`, `partially_approved`, or `rejected`.
 
 ## Design principle
 

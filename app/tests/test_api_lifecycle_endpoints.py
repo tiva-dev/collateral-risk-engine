@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from app.api.routes import check_credit_draw, monitor_loan, originate_credit, pre_trade_check
-from app.api.schemas import DrawCheckRequest, MonitorRequest, OriginateRequest, PreTradeCheckRequest
+from app.api.schemas import DrawCheckRequest, MonitorRequest, OriginateRequest, PreTradeRiskCheckRequest
 from app.core.enums import LifecycleDecisionValue, RiskDecision
 
 
@@ -103,33 +103,32 @@ class LifecycleEndpointTests(unittest.TestCase):
 
     def test_pre_trade_endpoint_reject_and_reduced_available_credit_contract(self) -> None:
         reject_response = pre_trade_check(
-            PreTradeCheckRequest.model_validate(
+            PreTradeRiskCheckRequest.model_validate(
                 {
                     "account_ref": "acct_api_pretrade_reject",
                     "loan": {"principal": 1_000.0, "accrued_interest": 0.0, "fees": 0.0},
                     "policy": policy_payload(),
                     "holdings": holdings_payload(),
                     "market_data": market_payload(),
-                    "proposed_holding_changes": [
-                        {"asset_id": "SPY", "asset_type": "etf", "quantity": -200.0, "currency": "USD"}
+                    "actions": [
+                        {"action_type": "withdrawal", "asset_id": "SPY", "quantity": 200.0},
                     ],
                 }
             )
         )
         self.assertEqual(reject_response.result.decision, RiskDecision.REJECT)
-        self.assertIsNone(reject_response.result.reduced_available_credit)
-        self.assertIsNone(reject_response.result.projected_available_credit)
+        self.assertGreater(reject_response.result.required_repayment_amount, 0.0)
 
         reduce_response = pre_trade_check(
-            PreTradeCheckRequest.model_validate(
+            PreTradeRiskCheckRequest.model_validate(
                 {
                     "account_ref": "acct_api_pretrade_reduce",
                     "loan": {"principal": 1_000.0, "accrued_interest": 0.0, "fees": 0.0},
                     "policy": policy_payload(),
                     "holdings": holdings_payload(),
                     "market_data": market_payload(),
-                    "proposed_holding_changes": [
-                        {"asset_id": "SPY", "asset_type": "etf", "quantity": -10.0, "currency": "USD"}
+                    "actions": [
+                        {"action_type": "credit_draw", "amount": 5_000.0},
                     ],
                 }
             )
@@ -138,14 +137,14 @@ class LifecycleEndpointTests(unittest.TestCase):
         self.assertEqual(reduce_response.result.reduced_available_credit, reduce_response.result.projected_available_credit)
 
         approve_response = pre_trade_check(
-            PreTradeCheckRequest.model_validate(
+            PreTradeRiskCheckRequest.model_validate(
                 {
                     "account_ref": "acct_api_pretrade_approve",
                     "loan": {"principal": 1_000.0, "accrued_interest": 0.0, "fees": 0.0},
                     "policy": policy_payload(),
                     "holdings": holdings_payload(),
                     "market_data": market_payload(),
-                    "proposed_holding_changes": [],
+                    "actions": [{"action_type": "repayment", "amount": 1_000.0}],
                 }
             )
         )

@@ -5,7 +5,15 @@ from typing import Any
 
 from pydantic import AliasChoices, BaseModel, Field
 
-from app.core.enums import AssetType, LifecycleDecisionValue, MarginState, RiskAppetite, RiskDecision
+from app.core.enums import (
+    AssetType,
+    LifecycleDecisionValue,
+    MarginState,
+    PortfolioActionType,
+    RiskAppetite,
+    RiskDecision,
+    TransferDirection,
+)
 from app.core.models import (
     Holding,
     Loan,
@@ -13,6 +21,7 @@ from app.core.models import (
     OrderBook,
     OrderBookLevel,
     Policy,
+    PortfolioAction,
 )
 
 
@@ -43,6 +52,25 @@ class LoanIn(BaseModel):
             accrued_interest=self.accrued_interest,
             fees=self.fees,
             currency=self.currency,
+        )
+
+
+class PortfolioActionIn(BaseModel):
+    action_type: PortfolioActionType
+    asset_id: str | None = None
+    asset_type: AssetType | None = None
+    quantity: float = 0.0
+    amount: float = 0.0
+    direction: TransferDirection = TransferDirection.OUT
+
+    def to_domain(self) -> PortfolioAction:
+        return PortfolioAction(
+            action_type=self.action_type,
+            asset_id=self.asset_id,
+            asset_type=self.asset_type,
+            quantity=self.quantity,
+            amount=self.amount,
+            direction=self.direction,
         )
 
 
@@ -125,12 +153,26 @@ class PolicyIn(BaseModel):
 class EvaluateRequest(BaseModel):
     account_ref: str
     loan: LoanIn
+    requested_draw_amount: float = 0.0
     policy: PolicyIn
     holdings: list[HoldingIn]
     market_data: dict[str, MarketDataIn]
 
 
 class EvaluateResponse(BaseModel):
+    result: dict[str, Any]
+
+
+class PreTradeRiskCheckRequest(BaseModel):
+    account_ref: str
+    loan: LoanIn
+    policy: PolicyIn
+    holdings: list[HoldingIn]
+    market_data: dict[str, MarketDataIn]
+    actions: list[PortfolioActionIn]
+
+
+class PreTradeRiskCheckResponse(BaseModel):
     result: dict[str, Any]
 
 
