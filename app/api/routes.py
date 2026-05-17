@@ -13,6 +13,8 @@ from app.api.schemas import (
     LifecycleResponse,
     MonitorRequest,
     OriginateRequest,
+    PreTradeCheckRequest,
+    PreTradeResponse,
 )
 from app.audit.logger import AuditLogger
 from app.core.evaluator import CollateralRiskEngine, RiskEvaluationError
@@ -48,6 +50,25 @@ def evaluate_risk(request: EvaluateRequest) -> EvaluateResponse:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return EvaluateResponse(result=jsonable_encoder(asdict(result)))
+
+
+@router.post("/risk/pre-trade-check", response_model=PreTradeResponse)
+def pre_trade_check(request: PreTradeCheckRequest) -> PreTradeResponse:
+    try:
+        result = lifecycle_engine.pre_trade_check(
+            account_ref=request.account_ref,
+            loan=request.loan.to_domain(),
+            holdings=[holding.to_domain() for holding in request.holdings],
+            proposed_holding_changes=[holding.to_domain() for holding in request.proposed_holding_changes],
+            requested_draw_amount=request.requested_draw_amount,
+            requested_repayment_amount=request.requested_repayment_amount,
+            policy=request.policy.to_domain(),
+            market_data={k: v.to_domain() for k, v in request.market_data.items()},
+        )
+    except RiskEvaluationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return PreTradeResponse(result=jsonable_encoder(asdict(result)))
 
 
 @router.post("/credit/originate", response_model=LifecycleResponse)

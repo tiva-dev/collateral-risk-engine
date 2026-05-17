@@ -129,3 +129,8 @@ Core performance metrics:
 The lifecycle layer reuses the existing evaluator for origination, draw checks, and monitoring. Lifecycle top-level response fields use `outstanding_balance` terminology and include `current_available_credit`, `projected_available_credit`, and `projected_margin_state` so projected values are not mixed with current fields. Draw decisions use the enum values `approved`, `partially_approved`, and `rejected`; monitoring decisions use the margin-state values `safe`, `watch`, `restrict_new_borrowing`, `margin_call`, and `liquidation`.
 
 For repayment included in a draw check, cash is applied to fees first, then accrued interest, then principal. Remaining principal, accrued interest, and fees are preserved separately in the projected loan.
+
+
+## Pre-trade check
+
+`POST /risk/pre-trade-check` is retained as the portfolio-control pre-check endpoint. It projects holding changes using the stable aggregation key `asset_id + asset_type + currency`, applies optional repayment in fees / accrued interest / principal order, then reuses the evaluator on the projected portfolio. `RiskDecision.REJECT` is returned for invalid or unsafe actions that must not proceed. `reduced_available_credit` is only populated when the decision is `reduce_available_credit`; otherwise projected state is reported with `projected_available_credit`.

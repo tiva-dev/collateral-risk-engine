@@ -7,7 +7,7 @@ The engine calculates dynamic collateral value, effective LTV, margin state, str
 ## What is included
 
 - Python risk engine
-- FastAPI endpoints: `POST /risk/evaluate`, `POST /credit/originate`, `POST /credit/draw/check`, and `POST /loan/monitor`
+- FastAPI endpoints: `POST /risk/evaluate`, `POST /risk/pre-trade-check`, `POST /credit/originate`, `POST /credit/draw/check`, and `POST /loan/monitor`
 - Dynamic LTV adjustments for volatility, liquidity, spread, concentration, stress, and data quality
 - Recovery-based margin state calculation
 - Order-book-aware recovery estimate when depth is available
@@ -62,6 +62,12 @@ The `/risk/evaluate` response remains backward compatible and continues to use t
 
 `minimum_stressed_liquidation_value` is the minimum stressed liquidation value required to satisfy the dynamic safety requirement. It is calculated from the evaluated balance and the dynamic warning coverage threshold.
 
+### Pre-trade risk check
+
+`POST /risk/pre-trade-check` is retained for portfolio-control workflows. It evaluates projected holdings and optional draw/repayment changes before an action proceeds. The response uses explicit current/projected fields: `current_outstanding_balance`, `current_available_credit`, `projected_outstanding_balance`, `projected_available_credit`, and `projected_margin_state`. The pre-trade decision enum is `approve`, `reject`, or `reduce_available_credit`. `RiskDecision.REJECT` (`reject`) means the action is invalid or unsafe and must not proceed. `reduced_available_credit` is only populated when the decision is `reduce_available_credit`; otherwise it is null.
+
+Pre-trade holding changes are aggregated with existing holdings by `asset_id + asset_type + currency`, and duplicate quantities are summed.
+
 ### Credit lifecycle endpoints
 
 Lifecycle endpoints use `outstanding_balance` terminology at the top level instead of `loan_balance`:
@@ -89,9 +95,8 @@ Lifecycle decision values are:
 - `restrict_new_borrowing`
 - `margin_call`
 - `liquidation`
-- `reduce_available_credit`
 
-`rejected` means an unsafe requested action must not proceed. `reduced_available_credit` is not returned for general projected-state reporting; projected state uses `projected_available_credit`.
+`rejected` means an unsafe requested action must not proceed. `reduced_available_credit` is not returned for lifecycle projected-state reporting; lifecycle projected state uses `projected_available_credit`.
 
 For draw checks with repayment, repayment is allocated to fees first, then accrued interest, then principal. Remaining principal, accrued interest, and fees are preserved separately in the projected loan fields.
 

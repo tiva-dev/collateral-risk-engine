@@ -28,6 +28,12 @@ class MarginState(str, Enum):
     LIQUIDATION = "liquidation"
 
 
+class RiskDecision(str, Enum):
+    APPROVE = "approve"
+    REJECT = "reject"
+    REDUCE_AVAILABLE_CREDIT = "reduce_available_credit"
+
+
 class LifecycleDecisionValue(str, Enum):
     APPROVED = "approved"
     PARTIALLY_APPROVED = "partially_approved"
