@@ -187,7 +187,7 @@ class MockFXProvider(BaseProvider):
     def get_fx_rate(self, from_currency: str, to_currency: str) -> FXRate | None:
         src, dst = from_currency.upper(), to_currency.upper()
         if src == dst:
-            return FXRate(src, dst, 1.0, provider_name=self.provider_name)
+            return FXRate(src, dst, 1.0, source="not_required", provider_name=self.provider_name)
         if (src, dst) in self.rates:
             return replace(self.rates[(src, dst)], source="provided_by_us", provider_name=self.provider_name)
         if (dst, src) in self.rates and self.rates[(dst, src)].rate > 0:
