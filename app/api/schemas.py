@@ -131,3 +131,31 @@ class EvaluateRequest(BaseModel):
 
 class EvaluateResponse(BaseModel):
     result: dict[str, Any]
+
+
+class OriginateRequest(BaseModel):
+    account_ref: str
+    policy: PolicyIn
+    holdings: list[HoldingIn]
+    market_data: dict[str, MarketDataIn]
+
+
+class DrawCheckRequest(BaseModel):
+    account_ref: str
+    current_loan: LoanIn
+    requested_draw_amount: float
+    policy: PolicyIn
+    holdings: list[HoldingIn]
+    market_data: dict[str, MarketDataIn]
+
+
+class MonitorRequest(BaseModel):
+    account_ref: str
+    loan: LoanIn
+    policy: PolicyIn
+    holdings: list[HoldingIn]
+    market_data: dict[str, MarketDataIn]
+
+
+class LifecycleResponse(BaseModel):
+    result: dict[str, Any]
