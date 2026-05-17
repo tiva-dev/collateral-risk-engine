@@ -21,7 +21,9 @@ from app.core.models import (
     OrderBook,
     OrderBookLevel,
     Policy,
+    AccountState,
     PortfolioAction,
+    PortfolioActionCheck,
 )
 
 
@@ -71,6 +73,68 @@ class PortfolioActionIn(BaseModel):
             quantity=self.quantity,
             amount=self.amount,
             direction=self.direction,
+        )
+
+
+class AccountStateIn(BaseModel):
+    account_ref: str
+    holdings: list[HoldingIn]
+    pledged_cash_balance: float = 0.0
+    loan_principal: float = Field(
+        validation_alias=AliasChoices("loan_principal", "principal")
+    )
+    accrued_interest: float = 0.0
+    fees: float = 0.0
+    loan_currency: str = "USD"
+    approved_credit_limit: float = 0.0
+    available_credit: float = 0.0
+    last_margin_state: MarginState = MarginState.SAFE
+    last_evaluation_time: datetime | None = None
+
+    def to_domain(self) -> AccountState:
+        return AccountState(
+            account_ref=self.account_ref,
+            holdings=[holding.to_domain() for holding in self.holdings],
+            pledged_cash_balance=self.pledged_cash_balance,
+            loan=Loan(
+                principal=self.loan_principal,
+                accrued_interest=self.accrued_interest,
+                fees=self.fees,
+                currency=self.loan_currency,
+            ),
+            approved_credit_limit=self.approved_credit_limit,
+            available_credit=self.available_credit,
+            last_margin_state=self.last_margin_state,
+            last_evaluation_time=self.last_evaluation_time,
+        )
+
+
+class PortfolioActionCheckIn(BaseModel):
+    action_type: PortfolioActionType
+    asset_id: str | None = None
+    asset_type: AssetType | None = None
+    quantity: float = 0.0
+    amount: float = 0.0
+    direction: TransferDirection = TransferDirection.OUT
+    withdraw_proceeds: bool = False
+    to_asset_id: str | None = None
+    to_asset_type: AssetType | None = None
+    to_quantity: float = 0.0
+    to_amount: float = 0.0
+
+    def to_domain(self) -> PortfolioActionCheck:
+        return PortfolioActionCheck(
+            action_type=self.action_type,
+            asset_id=self.asset_id,
+            asset_type=self.asset_type,
+            quantity=self.quantity,
+            amount=self.amount,
+            direction=self.direction,
+            withdraw_proceeds=self.withdraw_proceeds,
+            to_asset_id=self.to_asset_id,
+            to_asset_type=self.to_asset_type,
+            to_quantity=self.to_quantity,
+            to_amount=self.to_amount,
         )
 
 
@@ -173,7 +237,20 @@ class PreTradeRiskCheckRequest(BaseModel):
 
 
 class PreTradeRiskCheckResponse(BaseModel):
-    result: dict[str, Any]
+    result: Any
+
+
+class PortfolioActionCheckRequest(BaseModel):
+    account_state: AccountStateIn
+    policy: PolicyIn
+    market_data: dict[str, MarketDataIn]
+    proposed_action: PortfolioActionCheckIn = Field(
+        validation_alias=AliasChoices("proposed_action", "action")
+    )
+
+
+class PortfolioActionCheckResponse(BaseModel):
+    result: Any
 
 
 class OriginateRequest(BaseModel):
@@ -209,7 +286,9 @@ class PreTradeCheckRequest(BaseModel):
     market_data: dict[str, MarketDataIn]
     proposed_holding_changes: list[HoldingIn] = Field(
         default_factory=list,
-        validation_alias=AliasChoices("proposed_holding_changes", "holding_changes", "proposed_trades", "trades"),
+        validation_alias=AliasChoices(
+            "proposed_holding_changes", "holding_changes", "proposed_trades", "trades"
+        ),
     )
     requested_draw_amount: float = 0.0
     requested_repayment_amount: float = 0.0

@@ -5,7 +5,13 @@ from datetime import datetime, timezone
 from typing import Mapping
 
 from app.audit.logger import AuditLogger
-from app.core.enums import AssetType, MarginState, PortfolioActionType, RiskDecision, TransferDirection
+from app.core.enums import (
+    AssetType,
+    MarginState,
+    PortfolioActionType,
+    RiskDecision,
+    TransferDirection,
+)
 from app.core.models import (
     AssetRiskResult,
     Holding,
@@ -59,10 +65,14 @@ class CollateralRiskEngine:
             market = market_data.get(holding.asset_id)
             if market is None:
                 continue
-            portfolio_market_value += max(0.0, holding.quantity) * max(0.0, market.last_price)
+            portfolio_market_value += max(0.0, holding.quantity) * max(
+                0.0, market.last_price
+            )
 
         if portfolio_market_value <= 0 and projected_loan_balance <= 0:
-            raise RiskEvaluationError("portfolio_market_value is zero; market data may be missing or invalid")
+            raise RiskEvaluationError(
+                "portfolio_market_value is zero; market data may be missing or invalid"
+            )
 
         asset_results: list[AssetRiskResult] = []
         for holding in holdings:
@@ -80,18 +90,31 @@ class CollateralRiskEngine:
             )
 
         risk_adjusted_collateral_value = sum(a.lendable_value for a in asset_results)
-        stressed_liquidation_value = sum(a.stressed_liquidation_value for a in asset_results)
+        stressed_liquidation_value = sum(
+            a.stressed_liquidation_value for a in asset_results
+        )
         approved_credit_limit = max(0.0, risk_adjusted_collateral_value)
         available_credit = max(0.0, approved_credit_limit - outstanding_balance)
-        projected_available_credit = max(0.0, approved_credit_limit - projected_loan_balance)
-        recovery_coverage_ratio = None if projected_loan_balance <= 0 else stressed_liquidation_value / projected_loan_balance
+        projected_available_credit = max(
+            0.0, approved_credit_limit - projected_loan_balance
+        )
+        recovery_coverage_ratio = (
+            None
+            if projected_loan_balance <= 0
+            else stressed_liquidation_value / projected_loan_balance
+        )
         portfolio_risk_score = self._portfolio_risk_score(asset_results)
-        trigger_levels = self._trigger_levels(stressed_liquidation_value, projected_loan_balance, portfolio_risk_score)
+        trigger_levels = self._trigger_levels(
+            stressed_liquidation_value, projected_loan_balance, portfolio_risk_score
+        )
         dynamic_safety_requirement = max(
             0.0,
-            projected_loan_balance * (trigger_levels.dynamic_liquidation_coverage - 1.0),
+            projected_loan_balance
+            * (trigger_levels.dynamic_liquidation_coverage - 1.0),
         )
-        minimum_stressed_liquidation_value = projected_loan_balance + dynamic_safety_requirement
+        minimum_stressed_liquidation_value = (
+            projected_loan_balance + dynamic_safety_requirement
+        )
         margin_state = self._margin_state(
             approved_credit_limit=approved_credit_limit,
             loan_balance=projected_loan_balance,
@@ -113,7 +136,9 @@ class CollateralRiskEngine:
             "account_ref": account_ref,
             "model_version": MODEL_VERSION,
             "portfolio_market_value": round_money(portfolio_market_value),
-            "risk_adjusted_collateral_value": round_money(risk_adjusted_collateral_value),
+            "risk_adjusted_collateral_value": round_money(
+                risk_adjusted_collateral_value
+            ),
             "approved_credit_limit": round_money(approved_credit_limit),
             "stressed_liquidation_value": round_money(stressed_liquidation_value),
             "outstanding_balance": round_money(outstanding_balance),
@@ -123,7 +148,9 @@ class CollateralRiskEngine:
             "projected_available_credit": round_money(projected_available_credit),
             "recovery_coverage_ratio": recovery_coverage_ratio,
             "dynamic_safety_requirement": round_money(dynamic_safety_requirement),
-            "minimum_stressed_liquidation_value": round_money(minimum_stressed_liquidation_value),
+            "minimum_stressed_liquidation_value": round_money(
+                minimum_stressed_liquidation_value
+            ),
             "portfolio_risk_score": portfolio_risk_score,
             "margin_state": margin_state.value,
             "trigger_levels": asdict(trigger_levels),
@@ -132,11 +159,17 @@ class CollateralRiskEngine:
             "policy": {
                 "risk_appetite": policy.risk_appetite.value,
                 "base_ltv": {k.value: v for k, v in policy.base_ltv.items()},
-                "asset_ltv_caps": {k.value: v for k, v in policy.asset_ltv_caps.items()},
+                "asset_ltv_caps": {
+                    k.value: v for k, v in policy.asset_ltv_caps.items()
+                },
                 "max_participation_rate": policy.max_participation_rate,
             },
         }
-        audit_id = self.audit_logger.write(audit_payload) if self.audit_logger else "audit_disabled"
+        audit_id = (
+            self.audit_logger.write(audit_payload)
+            if self.audit_logger
+            else "audit_disabled"
+        )
 
         return PortfolioEvaluation(
             account_ref=account_ref,
@@ -150,9 +183,15 @@ class CollateralRiskEngine:
             requested_draw_amount=round_money(requested_draw_amount),
             projected_loan_balance=round_money(projected_loan_balance),
             projected_available_credit=round_money(projected_available_credit),
-            recovery_coverage_ratio=None if recovery_coverage_ratio is None else round(recovery_coverage_ratio, 4),
+            recovery_coverage_ratio=(
+                None
+                if recovery_coverage_ratio is None
+                else round(recovery_coverage_ratio, 4)
+            ),
             dynamic_safety_requirement=round_money(dynamic_safety_requirement),
-            minimum_stressed_liquidation_value=round_money(minimum_stressed_liquidation_value),
+            minimum_stressed_liquidation_value=round_money(
+                minimum_stressed_liquidation_value
+            ),
             portfolio_risk_score=round(portfolio_risk_score, 4),
             margin_state=margin_state,
             trigger_levels=trigger_levels,
@@ -175,12 +214,44 @@ class CollateralRiskEngine:
         if not actions:
             raise RiskEvaluationError("at least one portfolio action is required")
 
-        projected_holdings, requested_draw_amount, repayment_amount = self._project_actions(
-            holdings,
-            market_data,
-            actions,
-        )
         outstanding_balance = loan.balance
+        try:
+            projected_holdings, requested_draw_amount, repayment_amount = (
+                self._project_actions(
+                    holdings,
+                    market_data,
+                    actions,
+                )
+            )
+        except RiskEvaluationError as exc:
+            projected_evaluation = self.evaluate(
+                account_ref=account_ref,
+                holdings=holdings,
+                loan=loan,
+                policy=policy,
+                market_data=market_data,
+            )
+            return PreTradeRiskCheckResult(
+                account_ref=account_ref,
+                decision=RiskDecision.REJECT,
+                approved=False,
+                reason=str(exc),
+                outstanding_balance=round_money(outstanding_balance),
+                available_credit=projected_evaluation.available_credit,
+                requested_draw_amount=0.0,
+                projected_loan_balance=projected_evaluation.projected_loan_balance,
+                projected_available_credit=projected_evaluation.projected_available_credit,
+                projected_stressed_liquidation_value=projected_evaluation.stressed_liquidation_value,
+                dynamic_safety_requirement=projected_evaluation.dynamic_safety_requirement,
+                minimum_stressed_liquidation_value=projected_evaluation.minimum_stressed_liquidation_value,
+                required_repayment_amount=round_money(outstanding_balance),
+                reduced_available_credit=0.0,
+                projected_margin_state=projected_evaluation.margin_state,
+                projected_holdings=holdings,
+                projected_evaluation=projected_evaluation,
+                created_at=datetime.now(timezone.utc),
+            )
+
         post_repayment_outstanding = max(0.0, outstanding_balance - repayment_amount)
         projected_evaluation = self.evaluate(
             account_ref=account_ref,
@@ -209,7 +280,11 @@ class CollateralRiskEngine:
             dynamic_safety_requirement=projected_evaluation.dynamic_safety_requirement,
             minimum_stressed_liquidation_value=projected_evaluation.minimum_stressed_liquidation_value,
             required_repayment_amount=required_repayment,
-            reduced_available_credit=projected_evaluation.available_credit,
+            reduced_available_credit=(
+                projected_evaluation.available_credit
+                if decision == RiskDecision.REDUCE_AVAILABLE_CREDIT
+                else None
+            ),
             projected_margin_state=projected_evaluation.margin_state,
             projected_holdings=projected_holdings,
             projected_evaluation=projected_evaluation,
@@ -227,34 +302,55 @@ class CollateralRiskEngine:
         repayment_amount = 0.0
 
         for action in actions:
-            if action.action_type == PortfolioActionType.CREDIT_DRAW:
+            if action.action_type in {
+                PortfolioActionType.CREDIT_DRAW,
+                PortfolioActionType.DRAW,
+            }:
                 requested_draw_amount += self._cash_amount(action, "credit draw")
                 continue
-            if action.action_type == PortfolioActionType.REPAYMENT:
+            if action.action_type in {
+                PortfolioActionType.REPAYMENT,
+                PortfolioActionType.REPAY,
+            }:
                 repayment_amount += self._cash_amount(action, "repayment")
                 continue
 
             asset_id = action.asset_id
             if not asset_id:
-                raise RiskEvaluationError(f"{action.action_type.value} action requires asset_id")
+                raise RiskEvaluationError(
+                    f"{action.action_type.value} action requires asset_id"
+                )
 
             quantity = self._asset_quantity(action, market_data)
             direction = action.direction
-            if action.action_type in {PortfolioActionType.SELL, PortfolioActionType.WITHDRAWAL}:
+            if action.action_type in {
+                PortfolioActionType.SELL,
+                PortfolioActionType.WITHDRAWAL,
+                PortfolioActionType.WITHDRAW_SECURITY,
+            }:
                 delta = -quantity
             elif action.action_type == PortfolioActionType.BUY:
                 delta = quantity
-            elif action.action_type == PortfolioActionType.TRANSFER:
+            elif action.action_type in {
+                PortfolioActionType.TRANSFER,
+                PortfolioActionType.TRANSFER_SECURITY,
+            }:
                 delta = quantity if direction == TransferDirection.IN else -quantity
             else:
-                raise RiskEvaluationError(f"unsupported action_type: {action.action_type.value}")
+                raise RiskEvaluationError(
+                    f"unsupported action_type: {action.action_type.value}"
+                )
 
             current = projected.get(asset_id)
             if current is None:
                 if delta < 0:
-                    raise RiskEvaluationError(f"cannot remove {asset_id}; no current holding exists")
+                    raise RiskEvaluationError(
+                        f"cannot remove {asset_id}; no current holding exists"
+                    )
                 if action.asset_type is None:
-                    raise RiskEvaluationError(f"{action.action_type.value} action for new asset requires asset_type")
+                    raise RiskEvaluationError(
+                        f"{action.action_type.value} action for new asset requires asset_type"
+                    )
                 projected[asset_id] = Holding(
                     asset_id=asset_id,
                     asset_type=action.asset_type,
@@ -264,7 +360,9 @@ class CollateralRiskEngine:
 
             new_quantity = current.quantity + delta
             if new_quantity < -QUANTITY_TOLERANCE:
-                raise RiskEvaluationError(f"{action.action_type.value} exceeds available {asset_id} quantity")
+                raise RiskEvaluationError(
+                    f"{action.action_type.value} exceeds available {asset_id} quantity"
+                )
             projected[asset_id] = replace(current, quantity=max(0.0, new_quantity))
 
         return list(projected.values()), requested_draw_amount, repayment_amount
@@ -277,7 +375,9 @@ class CollateralRiskEngine:
         if action.quantity > 0:
             return action.quantity
         if action.amount <= 0:
-            raise RiskEvaluationError(f"{action.action_type.value} action requires positive quantity or amount")
+            raise RiskEvaluationError(
+                f"{action.action_type.value} action requires positive quantity or amount"
+            )
 
         market = market_data.get(action.asset_id or "")
         if market is None or market.last_price <= 0:
@@ -299,16 +399,25 @@ class CollateralRiskEngine:
     ) -> tuple[RiskDecision, str, float]:
         projected_balance = projected_evaluation.projected_loan_balance
         if projected_balance <= 0:
-            return RiskDecision.APPROVE, "projected loan balance is zero after the action", 0.0
+            return (
+                RiskDecision.APPROVE,
+                "projected loan balance is zero after the action",
+                0.0,
+            )
 
-        required_repayment = self._required_repayment_to_restore_safety(projected_evaluation)
+        required_repayment = self._required_repayment_to_restore_safety(
+            projected_evaluation
+        )
         if projected_evaluation.stressed_liquidation_value < projected_balance:
             return (
                 RiskDecision.LIQUIDATION,
                 "projected stressed liquidation value no longer covers projected loan balance",
                 required_repayment,
             )
-        if projected_evaluation.stressed_liquidation_value < projected_evaluation.minimum_stressed_liquidation_value:
+        if (
+            projected_evaluation.stressed_liquidation_value
+            < projected_evaluation.minimum_stressed_liquidation_value
+        ):
             return (
                 RiskDecision.REQUIRE_REPAYMENT,
                 "projected stressed liquidation value does not cover projected loan balance plus dynamic safety requirement",
@@ -344,9 +453,15 @@ class CollateralRiskEngine:
                 "projected portfolio is in liquidation",
                 required_repayment,
             )
-        return RiskDecision.APPROVE, "projected portfolio remains inside dynamic risk limits", 0.0
+        return (
+            RiskDecision.APPROVE,
+            "projected portfolio remains inside dynamic risk limits",
+            0.0,
+        )
 
-    def _required_repayment_to_restore_safety(self, evaluation: PortfolioEvaluation) -> float:
+    def _required_repayment_to_restore_safety(
+        self, evaluation: PortfolioEvaluation
+    ) -> float:
         projected_balance = evaluation.projected_loan_balance
         if projected_balance <= 0:
             return 0.0
@@ -372,15 +487,18 @@ class CollateralRiskEngine:
             market_value=market_value,
             portfolio_market_value=portfolio_market_value,
         )
-        eligible = not (
-            market.halted and not policy.allow_lending_on_stale_or_halted_assets
-        ) and market.data_quality_score >= policy.min_data_quality_score
+        eligible = (
+            not (market.halted and not policy.allow_lending_on_stale_or_halted_assets)
+            and market.data_quality_score >= policy.min_data_quality_score
+        )
 
         effective_ltv = clamp(base_ltv * breakdown.product, 0.0, cap)
         if not eligible:
             effective_ltv = 0.0
         lendable_value = market_value * effective_ltv
-        recovery = estimate_stressed_recovery(holding, market, policy, raw, market_value)
+        recovery = estimate_stressed_recovery(
+            holding, market, policy, raw, market_value
+        )
         drivers = risk_drivers_from_breakdown(breakdown)
         notes: list[str] = []
         if not eligible:
@@ -445,10 +563,22 @@ class CollateralRiskEngine:
         total = sum(a.market_value for a in asset_results)
         if total <= 0:
             return 1.0
-        weighted_risk = sum(a.risk_score * a.market_value for a in asset_results) / total
-        concentration_penalty = sum((a.market_value / total) ** 2 for a in asset_results)
-        ineligible_penalty = sum(a.market_value for a in asset_results if not a.eligible) / total
-        return clamp(0.75 * weighted_risk + 0.20 * concentration_penalty + 0.35 * ineligible_penalty, 0.0, 1.0)
+        weighted_risk = (
+            sum(a.risk_score * a.market_value for a in asset_results) / total
+        )
+        concentration_penalty = sum(
+            (a.market_value / total) ** 2 for a in asset_results
+        )
+        ineligible_penalty = (
+            sum(a.market_value for a in asset_results if not a.eligible) / total
+        )
+        return clamp(
+            0.75 * weighted_risk
+            + 0.20 * concentration_penalty
+            + 0.35 * ineligible_penalty,
+            0.0,
+            1.0,
+        )
 
     def _trigger_levels(
         self,
@@ -456,7 +586,9 @@ class CollateralRiskEngine:
         loan_balance: float,
         portfolio_risk_score: float,
     ) -> TriggerLevels:
-        dynamic_liquidation_coverage = clamp(1.01 + 0.34 * portfolio_risk_score, 1.02, 1.60)
+        dynamic_liquidation_coverage = clamp(
+            1.01 + 0.34 * portfolio_risk_score, 1.02, 1.60
+        )
         dynamic_margin_call_coverage = clamp(
             dynamic_liquidation_coverage + 0.04 + 0.12 * portfolio_risk_score,
             1.05,

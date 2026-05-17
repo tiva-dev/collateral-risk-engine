@@ -45,6 +45,48 @@ class PortfolioAction:
 
 
 @dataclass(frozen=True)
+class AccountState:
+    account_ref: str
+    holdings: list[Holding]
+    pledged_cash_balance: float
+    loan: Loan
+    approved_credit_limit: float
+    available_credit: float
+    last_margin_state: MarginState
+    last_evaluation_time: datetime | None = None
+
+
+@dataclass(frozen=True)
+class PortfolioActionCheck:
+    action_type: PortfolioActionType
+    asset_id: str | None = None
+    asset_type: AssetType | None = None
+    quantity: float = 0.0
+    amount: float = 0.0
+    direction: TransferDirection = TransferDirection.OUT
+    withdraw_proceeds: bool = False
+    to_asset_id: str | None = None
+    to_asset_type: AssetType | None = None
+    to_quantity: float = 0.0
+    to_amount: float = 0.0
+
+
+@dataclass(frozen=True)
+class PortfolioActionCheckResult:
+    decision: RiskDecision
+    reason: str
+    projected_loan_balance: float
+    projected_approved_credit_limit: float
+    projected_available_credit: float
+    projected_margin_state: MarginState
+    required_repayment_amount: float
+    audit_id: str
+    evaluation_result: PortfolioEvaluation
+    projected_account_state: AccountState
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class OrderBookLevel:
     price: float
     quantity: float

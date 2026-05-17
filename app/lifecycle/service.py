@@ -1,16 +1,38 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Mapping
 
 from app.audit.logger import AuditLogger
-from app.core.enums import LifecycleDecisionValue, MarginState, RiskDecision
+from app.core.enums import (
+    AssetType,
+    LifecycleDecisionValue,
+    MarginState,
+    PortfolioActionType,
+    RiskDecision,
+    TransferDirection,
+)
 from app.core.evaluator import CollateralRiskEngine
-from app.core.models import Holding, Loan, MarketData, Policy
-from app.lifecycle.models import LifecycleDecision, OriginationResult, PreTradeCheckResult, now_utc
+from app.core.models import (
+    AccountState,
+    Holding,
+    Loan,
+    MarketData,
+    Policy,
+    PortfolioActionCheck,
+    PortfolioActionCheckResult,
+)
+from app.lifecycle.models import (
+    LifecycleDecision,
+    OriginationResult,
+    PreTradeCheckResult,
+    now_utc,
+)
 from app.risk.math_utils import round_money
 
 LIFECYCLE_MODEL_VERSION = "cre-v0.2.0"
+PORTFOLIO_ACTION_MODEL_VERSION = "cre-v0.21.0"
+PLEDGED_CASH_ASSET_ID = "PLEDGED_CASH_USD"
 
 
 class CreditLifecycleEngine:
@@ -21,7 +43,9 @@ class CreditLifecycleEngine:
     ``CollateralRiskEngine`` so v0.2 extends rather than replaces v0.1 logic.
     """
 
-    def __init__(self, risk_engine: CollateralRiskEngine, audit_logger: AuditLogger | None = None) -> None:
+    def __init__(
+        self, risk_engine: CollateralRiskEngine, audit_logger: AuditLogger | None = None
+    ) -> None:
         self.risk_engine = risk_engine
         self.audit_logger = audit_logger
 
@@ -107,7 +131,9 @@ class CreditLifecycleEngine:
         )
         loan_after_repayment = apply_repayment(current_loan, requested_repayment_amount)
         projected_loan = Loan(
-            principal=round_money(loan_after_repayment.principal + requested_draw_amount),
+            principal=round_money(
+                loan_after_repayment.principal + requested_draw_amount
+            ),
             accrued_interest=loan_after_repayment.accrued_interest,
             fees=loan_after_repayment.fees,
             currency=current_loan.currency,
@@ -123,12 +149,21 @@ class CreditLifecycleEngine:
         safe_credit_limit = self._safe_credit_limit(current_evaluation)
         projected_safe_credit_limit = self._safe_credit_limit(projected_evaluation)
         outstanding_after_repayment = round_money(loan_after_repayment.balance)
-        max_approved_draw = round_money(max(0.0, safe_credit_limit - outstanding_after_repayment))
+        max_approved_draw = round_money(
+            max(0.0, safe_credit_limit - outstanding_after_repayment)
+        )
         projected_outstanding_balance = projected_evaluation.loan_balance
-        current_available_credit = round_money(max(0.0, safe_credit_limit - current_outstanding_balance))
-        projected_available_credit = round_money(max(0.0, projected_safe_credit_limit - projected_outstanding_balance))
+        current_available_credit = round_money(
+            max(0.0, safe_credit_limit - current_outstanding_balance)
+        )
+        projected_available_credit = round_money(
+            max(0.0, projected_safe_credit_limit - projected_outstanding_balance)
+        )
 
-        if requested_draw_amount <= max_approved_draw and projected_evaluation.margin_state == MarginState.SAFE:
+        if (
+            requested_draw_amount <= max_approved_draw
+            and projected_evaluation.margin_state == MarginState.SAFE
+        ):
             decision = LifecycleDecisionValue.APPROVED
             reason = "requested draw keeps projected outstanding balance within dynamic safety requirement"
             max_approved_draw_amount = None
@@ -186,6 +221,132 @@ class CreditLifecycleEngine:
             created_at=now_utc(),
         )
 
+    def check_portfolio_action(
+        self,
+        account_state: AccountState,
+        proposed_action: PortfolioActionCheck,
+        policy: Policy,
+        market_data: Mapping[str, MarketData],
+    ) -> PortfolioActionCheckResult:
+        if account_state.account_ref == "":
+            raise ValueError("account_ref is required")
+
+        normalized_market_data = self._market_data_with_pledged_cash(
+            market_data, account_state.loan.currency
+        )
+        pre_holdings = self._holdings_with_pledged_cash(
+            aggregate_holdings(account_state.holdings),
+            account_state.pledged_cash_balance,
+            account_state.loan.currency,
+        )
+        pre_evaluation = self.risk_engine.evaluate(
+            account_ref=account_state.account_ref,
+            holdings=pre_holdings,
+            loan=account_state.loan,
+            policy=policy,
+            market_data=normalized_market_data,
+        )
+
+        if proposed_action.action_type == PortfolioActionType.DRAW:
+            draw_amount = self._cash_amount(proposed_action, "draw")
+            draw_result = self.check_draw(
+                account_ref=account_state.account_ref,
+                current_loan=account_state.loan,
+                requested_draw_amount=draw_amount,
+                requested_repayment_amount=0.0,
+                holdings=pre_holdings,
+                policy=policy,
+                market_data=normalized_market_data,
+            )
+            decision = self._risk_decision_from_lifecycle(draw_result.decision)
+            reason = f"draw action delegated to credit draw check: {draw_result.reason}"
+            projected_evaluation = draw_result.evaluation
+            projected_state = AccountState(
+                account_ref=account_state.account_ref,
+                holdings=self._strip_pledged_cash_holding(pre_holdings),
+                pledged_cash_balance=round_money(account_state.pledged_cash_balance),
+                loan=draw_result.projected_loan or account_state.loan,
+                approved_credit_limit=projected_evaluation.approved_credit_limit,
+                available_credit=draw_result.projected_available_credit or 0.0,
+                last_margin_state=projected_evaluation.margin_state,
+                last_evaluation_time=projected_evaluation.created_at,
+            )
+            required_repayment = draw_result.required_cure_amount
+        else:
+            projected_holdings, projected_cash, projected_loan = (
+                self._project_portfolio_action(
+                    holdings=aggregate_holdings(account_state.holdings),
+                    pledged_cash_balance=account_state.pledged_cash_balance,
+                    loan=account_state.loan,
+                    action=proposed_action,
+                    market_data=normalized_market_data,
+                )
+            )
+            projected_evaluation_holdings = self._holdings_with_pledged_cash(
+                projected_holdings,
+                projected_cash,
+                projected_loan.currency,
+            )
+            projected_evaluation = self.risk_engine.evaluate(
+                account_ref=account_state.account_ref,
+                holdings=projected_evaluation_holdings,
+                loan=projected_loan,
+                policy=policy,
+                market_data=normalized_market_data,
+            )
+            safe_credit_limit = self._safe_credit_limit(projected_evaluation)
+            projected_available_credit = round_money(
+                max(0.0, safe_credit_limit - projected_evaluation.loan_balance)
+            )
+            decision, reason, required_repayment = self._portfolio_action_decision(
+                pre_evaluation=pre_evaluation,
+                projected_evaluation=projected_evaluation,
+                projected_available_credit=projected_available_credit,
+            )
+            projected_state = AccountState(
+                account_ref=account_state.account_ref,
+                holdings=projected_holdings,
+                pledged_cash_balance=projected_cash,
+                loan=projected_loan,
+                approved_credit_limit=projected_evaluation.approved_credit_limit,
+                available_credit=projected_available_credit,
+                last_margin_state=projected_evaluation.margin_state,
+                last_evaluation_time=projected_evaluation.created_at,
+            )
+
+        audit_id = self._write_lifecycle_audit(
+            event_type="portfolio_action_check",
+            account_ref=account_state.account_ref,
+            payload={
+                "action_type": proposed_action.action_type.value,
+                "pre_action_state": self._account_state_audit(account_state),
+                "proposed_action": asdict(proposed_action),
+                "projected_post_action_state": self._account_state_audit(
+                    projected_state
+                ),
+                "decision": decision.value,
+                "reason": reason,
+                "model_version": PORTFOLIO_ACTION_MODEL_VERSION,
+                "policy_snapshot": self._policy_snapshot(policy),
+                "risk_evaluation_audit_id": pre_evaluation.audit_id,
+                "projected_risk_evaluation_audit_id": projected_evaluation.audit_id,
+            },
+        )
+
+        return PortfolioActionCheckResult(
+            decision=decision,
+            reason=reason,
+            projected_loan_balance=projected_evaluation.loan_balance,
+            projected_approved_credit_limit=projected_evaluation.approved_credit_limit,
+            projected_available_credit=projected_state.available_credit,
+            projected_margin_state=projected_evaluation.margin_state,
+            required_repayment_amount=required_repayment,
+            audit_id=audit_id,
+            evaluation_result=projected_evaluation,
+            projected_account_state=projected_state,
+            created_at=now_utc(),
+        )
+
     def monitor(
         self,
         account_ref: str,
@@ -219,7 +380,11 @@ class CreditLifecycleEngine:
                 "margin_state": evaluation.margin_state.value,
                 "required_cure_amount": evaluation.trigger_levels.required_cure_amount,
                 "minimum_stressed_liquidation_value": evaluation.minimum_stressed_liquidation_value,
-                "liquidation_plan": asdict(evaluation.liquidation_plan) if evaluation.liquidation_plan else None,
+                "liquidation_plan": (
+                    asdict(evaluation.liquidation_plan)
+                    if evaluation.liquidation_plan
+                    else None
+                ),
                 "risk_evaluation_audit_id": evaluation.audit_id,
             },
         )
@@ -265,10 +430,14 @@ class CreditLifecycleEngine:
             policy=policy,
             market_data=market_data,
         )
-        projected_holdings, invalid_reason = project_holdings(current_holdings, proposed_holding_changes)
+        projected_holdings, invalid_reason = project_holdings(
+            current_holdings, proposed_holding_changes
+        )
         loan_after_repayment = apply_repayment(loan, requested_repayment_amount)
         projected_loan = Loan(
-            principal=round_money(loan_after_repayment.principal + requested_draw_amount),
+            principal=round_money(
+                loan_after_repayment.principal + requested_draw_amount
+            ),
             accrued_interest=loan_after_repayment.accrued_interest,
             fees=loan_after_repayment.fees,
             currency=loan.currency,
@@ -294,15 +463,23 @@ class CreditLifecycleEngine:
             projected_available_credit = projected_evaluation.available_credit
             projected_margin_state = projected_evaluation.margin_state
             safe_credit_limit = self._safe_credit_limit(projected_evaluation)
-            if projected_evaluation.margin_state in {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}:
+            if projected_evaluation.margin_state in {
+                MarginState.MARGIN_CALL,
+                MarginState.LIQUIDATION,
+            }:
                 decision = RiskDecision.REJECT
                 reason = "projected margin state is unsafe; action must not proceed"
                 reduced_available_credit = None
             elif projected_evaluation.loan_balance > safe_credit_limit:
                 decision = RiskDecision.REJECT
-                reason = "projected outstanding balance exceeds dynamic safety requirement"
+                reason = (
+                    "projected outstanding balance exceeds dynamic safety requirement"
+                )
                 reduced_available_credit = None
-            elif projected_evaluation.available_credit < current_evaluation.available_credit:
+            elif (
+                projected_evaluation.available_credit
+                < current_evaluation.available_credit
+            ):
                 decision = RiskDecision.REDUCE_AVAILABLE_CREDIT
                 reason = "projected available credit is reduced but remains within dynamic safety requirement"
                 reduced_available_credit = projected_evaluation.available_credit
@@ -321,7 +498,9 @@ class CreditLifecycleEngine:
                 "current_available_credit": current_evaluation.available_credit,
                 "projected_outstanding_balance": projected_outstanding_balance,
                 "projected_available_credit": projected_available_credit,
-                "projected_margin_state": projected_margin_state.value if projected_margin_state else None,
+                "projected_margin_state": (
+                    projected_margin_state.value if projected_margin_state else None
+                ),
                 "reduced_available_credit": reduced_available_credit,
                 "requested_draw_amount": requested_draw_amount,
                 "requested_repayment_amount": requested_repayment_amount,
@@ -354,12 +533,332 @@ class CreditLifecycleEngine:
             created_at=now_utc(),
         )
 
+    def _project_portfolio_action(
+        self,
+        holdings: list[Holding],
+        pledged_cash_balance: float,
+        loan: Loan,
+        action: PortfolioActionCheck,
+        market_data: Mapping[str, MarketData],
+    ) -> tuple[list[Holding], float, Loan]:
+        quantities = {holding.asset_id: holding for holding in holdings}
+        pledged_cash = round_money(max(0.0, pledged_cash_balance))
+        projected_loan = loan
+
+        if action.action_type == PortfolioActionType.SELL:
+            quantity = self._asset_quantity(action, market_data)
+            self._add_holding_delta(
+                quantities, action.asset_id, action.asset_type, -quantity
+            )
+            proceeds = self._market_amount(action.asset_id, quantity, market_data)
+            if not action.withdraw_proceeds:
+                pledged_cash = round_money(pledged_cash + proceeds)
+        elif action.action_type == PortfolioActionType.BUY:
+            quantity = self._asset_quantity(action, market_data)
+            cost = (
+                self._cash_amount(action, "buy")
+                if action.amount > 0
+                else self._market_amount(action.asset_id, quantity, market_data)
+            )
+            pledged_cash = round_money(max(0.0, pledged_cash - cost))
+            self._add_holding_delta(
+                quantities, action.asset_id, action.asset_type, quantity
+            )
+        elif action.action_type == PortfolioActionType.WITHDRAW_CASH:
+            amount = self._cash_amount(action, "withdraw_cash")
+            if amount > pledged_cash + 1e-9:
+                raise ValueError("withdraw_cash action exceeds pledged cash balance")
+            pledged_cash = round_money(pledged_cash - amount)
+        elif action.action_type in {
+            PortfolioActionType.WITHDRAW_SECURITY,
+            PortfolioActionType.WITHDRAWAL,
+        }:
+            quantity = self._asset_quantity(action, market_data)
+            self._add_holding_delta(
+                quantities, action.asset_id, action.asset_type, -quantity
+            )
+        elif action.action_type in {
+            PortfolioActionType.TRANSFER_SECURITY,
+            PortfolioActionType.TRANSFER,
+        }:
+            quantity = self._asset_quantity(action, market_data)
+            delta = quantity if action.direction == TransferDirection.IN else -quantity
+            self._add_holding_delta(
+                quantities, action.asset_id, action.asset_type, delta
+            )
+        elif action.action_type in {
+            PortfolioActionType.REPAY,
+            PortfolioActionType.REPAYMENT,
+        }:
+            projected_loan = apply_repayment(loan, self._cash_amount(action, "repay"))
+        elif action.action_type == PortfolioActionType.REBALANCE:
+            sell_quantity = self._asset_quantity(action, market_data)
+            self._add_holding_delta(
+                quantities, action.asset_id, action.asset_type, -sell_quantity
+            )
+            proceeds = self._market_amount(action.asset_id, sell_quantity, market_data)
+            buy_amount = action.to_amount if action.to_amount > 0 else proceeds
+            if buy_amount > proceeds + pledged_cash + 1e-9:
+                raise ValueError(
+                    "rebalance buy leg exceeds sale proceeds plus pledged cash"
+                )
+            if buy_amount > proceeds:
+                pledged_cash = round_money(pledged_cash - (buy_amount - proceeds))
+            else:
+                pledged_cash = round_money(pledged_cash + (proceeds - buy_amount))
+            to_quantity = (
+                action.to_quantity
+                if action.to_quantity > 0
+                else self._quantity_from_amount(
+                    action.to_asset_id,
+                    buy_amount,
+                    market_data,
+                    "rebalance",
+                )
+            )
+            self._add_holding_delta(
+                quantities, action.to_asset_id, action.to_asset_type, to_quantity
+            )
+        else:
+            raise ValueError(
+                f"unsupported portfolio action_type: {action.action_type.value}"
+            )
+
+        projected_holdings = [
+            holding for holding in quantities.values() if holding.quantity > 1e-9
+        ]
+        if not projected_holdings and pledged_cash <= 0 and projected_loan.balance <= 0:
+            raise ValueError("projected account has no pledged collateral")
+        return aggregate_holdings(projected_holdings), pledged_cash, projected_loan
+
+    def _portfolio_action_decision(
+        self,
+        pre_evaluation,
+        projected_evaluation,
+        projected_available_credit: float,
+    ) -> tuple[RiskDecision, str, float]:
+        if projected_evaluation.loan_balance <= 0:
+            return (
+                RiskDecision.APPROVE,
+                "projected loan balance is zero after the action",
+                0.0,
+            )
+        required_repayment = self._required_repayment_to_restore_safety(
+            projected_evaluation
+        )
+        if projected_evaluation.margin_state == MarginState.LIQUIDATION:
+            return (
+                RiskDecision.LIQUIDATION,
+                "projected portfolio is in liquidation",
+                required_repayment,
+            )
+        if projected_evaluation.margin_state == MarginState.MARGIN_CALL:
+            return (
+                RiskDecision.MARGIN_CALL,
+                "projected portfolio is in margin call",
+                required_repayment,
+            )
+        if projected_evaluation.margin_state != MarginState.SAFE:
+            return (
+                RiskDecision.REJECT,
+                "projected account is not safe after the action",
+                required_repayment,
+            )
+        if projected_evaluation.loan_balance > self._safe_credit_limit(
+            projected_evaluation
+        ):
+            return (
+                RiskDecision.REJECT,
+                "projected outstanding balance exceeds dynamic safety requirement",
+                required_repayment,
+            )
+        if (
+            projected_available_credit
+            < self._safe_credit_limit(pre_evaluation) - pre_evaluation.loan_balance
+        ):
+            return (
+                RiskDecision.REDUCE_AVAILABLE_CREDIT,
+                "projected account remains safe with reduced available credit",
+                0.0,
+            )
+        return (
+            RiskDecision.APPROVE,
+            "projected account remains safe after the action",
+            0.0,
+        )
+
+    def _add_holding_delta(
+        self,
+        holdings: dict[str, Holding],
+        asset_id: str | None,
+        asset_type: AssetType | None,
+        delta: float,
+    ) -> None:
+        if not asset_id:
+            raise ValueError("security action requires asset_id")
+        current = holdings.get(asset_id)
+        if current is None:
+            if delta < 0:
+                raise ValueError(f"cannot remove {asset_id}; no current holding exists")
+            if asset_type is None:
+                raise ValueError("new security action requires asset_type")
+            holdings[asset_id] = Holding(
+                asset_id=asset_id, asset_type=asset_type, quantity=round(delta, 12)
+            )
+            return
+        new_quantity = round(current.quantity + delta, 12)
+        if new_quantity < -1e-9:
+            raise ValueError(f"action exceeds available {asset_id} quantity")
+        holdings[asset_id] = replace(current, quantity=max(0.0, new_quantity))
+
+    def _asset_quantity(
+        self, action: PortfolioActionCheck, market_data: Mapping[str, MarketData]
+    ) -> float:
+        if action.quantity > 0:
+            return action.quantity
+        if action.amount <= 0:
+            raise ValueError(
+                f"{action.action_type.value} action requires positive quantity or amount"
+            )
+        return self._quantity_from_amount(
+            action.asset_id, action.amount, market_data, action.action_type.value
+        )
+
+    def _quantity_from_amount(
+        self,
+        asset_id: str | None,
+        amount: float,
+        market_data: Mapping[str, MarketData],
+        action_label: str,
+    ) -> float:
+        market = market_data.get(asset_id or "")
+        if market is None or market.last_price <= 0:
+            raise ValueError(
+                f"{action_label} action with amount requires positive market price"
+            )
+        return amount / market.last_price
+
+    def _market_amount(
+        self,
+        asset_id: str | None,
+        quantity: float,
+        market_data: Mapping[str, MarketData],
+    ) -> float:
+        market = market_data.get(asset_id or "")
+        if market is None or market.last_price <= 0:
+            raise ValueError("security action requires positive market price")
+        return round_money(quantity * market.last_price)
+
+    def _cash_amount(self, action: PortfolioActionCheck, label: str) -> float:
+        amount = action.amount if action.amount > 0 else action.quantity
+        if amount <= 0:
+            raise ValueError(f"{label} action requires positive amount")
+        return round_money(amount)
+
+    def _holdings_with_pledged_cash(
+        self, holdings: list[Holding], pledged_cash_balance: float, currency: str
+    ) -> list[Holding]:
+        combined = list(holdings)
+        if pledged_cash_balance > 0:
+            combined.append(
+                Holding(
+                    PLEDGED_CASH_ASSET_ID,
+                    AssetType.CASH,
+                    round_money(pledged_cash_balance),
+                    currency,
+                )
+            )
+        return aggregate_holdings(combined)
+
+    def _strip_pledged_cash_holding(self, holdings: list[Holding]) -> list[Holding]:
+        return [
+            holding for holding in holdings if holding.asset_id != PLEDGED_CASH_ASSET_ID
+        ]
+
+    def _market_data_with_pledged_cash(
+        self,
+        market_data: Mapping[str, MarketData],
+        currency: str,
+    ) -> dict[str, MarketData]:
+        normalized = dict(market_data)
+        normalized.setdefault(
+            PLEDGED_CASH_ASSET_ID,
+            MarketData(
+                asset_id=PLEDGED_CASH_ASSET_ID,
+                last_price=1.0,
+                bid=1.0,
+                ask=1.0,
+                average_daily_volume=1_000_000_000,
+                average_dollar_volume=1_000_000_000,
+                volatility_30d=0.0,
+                volatility_90d=0.0,
+                data_quality_score=1.0,
+                metadata={"currency": currency, "source": "pledged_cash_balance"},
+            ),
+        )
+        return normalized
+
+    def _risk_decision_from_lifecycle(
+        self, decision: LifecycleDecisionValue
+    ) -> RiskDecision:
+        if decision == LifecycleDecisionValue.APPROVED:
+            return RiskDecision.APPROVE
+        if decision == LifecycleDecisionValue.PARTIALLY_APPROVED:
+            return RiskDecision.REDUCE_AVAILABLE_CREDIT
+        if decision == LifecycleDecisionValue.LIQUIDATION:
+            return RiskDecision.LIQUIDATION
+        if decision == LifecycleDecisionValue.MARGIN_CALL:
+            return RiskDecision.MARGIN_CALL
+        return RiskDecision.REJECT
+
+    def _required_repayment_to_restore_safety(self, evaluation) -> float:
+        if evaluation.loan_balance <= 0:
+            return 0.0
+        max_safe_balance = evaluation.stressed_liquidation_value / max(
+            evaluation.trigger_levels.dynamic_liquidation_coverage,
+            1e-9,
+        )
+        return round_money(max(0.0, evaluation.loan_balance - max_safe_balance))
+
+    def _account_state_audit(self, state: AccountState) -> dict:
+        return {
+            "account_ref": state.account_ref,
+            "holdings": [asdict(holding) for holding in state.holdings],
+            "pledged_cash_balance": state.pledged_cash_balance,
+            "loan_principal": state.loan.principal,
+            "accrued_interest": state.loan.accrued_interest,
+            "fees": state.loan.fees,
+            "loan_currency": state.loan.currency,
+            "approved_credit_limit": state.approved_credit_limit,
+            "available_credit": state.available_credit,
+            "last_margin_state": state.last_margin_state.value,
+            "last_evaluation_time": (
+                state.last_evaluation_time.isoformat()
+                if state.last_evaluation_time
+                else None
+            ),
+        }
+
+    def _policy_snapshot(self, policy: Policy) -> dict:
+        return {
+            "risk_appetite": policy.risk_appetite.value,
+            "base_ltv": {key.value: value for key, value in policy.base_ltv.items()},
+            "asset_ltv_caps": {
+                key.value: value for key, value in policy.asset_ltv_caps.items()
+            },
+            "max_participation_rate": policy.max_participation_rate,
+            "min_data_quality_score": policy.min_data_quality_score,
+            "allow_lending_on_stale_or_halted_assets": policy.allow_lending_on_stale_or_halted_assets,
+        }
+
     def _safe_credit_limit(self, evaluation) -> float:
         recovery_limited_balance = evaluation.stressed_liquidation_value / max(
             evaluation.trigger_levels.dynamic_warning_coverage,
             1e-9,
         )
-        return round_money(max(0.0, min(evaluation.approved_credit_limit, recovery_limited_balance)))
+        return round_money(
+            max(0.0, min(evaluation.approved_credit_limit, recovery_limited_balance))
+        )
 
     def _monitor_reason(self, margin_state: MarginState) -> str:
         return {
@@ -370,7 +869,9 @@ class CreditLifecycleEngine:
             MarginState.LIQUIDATION: "outstanding balance breaches dynamic liquidation coverage threshold",
         }[margin_state]
 
-    def _write_lifecycle_audit(self, event_type: str, account_ref: str, payload: dict) -> str:
+    def _write_lifecycle_audit(
+        self, event_type: str, account_ref: str, payload: dict
+    ) -> str:
         if not self.audit_logger:
             return "audit_disabled"
         audit_payload = {
@@ -414,7 +915,12 @@ def aggregate_holdings(holdings: list[Holding]) -> list[Holding]:
             order.append(key)
         aggregated[key] += holding.quantity
     return [
-        Holding(asset_id=asset_id, asset_type=asset_type, quantity=quantity, currency=currency)
+        Holding(
+            asset_id=asset_id,
+            asset_type=asset_type,
+            quantity=quantity,
+            currency=currency,
+        )
         for asset_id, asset_type, currency in order
         for quantity in [round(aggregated[(asset_id, asset_type, currency)], 12)]
     ]
@@ -441,7 +947,10 @@ def project_holdings(
         quantity = round(quantities[key], 12)
         asset_id, asset_type, currency = identities[key]
         if quantity < 0:
-            return [], "projected holding quantity would be negative; action must not proceed"
+            return (
+                [],
+                "projected holding quantity would be negative; action must not proceed",
+            )
         if quantity > 0:
             projected.append(
                 Holding(

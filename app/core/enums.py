@@ -35,6 +35,12 @@ class PortfolioActionType(str, Enum):
     TRANSFER = "transfer"
     REPAYMENT = "repayment"
     CREDIT_DRAW = "credit_draw"
+    WITHDRAW_CASH = "withdraw_cash"
+    WITHDRAW_SECURITY = "withdraw_security"
+    TRANSFER_SECURITY = "transfer_security"
+    REPAY = "repay"
+    REBALANCE = "rebalance"
+    DRAW = "draw"
 
 
 class TransferDirection(str, Enum):

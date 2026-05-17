@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +14,8 @@ from app.api.schemas import (
     MonitorRequest,
     OriginateRequest,
     PreTradeRiskCheckRequest,
+    PortfolioActionCheckRequest,
+    PortfolioActionCheckResponse,
     PreTradeRiskCheckResponse,
 )
 from app.audit.logger import AuditLogger
@@ -67,7 +69,28 @@ def pre_trade_check(request: PreTradeRiskCheckRequest) -> PreTradeRiskCheckRespo
     except RiskEvaluationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    return PreTradeRiskCheckResponse(result=jsonable_encoder(asdict(result)))
+    if result.decision.value == "reduce_available_credit":
+        result = replace(
+            result, reduced_available_credit=result.projected_available_credit
+        )
+    return PreTradeRiskCheckResponse(result=result)
+
+
+@router.post("/portfolio/action/check", response_model=PortfolioActionCheckResponse)
+def check_portfolio_action(
+    request: PortfolioActionCheckRequest,
+) -> PortfolioActionCheckResponse:
+    try:
+        result = lifecycle_engine.check_portfolio_action(
+            account_state=request.account_state.to_domain(),
+            proposed_action=request.proposed_action.to_domain(),
+            policy=request.policy.to_domain(),
+            market_data={k: v.to_domain() for k, v in request.market_data.items()},
+        )
+    except (RiskEvaluationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return PortfolioActionCheckResponse(result=result)
 
 
 @router.post("/credit/originate", response_model=LifecycleResponse)
