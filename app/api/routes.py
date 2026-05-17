@@ -13,6 +13,8 @@ from app.api.schemas import (
     LifecycleResponse,
     MonitorRequest,
     OriginateRequest,
+    MarketDataNormalizeRequest,
+    MarketDataNormalizeResponse,
     PreTradeRiskCheckRequest,
     PortfolioActionCheckRequest,
     PortfolioActionCheckResponse,
@@ -21,6 +23,7 @@ from app.api.schemas import (
 from app.audit.logger import AuditLogger
 from app.core.evaluator import CollateralRiskEngine, RiskEvaluationError
 from app.lifecycle.service import CreditLifecycleEngine
+from app.market_data.aggregator import MarketDataAggregator
 
 router = APIRouter()
 audit_logger = AuditLogger(Path("./data/audit/audit_log.jsonl"))
@@ -36,6 +39,49 @@ def serialize(obj):
     if hasattr(obj, "__dict__"):
         return obj.__dict__
     return str(obj)
+
+
+@router.post("/market-data/normalize", response_model=MarketDataNormalizeResponse)
+def normalize_market_data(request: MarketDataNormalizeRequest) -> MarketDataNormalizeResponse:
+    aggregator = MarketDataAggregator()
+    instruments = [instrument.to_domain() for instrument in request.instruments]
+    holdings = [holding.to_domain() for holding in request.holdings]
+    client_quotes = {
+        key: quote.to_raw_quote() for key, quote in request.client_supplied_quotes.items()
+    }
+    client_fx_rates = {
+        (fx.from_currency.upper(), fx.to_currency.upper()): fx.to_fx_rate()
+        for fx in request.client_supplied_fx_rates
+    }
+    result = aggregator.normalize(
+        instruments=instruments or None,
+        holdings=holdings or None,
+        loan_currency=request.loan_currency,
+        market_data_policy=request.market_data_policy.to_domain(),
+        data_mode=request.data_mode,
+        client_supplied_quotes=client_quotes,
+        client_supplied_fx_rates=client_fx_rates,
+    )
+    normalized_payload = {
+        key: jsonable_encoder(data)
+        for key, data in result.normalized_market_data.items()
+    }
+    fx_decisions = {
+        key: {
+            "fx_rate_used": data.fx_rate_used,
+            "fx_source": data.fx_source,
+            "fx_timestamp": data.fx_timestamp,
+            "fx_quality_score": data.fx_quality_score,
+        }
+        for key, data in result.normalized_market_data.items()
+    }
+    return MarketDataNormalizeResponse(
+        normalized_market_data=normalized_payload,
+        warnings=result.warnings_by_instrument,
+        quality_scores=result.quality_report,
+        fx_decisions=jsonable_encoder(fx_decisions),
+        missing_data=result.missing_data,
+    )
 
 
 @router.post("/risk/evaluate", response_model=EvaluateResponse)
