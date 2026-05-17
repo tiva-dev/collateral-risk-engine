@@ -162,7 +162,7 @@ class MarketDataAggregator:
 
         for instrument in identities:
             quote, status, router_warnings = router.choose_quote_provider(data_mode, instrument, policy, now)
-            key = instrument.asset_id or instrument.stable_key
+            key = instrument.stable_key
             if quote is None:
                 warnings_by_instrument[key] = router_warnings
                 missing_data.append(key)
