@@ -3,9 +3,9 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
-from app.core.enums import AssetType, MarginState
+from app.core.enums import AssetType, MarginState, PortfolioActionType, RiskDecision
 from app.core.evaluator import CollateralRiskEngine
-from app.core.models import Holding, Loan, MarketData, OrderBook, OrderBookLevel, Policy
+from app.core.models import Holding, Loan, MarketData, OrderBook, OrderBookLevel, Policy, PortfolioAction
 from app.market_data.mock_provider import MockMarketDataProvider
 
 
@@ -81,6 +81,102 @@ class CollateralRiskEngineTests(unittest.TestCase):
         result = self.engine.evaluate("acct_5", holdings, Loan(principal=3_000), self.policy, market)
         self.assertIn(result.margin_state, {MarginState.MARGIN_CALL, MarginState.LIQUIDATION})
         self.assertGreaterEqual(result.trigger_levels.required_cure_amount, 0.0)
+
+    def test_origination_separates_requested_draw_from_zero_outstanding_balance(self) -> None:
+        holdings = [
+            Holding("AAPL", AssetType.LISTED_EQUITY, 10),
+            Holding("SPY", AssetType.ETF, 10),
+        ]
+        market = self.provider.get_snapshot([h.asset_id for h in holdings])
+        result = self.engine.evaluate(
+            "acct_origination",
+            holdings,
+            Loan(principal=0),
+            self.policy,
+            market,
+            requested_draw_amount=1_000,
+        )
+
+        self.assertEqual(result.outstanding_balance, 0.0)
+        self.assertEqual(result.requested_draw_amount, 1_000.0)
+        self.assertEqual(result.projected_loan_balance, 1_000.0)
+        self.assertEqual(result.available_credit, result.approved_credit_limit)
+        self.assertEqual(result.projected_available_credit, max(0.0, result.approved_credit_limit - 1_000.0))
+        self.assertGreater(result.dynamic_safety_requirement, 0.0)
+
+    def test_active_monitoring_keeps_outstanding_balance_explicit(self) -> None:
+        holdings = [
+            Holding("AAPL", AssetType.LISTED_EQUITY, 10),
+            Holding("SPY", AssetType.ETF, 10),
+        ]
+        market = self.provider.get_snapshot([h.asset_id for h in holdings])
+        result = self.engine.evaluate("acct_monitor", holdings, Loan(principal=1_000), self.policy, market)
+
+        self.assertEqual(result.outstanding_balance, 1_000.0)
+        self.assertEqual(result.requested_draw_amount, 0.0)
+        self.assertEqual(result.projected_loan_balance, 1_000.0)
+        self.assertEqual(result.loan_balance, result.projected_loan_balance)
+        self.assertEqual(result.available_credit, max(0.0, result.approved_credit_limit - 1_000.0))
+
+    def test_pre_trade_credit_draw_above_available_credit_is_reduced(self) -> None:
+        holdings = [Holding("AAPL", AssetType.LISTED_EQUITY, 10)]
+        market = self.provider.get_snapshot(["AAPL"])
+        baseline = self.engine.evaluate("acct_draw", holdings, Loan(principal=0), self.policy, market)
+        result = self.engine.pre_trade_check(
+            account_ref="acct_draw",
+            holdings=holdings,
+            loan=Loan(principal=0),
+            policy=self.policy,
+            market_data=market,
+            actions=[
+                PortfolioAction(
+                    action_type=PortfolioActionType.CREDIT_DRAW,
+                    amount=baseline.available_credit + 25.0,
+                )
+            ],
+        )
+
+        self.assertFalse(result.approved)
+        self.assertEqual(result.decision, RiskDecision.REDUCE_AVAILABLE_CREDIT)
+        self.assertEqual(result.reduced_available_credit, baseline.available_credit)
+
+    def test_pre_trade_withdrawal_that_breaks_safety_triggers_liquidation(self) -> None:
+        holdings = [Holding("AAPL", AssetType.LISTED_EQUITY, 10)]
+        market = self.provider.get_snapshot(["AAPL"])
+        result = self.engine.pre_trade_check(
+            account_ref="acct_withdraw",
+            holdings=holdings,
+            loan=Loan(principal=500),
+            policy=self.policy,
+            market_data=market,
+            actions=[
+                PortfolioAction(
+                    action_type=PortfolioActionType.WITHDRAWAL,
+                    asset_id="AAPL",
+                    quantity=9,
+                )
+            ],
+        )
+
+        self.assertFalse(result.approved)
+        self.assertEqual(result.decision, RiskDecision.LIQUIDATION)
+        self.assertGreater(result.required_repayment_amount, 0.0)
+
+    def test_pre_trade_repayment_can_clear_projected_credit_risk(self) -> None:
+        holdings = [Holding("THIN", AssetType.HIGH_VOLATILITY_EQUITY, 500)]
+        market = self.provider.get_snapshot(["THIN"])
+        result = self.engine.pre_trade_check(
+            account_ref="acct_repay",
+            holdings=holdings,
+            loan=Loan(principal=3_000),
+            policy=self.policy,
+            market_data=market,
+            actions=[PortfolioAction(action_type=PortfolioActionType.REPAYMENT, amount=3_000)],
+        )
+
+        self.assertTrue(result.approved)
+        self.assertEqual(result.decision, RiskDecision.APPROVE)
+        self.assertEqual(result.projected_loan_balance, 0.0)
 
 
 if __name__ == "__main__":

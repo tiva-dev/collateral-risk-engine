@@ -28,6 +28,29 @@ class MarginState(str, Enum):
     LIQUIDATION = "liquidation"
 
 
+class PortfolioActionType(str, Enum):
+    BUY = "buy"
+    SELL = "sell"
+    WITHDRAWAL = "withdrawal"
+    TRANSFER = "transfer"
+    REPAYMENT = "repayment"
+    CREDIT_DRAW = "credit_draw"
+
+
+class TransferDirection(str, Enum):
+    IN = "in"
+    OUT = "out"
+
+
+class RiskDecision(str, Enum):
+    APPROVE = "approve"
+    REJECT = "reject"
+    REQUIRE_REPAYMENT = "require_repayment"
+    REDUCE_AVAILABLE_CREDIT = "reduce_available_credit"
+    MARGIN_CALL = "margin_call"
+    LIQUIDATION = "liquidation"
+
+
 class DataMode(str, Enum):
     PROVIDED_BY_US = "provided_by_us"
     CLIENT_SUPPLIED = "client_supplied"
