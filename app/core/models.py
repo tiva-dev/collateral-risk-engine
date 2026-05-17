@@ -42,6 +42,7 @@ class PortfolioAction:
     quantity: float = 0.0
     amount: float = 0.0
     direction: TransferDirection = TransferDirection.OUT
+    funding_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class PortfolioActionCheck:
     quantity: float = 0.0
     amount: float = 0.0
     direction: TransferDirection = TransferDirection.OUT
+    funding_source: str | None = None
     withdraw_proceeds: bool = False
     to_asset_id: str | None = None
     to_asset_type: AssetType | None = None

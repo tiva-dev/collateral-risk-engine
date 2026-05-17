@@ -77,7 +77,7 @@ def pre_trade_check(request: PreTradeRiskCheckRequest) -> PreTradeRiskCheckRespo
         result = replace(
             result, reduced_available_credit=result.projected_available_credit
         )
-    return PreTradeRiskCheckResponse(result=result)
+    return PreTradeRiskCheckResponse(result=jsonable_encoder(asdict(result)))
 
 
 @router.post("/portfolio/action/check", response_model=PortfolioActionCheckResponse)
@@ -94,7 +94,7 @@ def check_portfolio_action(
     except (RiskEvaluationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    return PortfolioActionCheckResponse(result=result)
+    return PortfolioActionCheckResponse(result=jsonable_encoder(asdict(result)))
 
 
 @router.post("/credit/originate", response_model=LifecycleResponse)

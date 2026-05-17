@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from app.core.enums import (
     AssetType,
@@ -64,6 +64,7 @@ class PortfolioActionIn(BaseModel):
     quantity: float = 0.0
     amount: float = 0.0
     direction: TransferDirection = TransferDirection.OUT
+    funding_source: str | None = None
 
     def to_domain(self) -> PortfolioAction:
         return PortfolioAction(
@@ -73,6 +74,7 @@ class PortfolioActionIn(BaseModel):
             quantity=self.quantity,
             amount=self.amount,
             direction=self.direction,
+            funding_source=self.funding_source,
         )
 
 
@@ -116,6 +118,7 @@ class PortfolioActionCheckIn(BaseModel):
     quantity: float = 0.0
     amount: float = 0.0
     direction: TransferDirection = TransferDirection.OUT
+    funding_source: str | None = None
     withdraw_proceeds: bool = False
     to_asset_id: str | None = None
     to_asset_type: AssetType | None = None
@@ -130,6 +133,7 @@ class PortfolioActionCheckIn(BaseModel):
             quantity=self.quantity,
             amount=self.amount,
             direction=self.direction,
+            funding_source=self.funding_source,
             withdraw_proceeds=self.withdraw_proceeds,
             to_asset_id=self.to_asset_id,
             to_asset_type=self.to_asset_type,
@@ -237,7 +241,7 @@ class PreTradeRiskCheckRequest(BaseModel):
 
 
 class PreTradeRiskCheckResponse(BaseModel):
-    result: Any
+    result: LegacyPreTradeRiskCheckResult
 
 
 class PortfolioActionCheckRequest(BaseModel):
@@ -250,7 +254,7 @@ class PortfolioActionCheckRequest(BaseModel):
 
 
 class PortfolioActionCheckResponse(BaseModel):
-    result: Any
+    result: PortfolioActionCheckResultOut
 
 
 class OriginateRequest(BaseModel):
@@ -299,6 +303,63 @@ class LoanOut(BaseModel):
     accrued_interest: float = 0.0
     fees: float = 0.0
     currency: str = "USD"
+
+
+class AccountStateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    account_ref: str
+    holdings: list[HoldingIn]
+    pledged_cash_balance: float
+    loan: LoanOut
+    approved_credit_limit: float
+    available_credit: float
+    last_margin_state: MarginState
+    last_evaluation_time: datetime | None = None
+
+
+class LegacyPreTradeRiskCheckResult(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    account_ref: str
+    decision: RiskDecision
+    approved: bool
+    reason: str
+    current_outstanding_balance: float
+    current_available_credit: float
+    outstanding_balance: float
+    available_credit: float
+    requested_draw_amount: float
+    projected_loan_balance: float
+    projected_available_credit: float
+    projected_stressed_liquidation_value: float
+    dynamic_safety_requirement: float
+    minimum_stressed_liquidation_value: float
+    required_repayment_amount: float
+    reduced_available_credit: float | None = None
+    projected_margin_state: MarginState
+    projected_holdings: list[HoldingIn]
+    projected_evaluation: dict[str, Any]
+    created_at: datetime
+
+
+class PortfolioActionCheckResultOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    decision: RiskDecision
+    reason: str
+    current_outstanding_balance: float
+    current_available_credit: float
+    projected_outstanding_balance: float
+    projected_loan_balance: float
+    projected_approved_credit_limit: float
+    projected_available_credit: float
+    projected_margin_state: MarginState
+    required_repayment_amount: float
+    audit_id: str
+    evaluation_result: dict[str, Any]
+    projected_account_state: AccountStateOut
+    created_at: datetime
 
 
 class LifecycleResult(BaseModel):

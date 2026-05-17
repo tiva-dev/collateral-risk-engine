@@ -32,7 +32,16 @@ from app.risk.math_utils import round_money
 
 LIFECYCLE_MODEL_VERSION = "cre-v0.2.0"
 PORTFOLIO_ACTION_MODEL_VERSION = "cre-v0.21.0"
-PLEDGED_CASH_ASSET_ID = "PLEDGED_CASH_USD"
+PLEDGED_CASH_ASSET_ID_PREFIX = "PLEDGED_CASH"
+
+
+def pledged_cash_asset_id(currency: str) -> str:
+    normalized_currency = (currency or "USD").upper()
+    return f"{PLEDGED_CASH_ASSET_ID_PREFIX}_{normalized_currency}"
+
+
+def holding_identity(holding: Holding) -> tuple[str, AssetType, str]:
+    return (holding.asset_id, holding.asset_type, holding.currency)
 
 
 class CreditLifecycleEngine:
@@ -273,15 +282,32 @@ class CreditLifecycleEngine:
             )
             required_repayment = draw_result.required_cure_amount
         else:
-            projected_holdings, projected_cash, projected_loan = (
-                self._project_portfolio_action(
-                    holdings=aggregate_holdings(account_state.holdings),
-                    pledged_cash_balance=account_state.pledged_cash_balance,
-                    loan=account_state.loan,
-                    action=proposed_action,
-                    market_data=normalized_market_data,
+            try:
+                projected_holdings, projected_cash, projected_loan = (
+                    self._project_portfolio_action(
+                        holdings=aggregate_holdings(account_state.holdings),
+                        pledged_cash_balance=account_state.pledged_cash_balance,
+                        loan=account_state.loan,
+                        action=proposed_action,
+                        market_data=normalized_market_data,
+                    )
                 )
-            )
+            except ValueError as exc:
+                self._write_lifecycle_audit(
+                    event_type="portfolio_action_check_rejected",
+                    account_ref=account_state.account_ref,
+                    payload={
+                        "action_type": proposed_action.action_type.value,
+                        "pre_action_state": self._account_state_audit(account_state),
+                        "proposed_action": asdict(proposed_action),
+                        "decision": RiskDecision.REJECT.value,
+                        "reason": str(exc),
+                        "model_version": PORTFOLIO_ACTION_MODEL_VERSION,
+                        "policy_snapshot": self._policy_snapshot(policy),
+                        "risk_evaluation_audit_id": pre_evaluation.audit_id,
+                    },
+                )
+                raise
             projected_evaluation_holdings = self._holdings_with_pledged_cash(
                 projected_holdings,
                 projected_cash,
@@ -544,14 +570,18 @@ class CreditLifecycleEngine:
         action: PortfolioActionCheck,
         market_data: Mapping[str, MarketData],
     ) -> tuple[list[Holding], float, Loan]:
-        quantities = {holding.asset_id: holding for holding in holdings}
+        quantities = {holding_identity(holding): holding for holding in holdings}
         pledged_cash = round_money(max(0.0, pledged_cash_balance))
         projected_loan = loan
 
         if action.action_type == PortfolioActionType.SELL:
             quantity = self._asset_quantity(action, market_data)
             self._add_holding_delta(
-                quantities, action.asset_id, action.asset_type, -quantity
+                quantities,
+                action.asset_id,
+                action.asset_type,
+                -quantity,
+                projected_loan.currency,
             )
             proceeds = self._market_amount(action.asset_id, quantity, market_data)
             if not action.withdraw_proceeds:
@@ -563,9 +593,35 @@ class CreditLifecycleEngine:
                 if action.amount > 0
                 else self._market_amount(action.asset_id, quantity, market_data)
             )
-            pledged_cash = round_money(max(0.0, pledged_cash - cost))
+            if cost > pledged_cash + 1e-9:
+                funding_source = (action.funding_source or "").lower()
+                shortfall = round_money(cost - pledged_cash)
+                if funding_source in {"draw", "credit_draw"}:
+                    projected_loan = Loan(
+                        principal=round_money(projected_loan.principal + shortfall),
+                        accrued_interest=projected_loan.accrued_interest,
+                        fees=projected_loan.fees,
+                        currency=projected_loan.currency,
+                    )
+                    pledged_cash = 0.0
+                elif funding_source in {
+                    "transfer_in",
+                    "external_cash",
+                    "external_cash_source",
+                }:
+                    pledged_cash = 0.0
+                else:
+                    raise ValueError(
+                        "buy action requires sufficient pledged cash or an explicit draw, transfer_in, or external_cash funding_source"
+                    )
+            else:
+                pledged_cash = round_money(pledged_cash - cost)
             self._add_holding_delta(
-                quantities, action.asset_id, action.asset_type, quantity
+                quantities,
+                action.asset_id,
+                action.asset_type,
+                quantity,
+                projected_loan.currency,
             )
         elif action.action_type == PortfolioActionType.WITHDRAW_CASH:
             amount = self._cash_amount(action, "withdraw_cash")
@@ -578,7 +634,11 @@ class CreditLifecycleEngine:
         }:
             quantity = self._asset_quantity(action, market_data)
             self._add_holding_delta(
-                quantities, action.asset_id, action.asset_type, -quantity
+                quantities,
+                action.asset_id,
+                action.asset_type,
+                -quantity,
+                projected_loan.currency,
             )
         elif action.action_type in {
             PortfolioActionType.TRANSFER_SECURITY,
@@ -587,7 +647,11 @@ class CreditLifecycleEngine:
             quantity = self._asset_quantity(action, market_data)
             delta = quantity if action.direction == TransferDirection.IN else -quantity
             self._add_holding_delta(
-                quantities, action.asset_id, action.asset_type, delta
+                quantities,
+                action.asset_id,
+                action.asset_type,
+                delta,
+                projected_loan.currency,
             )
         elif action.action_type in {
             PortfolioActionType.REPAY,
@@ -597,7 +661,11 @@ class CreditLifecycleEngine:
         elif action.action_type == PortfolioActionType.REBALANCE:
             sell_quantity = self._asset_quantity(action, market_data)
             self._add_holding_delta(
-                quantities, action.asset_id, action.asset_type, -sell_quantity
+                quantities,
+                action.asset_id,
+                action.asset_type,
+                -sell_quantity,
+                projected_loan.currency,
             )
             proceeds = self._market_amount(action.asset_id, sell_quantity, market_data)
             buy_amount = action.to_amount if action.to_amount > 0 else proceeds
@@ -620,7 +688,11 @@ class CreditLifecycleEngine:
                 )
             )
             self._add_holding_delta(
-                quantities, action.to_asset_id, action.to_asset_type, to_quantity
+                quantities,
+                action.to_asset_id,
+                action.to_asset_type,
+                to_quantity,
+                projected_loan.currency,
             )
         else:
             raise ValueError(
@@ -692,27 +764,44 @@ class CreditLifecycleEngine:
 
     def _add_holding_delta(
         self,
-        holdings: dict[str, Holding],
+        holdings: dict[tuple[str, AssetType, str], Holding],
         asset_id: str | None,
         asset_type: AssetType | None,
         delta: float,
+        default_currency: str = "USD",
     ) -> None:
         if not asset_id:
             raise ValueError("security action requires asset_id")
-        current = holdings.get(asset_id)
+        candidates = [
+            key
+            for key in holdings
+            if key[0] == asset_id and (asset_type is None or key[1] == asset_type)
+        ]
+        if len(candidates) > 1:
+            raise ValueError(
+                f"{asset_id} action is ambiguous across asset_type or currency; provide a unique asset identity"
+            )
+        key = candidates[0] if candidates else None
+        current = holdings.get(key) if key else None
         if current is None:
             if delta < 0:
                 raise ValueError(f"cannot remove {asset_id}; no current holding exists")
             if asset_type is None:
                 raise ValueError("new security action requires asset_type")
-            holdings[asset_id] = Holding(
-                asset_id=asset_id, asset_type=asset_type, quantity=round(delta, 12)
+            new_holding = Holding(
+                asset_id=asset_id,
+                asset_type=asset_type,
+                quantity=round(delta, 12),
+                currency=default_currency,
             )
+            holdings[holding_identity(new_holding)] = new_holding
             return
         new_quantity = round(current.quantity + delta, 12)
         if new_quantity < -1e-9:
             raise ValueError(f"action exceeds available {asset_id} quantity")
-        holdings[asset_id] = replace(current, quantity=max(0.0, new_quantity))
+        holdings[holding_identity(current)] = replace(
+            current, quantity=max(0.0, new_quantity)
+        )
 
     def _asset_quantity(
         self, action: PortfolioActionCheck, market_data: Mapping[str, MarketData]
@@ -765,7 +854,7 @@ class CreditLifecycleEngine:
         if pledged_cash_balance > 0:
             combined.append(
                 Holding(
-                    PLEDGED_CASH_ASSET_ID,
+                    pledged_cash_asset_id(currency),
                     AssetType.CASH,
                     round_money(pledged_cash_balance),
                     currency,
@@ -775,7 +864,9 @@ class CreditLifecycleEngine:
 
     def _strip_pledged_cash_holding(self, holdings: list[Holding]) -> list[Holding]:
         return [
-            holding for holding in holdings if holding.asset_id != PLEDGED_CASH_ASSET_ID
+            holding
+            for holding in holdings
+            if not holding.asset_id.startswith(f"{PLEDGED_CASH_ASSET_ID_PREFIX}_")
         ]
 
     def _market_data_with_pledged_cash(
@@ -784,10 +875,11 @@ class CreditLifecycleEngine:
         currency: str,
     ) -> dict[str, MarketData]:
         normalized = dict(market_data)
+        asset_id = pledged_cash_asset_id(currency)
         normalized.setdefault(
-            PLEDGED_CASH_ASSET_ID,
+            asset_id,
             MarketData(
-                asset_id=PLEDGED_CASH_ASSET_ID,
+                asset_id=asset_id,
                 last_price=1.0,
                 bid=1.0,
                 ask=1.0,

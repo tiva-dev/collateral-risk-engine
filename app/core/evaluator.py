@@ -235,6 +235,17 @@ class CollateralRiskEngine:
                 )
             )
         except RiskEvaluationError as exc:
+            if self.audit_logger:
+                self.audit_logger.write(
+                    {
+                        "event_type": "pre_trade_check_rejected",
+                        "account_ref": account_ref,
+                        "decision": RiskDecision.REJECT.value,
+                        "reason": str(exc),
+                        "actions": [asdict(action) for action in actions],
+                        "risk_evaluation_audit_id": current_evaluation.audit_id,
+                    }
+                )
             projected_evaluation = current_evaluation
             return PreTradeRiskCheckResult(
                 account_ref=account_ref,
@@ -306,9 +317,15 @@ class CollateralRiskEngine:
         market_data: Mapping[str, MarketData],
         actions: list[PortfolioAction],
     ) -> tuple[list[Holding], float, float]:
-        projected = {holding.asset_id: holding for holding in holdings}
+        projected = {self._holding_identity(holding): holding for holding in holdings}
         requested_draw_amount = 0.0
         repayment_amount = 0.0
+        available_buy_funding = sum(
+            self._cash_amount(action, "credit draw")
+            for action in actions
+            if action.action_type
+            in {PortfolioActionType.CREDIT_DRAW, PortfolioActionType.DRAW}
+        )
 
         for action in actions:
             if action.action_type in {
@@ -339,6 +356,18 @@ class CollateralRiskEngine:
             }:
                 delta = -quantity
             elif action.action_type == PortfolioActionType.BUY:
+                funding_source = (action.funding_source or "").lower()
+                if funding_source not in {
+                    "transfer_in",
+                    "external_cash",
+                    "external_cash_source",
+                }:
+                    cost = self._action_market_amount(action, quantity, market_data)
+                    if cost > available_buy_funding + 1e-9:
+                        raise RiskEvaluationError(
+                            "buy action requires an explicit credit_draw, draw, transfer_in, or external_cash funding_source"
+                        )
+                    available_buy_funding = max(0.0, available_buy_funding - cost)
                 delta = quantity
             elif action.action_type in {
                 PortfolioActionType.TRANSFER,
@@ -350,7 +379,18 @@ class CollateralRiskEngine:
                     f"unsupported action_type: {action.action_type.value}"
                 )
 
-            current = projected.get(asset_id)
+            candidates = [
+                key
+                for key in projected
+                if key[0] == asset_id
+                and (action.asset_type is None or key[1] == action.asset_type)
+            ]
+            if len(candidates) > 1:
+                raise RiskEvaluationError(
+                    f"{action.action_type.value} action for {asset_id} is ambiguous across asset_type or currency"
+                )
+            current_key = candidates[0] if candidates else None
+            current = projected.get(current_key) if current_key else None
             if current is None:
                 if delta < 0:
                     raise RiskEvaluationError(
@@ -360,11 +400,13 @@ class CollateralRiskEngine:
                     raise RiskEvaluationError(
                         f"{action.action_type.value} action for new asset requires asset_type"
                     )
-                projected[asset_id] = Holding(
+                new_holding = Holding(
                     asset_id=asset_id,
                     asset_type=action.asset_type,
                     quantity=delta,
+                    currency="USD",
                 )
+                projected[self._holding_identity(new_holding)] = new_holding
                 continue
 
             new_quantity = current.quantity + delta
@@ -372,9 +414,29 @@ class CollateralRiskEngine:
                 raise RiskEvaluationError(
                     f"{action.action_type.value} exceeds available {asset_id} quantity"
                 )
-            projected[asset_id] = replace(current, quantity=max(0.0, new_quantity))
+            projected[self._holding_identity(current)] = replace(
+                current, quantity=max(0.0, new_quantity)
+            )
 
         return list(projected.values()), requested_draw_amount, repayment_amount
+
+    def _holding_identity(self, holding: Holding) -> tuple[str, AssetType, str]:
+        return (holding.asset_id, holding.asset_type, holding.currency)
+
+    def _action_market_amount(
+        self,
+        action: PortfolioAction,
+        quantity: float,
+        market_data: Mapping[str, MarketData],
+    ) -> float:
+        if action.amount > 0:
+            return action.amount
+        market = market_data.get(action.asset_id or "")
+        if market is None or market.last_price <= 0:
+            raise RiskEvaluationError(
+                f"{action.action_type.value} action requires positive market price"
+            )
+        return quantity * market.last_price
 
     def _asset_quantity(
         self,
