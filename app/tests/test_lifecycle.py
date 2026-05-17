@@ -10,6 +10,8 @@ from app.core.models import Holding, Loan, MarketData, OrderBook, OrderBookLevel
 from app.lifecycle.service import CreditLifecycleEngine, aggregate_holdings, apply_repayment
 from app.risk.math_utils import round_money
 
+MIN_COVERAGE_RATIO = 1e-9
+
 
 class CreditLifecycleEngineTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -43,7 +45,7 @@ class CreditLifecycleEngineTests(unittest.TestCase):
             min(
                 result.approved_credit_limit,
                 result.evaluation.stressed_liquidation_value
-                / max(result.evaluation.trigger_levels.dynamic_warning_coverage, 1e-9),
+                / max(result.evaluation.trigger_levels.dynamic_warning_coverage, MIN_COVERAGE_RATIO),
             )
         )
         self.assertEqual(result.current_available_credit, safe_credit_limit)
@@ -73,7 +75,7 @@ class CreditLifecycleEngineTests(unittest.TestCase):
             min(
                 result.approved_credit_limit,
                 result.evaluation.stressed_liquidation_value
-                / max(result.evaluation.trigger_levels.dynamic_warning_coverage, 1e-9),
+                / max(result.evaluation.trigger_levels.dynamic_warning_coverage, MIN_COVERAGE_RATIO),
             )
         )
         self.assertEqual(result.projected_available_credit, max(0.0, projected_safe_credit_limit - 2_000.0))
