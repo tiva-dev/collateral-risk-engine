@@ -23,6 +23,7 @@ from app.risk.adjustments import all_adjustments, risk_drivers_from_breakdown
 from app.risk.math_utils import clamp, round_money, safe_div
 
 MODEL_VERSION = "cre-v0.1.0"
+QUANTITY_TOLERANCE = 1e-9
 
 
 class RiskEvaluationError(Exception):
@@ -262,7 +263,7 @@ class CollateralRiskEngine:
                 continue
 
             new_quantity = current.quantity + delta
-            if new_quantity < -1e-9:
+            if new_quantity < -QUANTITY_TOLERANCE:
                 raise RiskEvaluationError(f"{action.action_type.value} exceeds available {asset_id} quantity")
             projected[asset_id] = replace(current, quantity=max(0.0, new_quantity))
 

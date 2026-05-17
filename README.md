@@ -2,13 +2,14 @@
 
 Institution-grade first-pass engine for investment-backed lending.
 
-The engine calculates dynamic collateral value, effective LTV, margin state, stressed liquidation recovery, and liquidation recommendations from portfolio, loan, policy, and market data inputs.
+The engine calculates dynamic collateral value, effective LTV, margin state, stressed liquidation recovery, and liquidation recommendations from portfolio, loan, policy, and market data inputs. v0.2 also adds credit lifecycle endpoints for origination, draw checks, and active loan monitoring.
 
 ## What is included
 
 - Python risk engine
 - FastAPI endpoint: `POST /risk/evaluate`
 - Pre-trade risk check endpoint: `POST /risk/pre-trade-check`
+- Lifecycle endpoints: `POST /credit/originate`, `POST /credit/draw/check`, `POST /loan/monitor`
 - Dynamic LTV adjustments for volatility, liquidity, spread, concentration, stress, and data quality
 - Credit lifecycle fields for origination and monitoring
 - Recovery-based margin state calculation
@@ -48,6 +49,7 @@ The payload contains:
 The response contains:
 
 - `approved_credit_limit`
+- `loan_balance`
 - `outstanding_balance`
 - `available_credit`
 - `requested_draw_amount`
@@ -56,6 +58,7 @@ The response contains:
 - `risk_adjusted_collateral_value`
 - `stressed_liquidation_value`
 - `dynamic_safety_requirement`
+- `minimum_stressed_liquidation_value`
 - `recovery_coverage_ratio`
 - `margin_state`
 - `trigger_levels`
@@ -85,6 +88,8 @@ The engine projects the post-action portfolio and loan balance. It only approves
 - `reduce_available_credit`
 - `margin_call`
 - `liquidation`
+
+Lifecycle draw-check decisions include `approved`, `partially_approved`, or `rejected`.
 
 ## Design principle
 

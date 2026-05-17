@@ -51,6 +51,18 @@ class RiskDecision(str, Enum):
     LIQUIDATION = "liquidation"
 
 
+class LifecycleDecisionValue(str, Enum):
+    APPROVED = "approved"
+    PARTIALLY_APPROVED = "partially_approved"
+    REJECTED = "rejected"
+    REDUCE_AVAILABLE_CREDIT = "reduce_available_credit"
+    SAFE = "safe"
+    WATCH = "watch"
+    RESTRICT_NEW_BORROWING = "restrict_new_borrowing"
+    MARGIN_CALL = "margin_call"
+    LIQUIDATION = "liquidation"
+
+
 class DataMode(str, Enum):
     PROVIDED_BY_US = "provided_by_us"
     CLIENT_SUPPLIED = "client_supplied"

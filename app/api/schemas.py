@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
-from app.core.enums import AssetType, PortfolioActionType, RiskAppetite, TransferDirection
+from app.core.enums import (
+    AssetType,
+    LifecycleDecisionValue,
+    MarginState,
+    PortfolioActionType,
+    RiskAppetite,
+    RiskDecision,
+    TransferDirection,
+)
 from app.core.models import (
     Holding,
     Loan,
@@ -165,3 +174,104 @@ class PreTradeRiskCheckRequest(BaseModel):
 
 class PreTradeRiskCheckResponse(BaseModel):
     result: dict[str, Any]
+
+
+class OriginateRequest(BaseModel):
+    account_ref: str
+    policy: PolicyIn
+    holdings: list[HoldingIn]
+    market_data: dict[str, MarketDataIn]
+
+
+class DrawCheckRequest(BaseModel):
+    account_ref: str
+    current_loan: LoanIn
+    requested_draw_amount: float
+    requested_repayment_amount: float = 0.0
+    policy: PolicyIn
+    holdings: list[HoldingIn]
+    market_data: dict[str, MarketDataIn]
+
+
+class MonitorRequest(BaseModel):
+    account_ref: str
+    loan: LoanIn
+    policy: PolicyIn
+    holdings: list[HoldingIn]
+    market_data: dict[str, MarketDataIn]
+
+
+class PreTradeCheckRequest(BaseModel):
+    account_ref: str
+    loan: LoanIn
+    policy: PolicyIn
+    holdings: list[HoldingIn]
+    market_data: dict[str, MarketDataIn]
+    proposed_holding_changes: list[HoldingIn] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("proposed_holding_changes", "holding_changes", "proposed_trades", "trades"),
+    )
+    requested_draw_amount: float = 0.0
+    requested_repayment_amount: float = 0.0
+
+
+class LoanOut(BaseModel):
+    principal: float
+    accrued_interest: float = 0.0
+    fees: float = 0.0
+    currency: str = "USD"
+
+
+class LifecycleResult(BaseModel):
+    decision: LifecycleDecisionValue
+    reason: str
+    current_outstanding_balance: float
+    current_available_credit: float
+    projected_outstanding_balance: float | None = None
+    projected_available_credit: float | None = None
+    projected_margin_state: MarginState | None = None
+    approved_credit_limit: float
+    margin_state: MarginState
+    required_cure_amount: float
+    minimum_stressed_liquidation_value: float
+    max_approved_draw_amount: float | None = None
+    current_loan: LoanOut | None = None
+    projected_loan: LoanOut | None = None
+    risk_adjusted_collateral_value: float | None = None
+    stressed_liquidation_value: float | None = None
+    asset_results: list[Any] | None = None
+    liquidation_plan: dict[str, Any] | None = None
+    evaluation: dict[str, Any]
+    audit_id: str
+    created_at: datetime
+
+
+class LifecycleResponse(BaseModel):
+    result: LifecycleResult
+
+
+class PreTradeResult(BaseModel):
+    decision: RiskDecision
+    reason: str
+    current_outstanding_balance: float
+    current_available_credit: float
+    projected_outstanding_balance: float | None = None
+    projected_available_credit: float | None = None
+    projected_margin_state: MarginState | None = None
+    reduced_available_credit: float | None = None
+    approved_credit_limit: float
+    margin_state: MarginState
+    required_cure_amount: float
+    minimum_stressed_liquidation_value: float
+    current_loan: LoanOut
+    projected_loan: LoanOut | None = None
+    current_holdings: list[HoldingIn]
+    projected_holdings: list[HoldingIn]
+    liquidation_plan: dict[str, Any] | None = None
+    evaluation: dict[str, Any]
+    audit_id: str
+    created_at: datetime
+
+
+class PreTradeResponse(BaseModel):
+    result: PreTradeResult
