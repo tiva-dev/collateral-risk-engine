@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from app.core.enums import (
     AssetType,
@@ -31,7 +31,7 @@ from app.core.models import (
 class HoldingIn(BaseModel):
     asset_id: str
     asset_type: AssetType
-    quantity: float
+    quantity: float = Field(ge=0)
     currency: str = "USD"
 
     def to_domain(self) -> Holding:
@@ -44,9 +44,9 @@ class HoldingIn(BaseModel):
 
 
 class LoanIn(BaseModel):
-    principal: float
-    accrued_interest: float = 0.0
-    fees: float = 0.0
+    principal: float = Field(ge=0)
+    accrued_interest: float = Field(default=0.0, ge=0)
+    fees: float = Field(default=0.0, ge=0)
     currency: str = "USD"
 
     def to_domain(self) -> Loan:
@@ -84,10 +84,10 @@ class AccountStateIn(BaseModel):
     holdings: list[HoldingIn]
     pledged_cash_balance: float = 0.0
     loan_principal: float = Field(
-        validation_alias=AliasChoices("loan_principal", "principal")
+        ge=0, validation_alias=AliasChoices("loan_principal", "principal")
     )
-    accrued_interest: float = 0.0
-    fees: float = 0.0
+    accrued_interest: float = Field(default=0.0, ge=0)
+    fees: float = Field(default=0.0, ge=0)
     loan_currency: str = "USD"
     approved_credit_limit: float = 0.0
     available_credit: float = 0.0
@@ -144,8 +144,8 @@ class PortfolioActionCheckIn(BaseModel):
 
 
 class OrderBookLevelIn(BaseModel):
-    price: float
-    quantity: float
+    price: float = Field(gt=0)
+    quantity: float = Field(ge=0)
 
     def to_domain(self) -> OrderBookLevel:
         return OrderBookLevel(price=self.price, quantity=self.quantity)
@@ -164,19 +164,25 @@ class OrderBookIn(BaseModel):
 
 class MarketDataIn(BaseModel):
     asset_id: str
-    last_price: float
-    bid: float | None = None
-    ask: float | None = None
+    last_price: float = Field(gt=0)
+    bid: float | None = Field(default=None, gt=0)
+    ask: float | None = Field(default=None, gt=0)
     average_daily_volume: float | None = None
     average_dollar_volume: float | None = None
     volatility_30d: float | None = None
     volatility_90d: float | None = None
     intraday_volatility: float | None = None
     recent_return_1d: float | None = None
-    data_quality_score: float = 1.0
+    data_quality_score: float = Field(default=1.0, ge=0, le=1)
     halted: bool = False
     order_book: OrderBookIn | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_bid_ask(self):
+        if self.bid is not None and self.ask is not None and self.bid > self.ask:
+            raise ValueError("bid must be less than or equal to ask")
+        return self
 
     def to_domain(self) -> MarketData:
         return MarketData(
@@ -201,8 +207,8 @@ class PolicyIn(BaseModel):
     base_ltv: dict[AssetType, float]
     risk_appetite: RiskAppetite = RiskAppetite.BALANCED
     asset_ltv_caps: dict[AssetType, float] = Field(default_factory=dict)
-    max_participation_rate: float = 0.10
-    min_data_quality_score: float = 0.35
+    max_participation_rate: float = Field(default=0.10, ge=0, le=1)
+    min_data_quality_score: float = Field(default=0.35, ge=0, le=1)
     allow_lending_on_stale_or_halted_assets: bool = False
 
     def to_domain(self) -> Policy:
@@ -252,9 +258,9 @@ class ClientQuoteIn(BaseModel):
     exchange: str | None = None
     currency: str | None = None
     asset_type: AssetType = AssetType.LISTED_EQUITY
-    local_price: float
-    bid: float | None = None
-    ask: float | None = None
+    local_price: float = Field(gt=0)
+    bid: float | None = Field(default=None, gt=0)
+    ask: float | None = Field(default=None, gt=0)
     average_daily_volume: float | None = None
     average_dollar_volume: float | None = None
     volatility_30d: float | None = None
@@ -263,10 +269,16 @@ class ClientQuoteIn(BaseModel):
     recent_return_1d: float | None = None
     order_book: OrderBookIn | None = None
     timestamp: datetime | None = None
-    data_quality_score: float = 1.0
+    data_quality_score: float = Field(default=1.0, ge=0, le=1)
     warnings: list[str] = Field(default_factory=list)
     provider_name: str = "client_supplied"
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_bid_ask(self):
+        if self.bid is not None and self.ask is not None and self.bid > self.ask:
+            raise ValueError("bid must be less than or equal to ask")
+        return self
 
     def to_raw_quote(self):
         from app.market_data.identity import InstrumentIdentity
@@ -303,9 +315,9 @@ class ClientQuoteIn(BaseModel):
 class ClientFXRateIn(BaseModel):
     from_currency: str
     to_currency: str
-    rate: float
+    rate: float = Field(gt=0)
     timestamp: datetime | None = None
-    quality_score: float = 1.0
+    quality_score: float = Field(default=1.0, ge=0, le=1)
     warnings: list[str] = Field(default_factory=list)
     provider_name: str = "client_supplied"
 
@@ -327,10 +339,10 @@ class ClientFXRateIn(BaseModel):
 class FXPolicyIn(BaseModel):
     preferred_source: str = "client"
     allow_fallback_provider: bool = True
-    max_fx_age_minutes: int = 24 * 60
-    stale_fx_haircut: float = 0.35
+    max_fx_age_minutes: int = Field(default=24 * 60, gt=0)
+    stale_fx_haircut: float = Field(default=0.35, ge=0, le=1)
     use_conservative_rate_when_sources_disagree: bool = False
-    minimum_fx_quality_score: float = 0.50
+    minimum_fx_quality_score: float = Field(default=0.50, ge=0, le=1)
 
     def to_domain(self):
         from app.market_data.policy import FXPolicy
@@ -342,8 +354,8 @@ class MarketDataPolicyIn(BaseModel):
     fx: FXPolicyIn = Field(default_factory=FXPolicyIn)
     max_quote_age_minutes_by_asset_type: dict[AssetType, int] = Field(default_factory=dict)
     max_quote_age_minutes_by_exchange: dict[str, int] = Field(default_factory=dict)
-    stale_quote_haircut: float = 0.35
-    minimum_quote_quality_score: float = 0.50
+    stale_quote_haircut: float = Field(default=0.35, ge=0, le=1)
+    minimum_quote_quality_score: float = Field(default=0.50, ge=0, le=1)
     allow_fallback_provider: bool = True
 
     def to_domain(self):
@@ -377,17 +389,20 @@ class MarketDataNormalizeRequest(BaseModel):
 
 
 class MarketDataNormalizeResponse(BaseModel):
+    market_data_model_version: str
     normalized_market_data: dict[str, Any]
     warnings: dict[str, list[str]]
     quality_scores: dict[str, float]
     fx_decisions: dict[str, Any]
     missing_data: list[str]
+    evaluator_market_data: dict[str, Any] = Field(default_factory=dict)
+    evaluator_key_to_stable_key: dict[str, str] = Field(default_factory=dict)
 
 
 class EvaluateRequest(BaseModel):
     account_ref: str
     loan: LoanIn
-    requested_draw_amount: float = 0.0
+    requested_draw_amount: float = Field(default=0.0, ge=0)
     policy: PolicyIn
     holdings: list[HoldingIn]
     market_data: dict[str, MarketDataIn]
@@ -433,8 +448,8 @@ class OriginateRequest(BaseModel):
 class DrawCheckRequest(BaseModel):
     account_ref: str
     current_loan: LoanIn
-    requested_draw_amount: float
-    requested_repayment_amount: float = 0.0
+    requested_draw_amount: float = Field(ge=0)
+    requested_repayment_amount: float = Field(default=0.0, ge=0)
     policy: PolicyIn
     holdings: list[HoldingIn]
     market_data: dict[str, MarketDataIn]
@@ -465,9 +480,9 @@ class PreTradeCheckRequest(BaseModel):
 
 
 class LoanOut(BaseModel):
-    principal: float
-    accrued_interest: float = 0.0
-    fees: float = 0.0
+    principal: float = Field(ge=0)
+    accrued_interest: float = Field(default=0.0, ge=0)
+    fees: float = Field(default=0.0, ge=0)
     currency: str = "USD"
 
 

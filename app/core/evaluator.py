@@ -28,7 +28,9 @@ from app.liquidation.recovery import estimate_stressed_recovery
 from app.risk.adjustments import all_adjustments, risk_drivers_from_breakdown
 from app.risk.math_utils import clamp, round_money, safe_div
 
-MODEL_VERSION = "cre-v0.1.0"
+from app.version import RISK_MODEL_VERSION
+
+MODEL_VERSION = RISK_MODEL_VERSION
 QUANTITY_TOLERANCE = 1e-9
 
 

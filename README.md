@@ -179,3 +179,46 @@ Mock market status support covers `NASDAQ`, `NYSE`, `NGX`, `XPAR`, `XLON`, and `
 ### Not included until v0.4
 
 v0.3 does not implement live WebSocket streaming, live monitoring feeds, exchange calendar completeness, or real external provider connections. v0.4 is expected to handle live monitoring and event streams.
+
+## v0.3.1 functional hardening notes
+
+### Versioning
+
+The project version is centralized in `app/version.py` and is currently `0.3.1`. The FastAPI app advertises this version, risk/lifecycle audit payloads use the same release family, and market-data normalization responses include `market_data_model_version` (`market-data-v0.3.1`).
+
+### Stable market identity and evaluator keys
+
+`InstrumentIdentity.stable_key` is the primary normalized market-data identity. It is composed from exchange, symbol, currency, and asset type (for example `NGX:MTNN:NGN:LISTED_EQUITY`) so two instruments with the same client `asset_id` or symbol cannot collide when they differ by exchange, currency, or asset type.
+
+`asset_id` remains a client-facing or legacy reference. Normalization keeps stable-keyed `normalized_market_data` for review/debugging and separately produces evaluator-keyed `MarketData` through `MarketDataAggregationResult.to_core_market_data()` and the response fields `evaluator_market_data` / `evaluator_key_to_stable_key`. The evaluator map is keyed to the exact holding `asset_id` values passed to `CollateralRiskEngine.evaluate`, so a holding such as `NGX:MTNN:NGN` or a legacy holding `MTNN` with an explicit `InstrumentIdentity` receives correctly keyed market data without overwriting other instruments.
+
+`POST /market-data/normalize` now rejects requests where both `instruments` and `holdings` are empty. If both are supplied, `instruments` take precedence for market identity; holdings are used only to produce evaluator-keyed output.
+
+### Portfolio action currency requirements
+
+When `buy`, inbound `transfer_security`, or `rebalance` creates a new security holding, the engine no longer assigns the loan currency as the new asset currency. The currency must be inferable from normalized `MarketData.metadata["instrument"]["currency"]`, explicit market-data metadata, or an instrument-style asset id such as `NGX:MTNN:NGN`. If no currency can be determined, the action is rejected with a clear error. Legacy USD-only snapshot mocks without metadata are treated as legacy USD snapshots for backward compatibility.
+
+### Buy funded by draw
+
+A buy with `funding_source = "draw"` or `"credit_draw"` must pass the same safe draw gate used by `/credit/draw/check` before the buy is projected. If the required shortfall exceeds the safe draw amount, the engine rejects the action rather than treating a partial draw as full buy funding.
+
+### Liquidation plan completeness
+
+`LiquidationPlan` now includes:
+
+- `estimated_total_recovery`
+- `unrecovered_target_amount`
+- `plan_complete`
+
+If available liquid collateral cannot meet the target recovery, `plan_complete` is `false` and the `reason` includes `insufficient_liquid_collateral_to_meet_target_recovery`.
+
+### Market-data provider abstractions
+
+The canonical provider contract is `app.market_data.providers.MarketDataProvider`, which supplies `RawQuote`, `FXRate`, and market-status data keyed by stable instrument identity. The old snapshot contract in `app.market_data.base` is retained only as a documented legacy compatibility layer (`LegacySnapshotProvider`), and `app.market_data.mock_provider.MockMarketDataProvider` is marked as a deprecated legacy snapshot mock. New tests and integrations should use `MockEquityProvider`, `MockFXProvider`, or `ClientSuppliedProvider`.
+
+### Other hardening
+
+- Conservative FX selection first filters sources by quality threshold before selecting the conservative acceptable rate; if no source passes, the FX decision is marked below threshold instead of blindly selecting the lowest stale rate.
+- Numeric inputs validate positive FX rates/prices, positive bid/ask when supplied, `bid <= ask`, quality scores and LTV/haircut-like rates in `[0, 1]`, positive max-age windows, non-negative loan components, and non-negative holding quantities.
+- Backtesting compares flat LTV with the lifecycle safe credit limit rather than raw approved credit.
+- Stress scenarios now shock order-book bid and ask depth: prices follow price/spread shocks, quantities follow volume shocks, and liquidity collapse materially reduces visible depth.

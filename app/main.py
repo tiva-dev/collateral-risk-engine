@@ -1,10 +1,11 @@
 from fastapi import FastAPI
 
 from app.api.routes import router
+from app.version import API_VERSION
 
 app = FastAPI(
     title="Collateral Risk Engine",
-    version="0.1.0",
+    version=API_VERSION,
     description="Dynamic collateral risk and liquidation intelligence engine for investment-backed lending.",
 )
 

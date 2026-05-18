@@ -29,9 +29,11 @@ from app.lifecycle.models import (
     now_utc,
 )
 from app.risk.math_utils import round_money
+from app.version import LIFECYCLE_MODEL_VERSION as APP_LIFECYCLE_MODEL_VERSION
+from app.version import PORTFOLIO_ACTION_MODEL_VERSION as APP_PORTFOLIO_ACTION_MODEL_VERSION
 
-LIFECYCLE_MODEL_VERSION = "cre-v0.2.0"
-PORTFOLIO_ACTION_MODEL_VERSION = "cre-v0.21.0"
+LIFECYCLE_MODEL_VERSION = APP_LIFECYCLE_MODEL_VERSION
+PORTFOLIO_ACTION_MODEL_VERSION = APP_PORTFOLIO_ACTION_MODEL_VERSION
 PLEDGED_CASH_ASSET_ID_PREFIX = "PLEDGED_CASH"
 
 
@@ -45,11 +47,11 @@ def holding_identity(holding: Holding) -> tuple[str, AssetType, str]:
 
 
 class CreditLifecycleEngine:
-    """Credit lifecycle orchestration that reuses the v0.1 risk evaluator.
+    """Credit lifecycle orchestration that reuses the core risk evaluator.
 
     The lifecycle engine deliberately delegates collateral valuation, stressed
     recovery, dynamic margin states, cure math, and liquidation planning to
-    ``CollateralRiskEngine`` so v0.2 extends rather than replaces v0.1 logic.
+    ``CollateralRiskEngine`` so lifecycle controls extend rather than replace core risk logic.
     """
 
     def __init__(
@@ -285,11 +287,13 @@ class CreditLifecycleEngine:
             try:
                 projected_holdings, projected_cash, projected_loan = (
                     self._project_portfolio_action(
+                        account_ref=account_state.account_ref,
                         holdings=aggregate_holdings(account_state.holdings),
                         pledged_cash_balance=account_state.pledged_cash_balance,
                         loan=account_state.loan,
                         action=proposed_action,
                         market_data=normalized_market_data,
+                        policy=policy,
                     )
                 )
             except ValueError as exc:
@@ -564,11 +568,13 @@ class CreditLifecycleEngine:
 
     def _project_portfolio_action(
         self,
+        account_ref: str,
         holdings: list[Holding],
         pledged_cash_balance: float,
         loan: Loan,
         action: PortfolioActionCheck,
         market_data: Mapping[str, MarketData],
+        policy: Policy,
     ) -> tuple[list[Holding], float, Loan]:
         quantities = {holding_identity(holding): holding for holding in holdings}
         pledged_cash = round_money(max(0.0, pledged_cash_balance))
@@ -597,6 +603,19 @@ class CreditLifecycleEngine:
                 funding_source = (action.funding_source or "").lower()
                 shortfall = round_money(cost - pledged_cash)
                 if funding_source in {"draw", "credit_draw"}:
+                    draw_result = self.check_draw(
+                        account_ref=account_ref,
+                        current_loan=projected_loan,
+                        requested_draw_amount=shortfall,
+                        requested_repayment_amount=0.0,
+                        holdings=list(quantities.values()),
+                        policy=policy,
+                        market_data=market_data,
+                    )
+                    if draw_result.decision != LifecycleDecisionValue.APPROVED:
+                        raise ValueError(
+                            "buy action draw funding exceeds safe credit draw amount"
+                        )
                     projected_loan = Loan(
                         principal=round_money(projected_loan.principal + shortfall),
                         accrued_interest=projected_loan.accrued_interest,
@@ -621,7 +640,7 @@ class CreditLifecycleEngine:
                 action.asset_id,
                 action.asset_type,
                 quantity,
-                projected_loan.currency,
+                self._currency_for_new_asset(action.asset_id, market_data),
             )
         elif action.action_type == PortfolioActionType.WITHDRAW_CASH:
             amount = self._cash_amount(action, "withdraw_cash")
@@ -651,7 +670,7 @@ class CreditLifecycleEngine:
                 action.asset_id,
                 action.asset_type,
                 delta,
-                projected_loan.currency,
+                self._currency_for_new_asset(action.asset_id, market_data) if delta > 0 else projected_loan.currency,
             )
         elif action.action_type in {
             PortfolioActionType.REPAY,
@@ -692,7 +711,7 @@ class CreditLifecycleEngine:
                 action.to_asset_id,
                 action.to_asset_type,
                 to_quantity,
-                projected_loan.currency,
+                self._currency_for_new_asset(action.to_asset_id, market_data),
             )
         else:
             raise ValueError(
@@ -768,7 +787,7 @@ class CreditLifecycleEngine:
         asset_id: str | None,
         asset_type: AssetType | None,
         delta: float,
-        default_currency: str = "USD",
+        default_currency: str | None = None,
     ) -> None:
         if not asset_id:
             raise ValueError("security action requires asset_id")
@@ -792,7 +811,7 @@ class CreditLifecycleEngine:
                 asset_id=asset_id,
                 asset_type=asset_type,
                 quantity=round(delta, 12),
-                currency=default_currency,
+                currency=self._validated_new_asset_currency(asset_id, default_currency),
             )
             holdings[holding_identity(new_holding)] = new_holding
             return
@@ -802,6 +821,31 @@ class CreditLifecycleEngine:
         holdings[holding_identity(current)] = replace(
             current, quantity=max(0.0, new_quantity)
         )
+
+
+    def _validated_new_asset_currency(self, asset_id: str, currency: str | None) -> str:
+        if not currency:
+            raise ValueError(
+                f"new security action for {asset_id} requires explicit currency or market data/instrument identity currency"
+            )
+        return currency.upper()
+
+    def _currency_for_new_asset(
+        self, asset_id: str | None, market_data: Mapping[str, MarketData]
+    ) -> str | None:
+        if not asset_id:
+            return None
+        market = market_data.get(asset_id)
+        instrument = (market.metadata.get("instrument", {}) if market else {})
+        currency = instrument.get("currency") or (market.metadata.get("currency") if market else None)
+        if currency:
+            return str(currency).upper()
+        if market is not None and not market.metadata:
+            return "USD"
+        parts = asset_id.split(":")
+        if len(parts) >= 3 and len(parts[2]) == 3:
+            return parts[2].upper()
+        return None
 
     def _asset_quantity(
         self, action: PortfolioActionCheck, market_data: Mapping[str, MarketData]

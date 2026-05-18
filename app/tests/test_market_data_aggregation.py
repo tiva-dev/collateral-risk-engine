@@ -233,7 +233,7 @@ class MarketDataAggregationTests(unittest.TestCase):
         self.assertIsInstance(market_data, MarketData)
         self.assertEqual(market_data.asset_id, "MTNN")
         self.assertAlmostEqual(market_data.last_price, 275.0 * 0.00067)
-        self.assertEqual(market_data.metadata["instrument"]["stable_key"], "NGX:MTNN:NGN")
+        self.assertEqual(market_data.metadata["instrument"]["stable_key"], "NGX:MTNN:NGN:LISTED_EQUITY")
 
     def test_market_data_normalize_endpoint_contract(self) -> None:
         request = MarketDataNormalizeRequest.model_validate(

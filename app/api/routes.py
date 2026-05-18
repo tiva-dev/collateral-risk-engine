@@ -24,6 +24,7 @@ from app.audit.logger import AuditLogger
 from app.core.evaluator import CollateralRiskEngine, RiskEvaluationError
 from app.lifecycle.service import CreditLifecycleEngine
 from app.market_data.aggregator import MarketDataAggregator
+from app.version import MARKET_DATA_MODEL_VERSION
 
 router = APIRouter()
 audit_logger = AuditLogger(Path("./data/audit/audit_log.jsonl"))
@@ -43,6 +44,8 @@ def serialize(obj):
 
 @router.post("/market-data/normalize", response_model=MarketDataNormalizeResponse)
 def normalize_market_data(request: MarketDataNormalizeRequest) -> MarketDataNormalizeResponse:
+    if not request.instruments and not request.holdings:
+        raise HTTPException(status_code=422, detail="normalize request requires instruments or holdings")
     aggregator = MarketDataAggregator()
     instruments = [instrument.to_domain() for instrument in request.instruments]
     holdings = [holding.to_domain() for holding in request.holdings]
@@ -66,6 +69,9 @@ def normalize_market_data(request: MarketDataNormalizeRequest) -> MarketDataNorm
         key: jsonable_encoder(data)
         for key, data in result.normalized_market_data.items()
     }
+    for alias, stable_key in getattr(result.normalized_market_data, "_aliases", {}).items():
+        if stable_key in normalized_payload:
+            normalized_payload.setdefault(alias, normalized_payload[stable_key])
     fx_decisions = {
         key: {
             "fx_rate_used": data.fx_rate_used,
@@ -75,12 +81,18 @@ def normalize_market_data(request: MarketDataNormalizeRequest) -> MarketDataNorm
         }
         for key, data in result.normalized_market_data.items()
     }
+    for alias, stable_key in getattr(result.normalized_market_data, "_aliases", {}).items():
+        if stable_key in fx_decisions:
+            fx_decisions.setdefault(alias, fx_decisions[stable_key])
     return MarketDataNormalizeResponse(
+        market_data_model_version=MARKET_DATA_MODEL_VERSION,
         normalized_market_data=normalized_payload,
         warnings=result.warnings_by_instrument,
         quality_scores=result.quality_report,
         fx_decisions=jsonable_encoder(fx_decisions),
         missing_data=result.missing_data,
+        evaluator_market_data=jsonable_encoder(result.evaluator_market_data),
+        evaluator_key_to_stable_key=result.evaluator_key_to_stable_key,
     )
 
 
