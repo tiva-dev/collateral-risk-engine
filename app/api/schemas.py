@@ -596,3 +596,93 @@ class PreTradeResult(BaseModel):
 
 class PreTradeResponse(BaseModel):
     result: PreTradeResult
+
+# v0.4 monitoring API schemas
+from app.monitoring.models import MonitoringStatus, MonitoringEventType, MonitoringSeverity
+
+
+class MonitoredAccountCreateRequest(BaseModel):
+    account_ref: str
+    holdings: list[HoldingIn]
+    pledged_cash_balance: float = Field(default=0.0, ge=0)
+    loan: LoanIn
+    loan_currency: str = "USD"
+    policy: PolicyIn
+    data_mode: DataMode = DataMode.HYBRID
+    market_data_policy: MarketDataPolicyIn = Field(default_factory=MarketDataPolicyIn)
+    client_supplied_quotes: dict[str, ClientQuoteIn] = Field(default_factory=dict)
+    client_supplied_fx_rates: list[ClientFXRateIn] = Field(default_factory=list)
+    monitoring_status: MonitoringStatus = MonitoringStatus.ACTIVE
+
+
+class MonitoringEventOut(BaseModel):
+    event_id: str
+    account_ref: str | None = None
+    event_type: MonitoringEventType
+    severity: MonitoringSeverity
+    previous_margin_state: MarginState | None = None
+    new_margin_state: MarginState | None = None
+    previous_available_credit: float | None = None
+    new_available_credit: float | None = None
+    reason: str
+    evaluation_snapshot: dict[str, Any] | None = None
+    market_data_warnings: dict[str, list[str]] = Field(default_factory=dict)
+    missing_data: list[str] = Field(default_factory=list)
+    liquidation_plan: dict[str, Any] | None = None
+    model_versions: dict[str, str] = Field(default_factory=dict)
+    audit_id: str | None = None
+    dedupe_key: str | None = None
+    created_at: datetime
+
+
+class MonitoredAccountOut(BaseModel):
+    account_ref: str
+    holdings: list[HoldingIn]
+    pledged_cash_balance: float
+    loan: LoanOut
+    loan_currency: str
+    data_mode: DataMode
+    monitoring_status: MonitoringStatus
+    last_evaluation: dict[str, Any] | None = None
+    last_margin_state: MarginState | None = None
+    last_available_credit: float | None = None
+    last_market_data_warnings: dict[str, list[str]] = Field(default_factory=dict)
+    last_missing_data: list[str] = Field(default_factory=list)
+    last_checked_at: datetime | None = None
+    next_check_after: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MonitoringAccountResponse(BaseModel):
+    account: MonitoredAccountOut
+    events: list[MonitoringEventOut] = Field(default_factory=list)
+
+
+class MonitoringAccountsListResponse(BaseModel):
+    accounts: list[MonitoredAccountOut]
+
+
+class MonitoringTickResponse(BaseModel):
+    account: MonitoredAccountOut | None = None
+    events: list[MonitoringEventOut] = Field(default_factory=list)
+    results: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class MarketDataUpdateRequest(BaseModel):
+    instruments: list[str] = Field(default_factory=list)
+    quote_updates: dict[str, ClientQuoteIn] = Field(default_factory=dict)
+    fx_rate_updates: list[ClientFXRateIn] = Field(default_factory=list)
+    source: str = "internal"
+    trigger_tick: bool = False
+
+
+class MarketDataUpdateResponse(BaseModel):
+    affected_accounts: list[str]
+    warnings: list[str] = Field(default_factory=list)
+    tick_results: list[dict[str, Any]] = Field(default_factory=list)
+    received_at: datetime
+
+
+class MonitoringEventsResponse(BaseModel):
+    events: list[MonitoringEventOut]

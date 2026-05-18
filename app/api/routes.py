@@ -4,6 +4,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.encoders import jsonable_encoder
 
 from app.api.schemas import (
@@ -15,6 +16,14 @@ from app.api.schemas import (
     OriginateRequest,
     MarketDataNormalizeRequest,
     MarketDataNormalizeResponse,
+    MarketDataUpdateRequest,
+    MarketDataUpdateResponse,
+    MonitoredAccountCreateRequest,
+    MonitoringAccountResponse,
+    MonitoringAccountsListResponse,
+    MonitoringEventsResponse,
+    MonitoringEventOut,
+    MonitoringTickResponse,
     PreTradeRiskCheckRequest,
     PortfolioActionCheckRequest,
     PortfolioActionCheckResponse,
@@ -25,11 +34,27 @@ from app.core.evaluator import CollateralRiskEngine, RiskEvaluationError
 from app.lifecycle.service import CreditLifecycleEngine
 from app.market_data.aggregator import MarketDataAggregator
 from app.version import MARKET_DATA_MODEL_VERSION
+from app.monitoring.events import serialize_event, serialize_sse_event
+from app.monitoring.market_updates import InMemoryMarketDataCache
+from app.monitoring.models import MonitoringEventType, MonitoringSeverity
+from app.monitoring.repositories import InMemoryMonitoredAccountRepository, InMemoryMonitoringEventRepository
+from app.monitoring.service import MonitoringService
 
 router = APIRouter()
 audit_logger = AuditLogger(Path("./data/audit/audit_log.jsonl"))
 engine = CollateralRiskEngine(audit_logger=audit_logger)
 lifecycle_engine = CreditLifecycleEngine(risk_engine=engine, audit_logger=audit_logger)
+monitoring_account_repo = InMemoryMonitoredAccountRepository()
+monitoring_event_repo = InMemoryMonitoringEventRepository()
+monitoring_market_data_cache = InMemoryMarketDataCache()
+monitoring_service = MonitoringService(
+    account_repo=monitoring_account_repo,
+    event_repo=monitoring_event_repo,
+    lifecycle_engine=lifecycle_engine,
+    aggregator=MarketDataAggregator(),
+    market_data_cache=monitoring_market_data_cache,
+    audit_logger=audit_logger,
+)
 
 
 def serialize(obj):
@@ -202,3 +227,134 @@ def monitor_loan(request: MonitorRequest) -> LifecycleResponse:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return LifecycleResponse(result=jsonable_encoder(asdict(result)))
+
+
+def _monitoring_account_out(account):
+    return jsonable_encoder(
+        {
+            "account_ref": account.account_ref,
+            "holdings": account.holdings,
+            "pledged_cash_balance": account.pledged_cash_balance,
+            "loan": account.loan,
+            "loan_currency": account.loan_currency,
+            "data_mode": account.data_mode,
+            "monitoring_status": account.monitoring_status,
+            "last_evaluation": account.last_evaluation,
+            "last_margin_state": account.last_margin_state,
+            "last_available_credit": account.last_available_credit,
+            "last_market_data_warnings": account.last_market_data_warnings,
+            "last_missing_data": account.last_missing_data,
+            "last_checked_at": account.last_checked_at,
+            "next_check_after": account.next_check_after,
+            "created_at": account.created_at,
+            "updated_at": account.updated_at,
+        }
+    )
+
+
+def _events_out(events):
+    return [serialize_event(event) for event in events]
+
+
+@router.post("/monitoring/accounts", response_model=MonitoringAccountResponse)
+def register_monitored_account(request: MonitoredAccountCreateRequest) -> MonitoringAccountResponse:
+    try:
+        account, events = monitoring_service.register_account(
+            account_ref=request.account_ref,
+            holdings=[holding.to_domain() for holding in request.holdings],
+            pledged_cash_balance=request.pledged_cash_balance,
+            loan=request.loan.to_domain(),
+            loan_currency=request.loan_currency,
+            policy=request.policy.to_domain(),
+            data_mode=request.data_mode,
+            market_data_policy=request.market_data_policy.to_domain(),
+            client_supplied_quotes={key: quote.to_raw_quote() for key, quote in request.client_supplied_quotes.items()},
+            client_supplied_fx_rates={(fx.from_currency.upper(), fx.to_currency.upper()): fx.to_fx_rate() for fx in request.client_supplied_fx_rates},
+            monitoring_status=request.monitoring_status,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return MonitoringAccountResponse(account=_monitoring_account_out(account), events=_events_out(events))
+
+
+@router.get("/monitoring/accounts", response_model=MonitoringAccountsListResponse)
+def list_monitored_accounts() -> MonitoringAccountsListResponse:
+    return MonitoringAccountsListResponse(accounts=[_monitoring_account_out(account) for account in monitoring_service.list_accounts()])
+
+
+@router.get("/monitoring/accounts/{account_ref}", response_model=MonitoringAccountResponse)
+def get_monitored_account(account_ref: str) -> MonitoringAccountResponse:
+    account = monitoring_service.get_account(account_ref)
+    if account is None:
+        raise HTTPException(status_code=404, detail="monitored account not found")
+    return MonitoringAccountResponse(account=_monitoring_account_out(account), events=[])
+
+
+@router.delete("/monitoring/accounts/{account_ref}")
+def delete_monitored_account(account_ref: str) -> dict[str, bool | str]:
+    deleted = monitoring_service.delete_account(account_ref)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="monitored account not found")
+    return {"account_ref": account_ref, "deleted": True}
+
+
+@router.post("/monitoring/accounts/{account_ref}/tick", response_model=MonitoringTickResponse)
+def tick_monitored_account(account_ref: str) -> MonitoringTickResponse:
+    try:
+        account, events = monitoring_service.evaluate_account(account_ref, force_tick_event=True)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="monitored account not found") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return MonitoringTickResponse(account=_monitoring_account_out(account), events=_events_out(events))
+
+
+@router.post("/monitoring/tick", response_model=MonitoringTickResponse)
+def tick_all_monitored_accounts() -> MonitoringTickResponse:
+    return MonitoringTickResponse(results=monitoring_service.tick_all())
+
+
+@router.post("/monitoring/market-data/update", response_model=MarketDataUpdateResponse)
+def ingest_monitoring_market_data_update(request: MarketDataUpdateRequest) -> MarketDataUpdateResponse:
+    quote_updates = {key: quote.to_raw_quote() for key, quote in request.quote_updates.items()}
+    fx_updates = {(fx.from_currency.upper(), fx.to_currency.upper()): fx.to_fx_rate() for fx in request.fx_rate_updates}
+    result = monitoring_service.ingest_market_data_update(
+        quote_updates=quote_updates,
+        fx_rate_updates=fx_updates,
+        instruments=request.instruments,
+        source=request.source,
+        trigger_tick=request.trigger_tick,
+    )
+    return MarketDataUpdateResponse(**jsonable_encoder(result))
+
+
+@router.get("/monitoring/events", response_model=MonitoringEventsResponse)
+def list_monitoring_events(
+    account_ref: str | None = None,
+    event_type: MonitoringEventType | None = None,
+    severity: MonitoringSeverity | None = None,
+    limit: int = 100,
+) -> MonitoringEventsResponse:
+    events = monitoring_event_repo.list(account_ref=account_ref, event_type=event_type, severity=severity, limit=limit)
+    return MonitoringEventsResponse(events=_events_out(events))
+
+
+@router.get("/monitoring/events/stream")
+def stream_monitoring_events(limit: int = 100):
+    def event_iter():
+        events = monitoring_event_repo.list(limit=limit)
+        if not events:
+            yield ": monitoring stream ready\n\n"
+            return
+        for event in reversed(events):
+            yield serialize_sse_event(event)
+
+    return StreamingResponse(event_iter(), media_type="text/event-stream")
+
+
+@router.get("/monitoring/events/{event_id}", response_model=MonitoringEventOut)
+def get_monitoring_event(event_id: str) -> MonitoringEventOut:
+    event = monitoring_event_repo.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="monitoring event not found")
+    return MonitoringEventOut(**serialize_event(event))
