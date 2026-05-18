@@ -21,6 +21,10 @@ class Holding:
     quantity: float
     currency: str = "USD"
 
+    def __post_init__(self) -> None:
+        if self.quantity < 0:
+            raise ValueError("holding quantity must be greater than or equal to 0")
+
 
 @dataclass(frozen=True)
 class Loan:
@@ -28,6 +32,14 @@ class Loan:
     accrued_interest: float = 0.0
     fees: float = 0.0
     currency: str = "USD"
+
+    def __post_init__(self) -> None:
+        if self.principal < 0:
+            raise ValueError("loan principal must be greater than or equal to 0")
+        if self.accrued_interest < 0:
+            raise ValueError("loan accrued_interest must be greater than or equal to 0")
+        if self.fees < 0:
+            raise ValueError("loan fees must be greater than or equal to 0")
 
     @property
     def balance(self) -> float:
@@ -96,6 +108,12 @@ class OrderBookLevel:
     price: float
     quantity: float
 
+    def __post_init__(self) -> None:
+        if self.price <= 0:
+            raise ValueError("order book level price must be greater than 0")
+        if self.quantity < 0:
+            raise ValueError("order book level quantity must be greater than or equal to 0")
+
 
 @dataclass(frozen=True)
 class OrderBook:
@@ -121,6 +139,18 @@ class MarketData:
     order_book: OrderBook | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if self.last_price < 0:
+            raise ValueError("market data last_price must be greater than or equal to 0")
+        if self.bid is not None and self.bid <= 0:
+            raise ValueError("market data bid must be greater than 0 when supplied")
+        if self.ask is not None and self.ask <= 0:
+            raise ValueError("market data ask must be greater than 0 when supplied")
+        if self.bid is not None and self.ask is not None and self.bid > self.ask:
+            raise ValueError("market data bid must be less than or equal to ask")
+        if not 0 <= self.data_quality_score <= 1:
+            raise ValueError("market data quality score must be between 0 and 1")
+
 
 @dataclass(frozen=True)
 class Policy:
@@ -130,6 +160,15 @@ class Policy:
     max_participation_rate: float = 0.10
     min_data_quality_score: float = 0.35
     allow_lending_on_stale_or_halted_assets: bool = False
+
+    def __post_init__(self) -> None:
+        for asset_type, haircut in {**self.base_ltv, **self.asset_ltv_caps}.items():
+            if not 0 <= haircut <= 1:
+                raise ValueError(f"haircut/ltv for {asset_type} must be between 0 and 1")
+        if not 0 <= self.max_participation_rate <= 1:
+            raise ValueError("max_participation_rate must be between 0 and 1")
+        if not 0 <= self.min_data_quality_score <= 1:
+            raise ValueError("min_data_quality_score must be between 0 and 1")
 
     @staticmethod
     def default() -> "Policy":
@@ -240,6 +279,9 @@ class LiquidationPlan:
     target_cash_recovery: float
     orders: list[LiquidationOrder]
     reason: str
+    estimated_total_recovery: float = 0.0
+    unrecovered_target_amount: float = 0.0
+    plan_complete: bool = True
 
 
 @dataclass(frozen=True)

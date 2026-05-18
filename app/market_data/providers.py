@@ -37,6 +37,18 @@ class RawQuote:
     warnings: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if self.local_price <= 0:
+            raise ValueError("raw quote local_price must be greater than 0")
+        if self.bid is not None and self.bid <= 0:
+            raise ValueError("raw quote bid must be greater than 0 when supplied")
+        if self.ask is not None and self.ask <= 0:
+            raise ValueError("raw quote ask must be greater than 0 when supplied")
+        if self.bid is not None and self.ask is not None and self.bid > self.ask:
+            raise ValueError("raw quote bid must be less than or equal to ask")
+        if not 0 <= self.data_quality_score <= 1:
+            raise ValueError("raw quote data_quality_score must be between 0 and 1")
+
 
 @dataclass(frozen=True)
 class FXRate:
@@ -48,6 +60,12 @@ class FXRate:
     provider_name: str = "unknown"
     quality_score: float = 1.0
     warnings: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.rate <= 0:
+            raise ValueError("FX rate must be greater than 0")
+        if not 0 <= self.quality_score <= 1:
+            raise ValueError("FX quality_score must be between 0 and 1")
 
 
 class MarketDataProvider(Protocol):
@@ -67,7 +85,7 @@ class BaseProvider:
 
     def get_quotes(self, instruments: list[InstrumentIdentity]) -> dict[str, RawQuote]:
         return {
-            instrument.asset_id: quote
+            instrument.stable_key: quote
             for instrument in instruments
             if (quote := self.get_quote(instrument)) is not None
         }
@@ -155,7 +173,7 @@ class MockEquityProvider(BaseProvider):
         }
 
     def get_quote(self, instrument: InstrumentIdentity) -> RawQuote | None:
-        for key in (instrument.stable_key, instrument.asset_id, instrument.symbol):
+        for key in (instrument.stable_key, f"{instrument.exchange.upper()}:{instrument.symbol.upper()}:{instrument.currency.upper()}", instrument.asset_id, instrument.symbol):
             if key in self.quotes:
                 return replace(
                     self.quotes[key],

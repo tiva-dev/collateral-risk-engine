@@ -63,10 +63,17 @@ class FXSelector:
 
         usable = [c for c in candidates if c[2] >= policy.minimum_fx_quality_score]
         if policy.use_conservative_rate_when_sources_disagree and len(candidates) > 1:
-            # For long-only collateral, the lower direct conversion rate produces lower collateral value.
-            selected = min(candidates, key=lambda candidate: candidate[1].rate)
-            warnings = [*selected[3], "conservative_fx_rate_selected"]
-            return FXDecision(replace(selected[1], warnings=warnings), selected[2], warnings)
+            if usable:
+                # For long-only collateral, the lower direct conversion rate produces lower collateral value.
+                selected = min(usable, key=lambda candidate: candidate[1].rate)
+                warnings = [*selected[3], "conservative_fx_rate_selected"]
+                return FXDecision(replace(selected[1], warnings=warnings), selected[2], warnings)
+            warnings: list[str] = []
+            for _, _, _, candidate_warnings in candidates:
+                warnings.extend(candidate_warnings)
+            warnings.append("fx_quality_below_threshold")
+            warnings.append("no_fx_source_passed_quality_threshold")
+            return FXDecision(None, 0.05, warnings, True)
 
         preferred_client = policy.preferred_source == "client"
         if preferred_client and policy.allow_fallback_provider:

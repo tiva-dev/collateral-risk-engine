@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from app.core.models import MarketData
+from app.core.models import MarketData, OrderBook, OrderBookLevel
 from app.risk.math_utils import clamp
 
 
@@ -22,11 +22,35 @@ def apply_market_shock(
         spread = (ask - bid) * spread_multiplier
         bid = max(0.0, mid * (1.0 + price_shock) - spread / 2.0)
         ask = max(0.0, mid * (1.0 + price_shock) + spread / 2.0)
+    depth_multiplier = max(0.0, volume_multiplier)
+    if spread_multiplier >= 5.0 or volume_multiplier <= 0.25:
+        depth_multiplier *= max(0.0, min(1.0, volume_multiplier))
+    shocked_order_book = None
+    if market.order_book is not None:
+        shocked_order_book = OrderBook(
+            bids=[
+                OrderBookLevel(
+                    price=max(1e-12, level.price * (1.0 + price_shock) - max(0.0, (spread_multiplier - 1.0)) * (market.last_price - level.price) * 0.5),
+                    quantity=max(0.0, level.quantity * depth_multiplier),
+                )
+                for level in market.order_book.bids
+                if level.quantity * depth_multiplier > 1e-9
+            ],
+            asks=[
+                OrderBookLevel(
+                    price=max(1e-12, level.price * (1.0 + price_shock) + max(0.0, (spread_multiplier - 1.0)) * (level.price - market.last_price) * 0.5),
+                    quantity=max(0.0, level.quantity * depth_multiplier),
+                )
+                for level in market.order_book.asks
+                if level.quantity * depth_multiplier > 1e-9
+            ],
+        )
     return replace(
         market,
         last_price=new_price,
         bid=bid,
         ask=ask,
+        order_book=shocked_order_book,
         average_daily_volume=None if market.average_daily_volume is None else market.average_daily_volume * volume_multiplier,
         average_dollar_volume=None if market.average_dollar_volume is None else market.average_dollar_volume * volume_multiplier * max(0.0, 1.0 + price_shock),
         volatility_30d=None if market.volatility_30d is None else market.volatility_30d * volatility_multiplier,

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from app.core.models import MarketData, OrderBook, OrderBookLevel
-from app.market_data.base import MarketDataProvider
+from app.market_data.base import LegacySnapshotProvider
 
 
-class MockMarketDataProvider(MarketDataProvider):
+class MockMarketDataProvider(LegacySnapshotProvider):
+    """Deprecated legacy snapshot mock; use MockEquityProvider for RawQuote tests."""
     def __init__(self, snapshots: dict[str, MarketData] | None = None) -> None:
         self.snapshots = snapshots or default_snapshots()
 

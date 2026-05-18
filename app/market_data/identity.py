@@ -21,7 +21,7 @@ class InstrumentIdentity:
 
     @property
     def stable_key(self) -> str:
-        return f"{self.exchange.upper()}:{self.symbol.upper()}:{self.currency.upper()}"
+        return f"{self.exchange.upper()}:{self.symbol.upper()}:{self.currency.upper()}:{self.asset_type.value.upper()}"
 
     @staticmethod
     def from_holding(holding: Holding) -> "InstrumentIdentity":

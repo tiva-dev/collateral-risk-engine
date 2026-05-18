@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Mapping
 
@@ -20,6 +20,35 @@ from app.market_data.providers import (
     RawQuote,
 )
 from app.market_data.quality import age_minutes, clamp_score
+from app.version import MARKET_DATA_MODEL_VERSION
+
+
+class StableKeyedMarketDataDict(dict[str, NormalizedMarketData]):
+    """Dict keyed by stable_key with legacy asset_id lookup compatibility."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._aliases: dict[str, str] = {}
+        self._ambiguous_aliases: set[str] = set()
+
+    def set_alias(self, alias: str, stable_key: str) -> None:
+        if not alias or alias == stable_key:
+            return
+        if alias in self._aliases and self._aliases[alias] != stable_key:
+            self._aliases.pop(alias, None)
+            self._ambiguous_aliases.add(alias)
+            return
+        if alias not in self._ambiguous_aliases:
+            self._aliases[alias] = stable_key
+
+    def __getitem__(self, key: str) -> NormalizedMarketData:
+        return super().__getitem__(self._aliases.get(key, key))
+
+    def get(self, key: str, default=None):
+        return super().get(self._aliases.get(key, key), default)
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(key) or (isinstance(key, str) and key in self._aliases)
 
 
 @dataclass(frozen=True)
@@ -28,8 +57,13 @@ class MarketDataAggregationResult:
     quality_report: dict[str, float]
     warnings_by_instrument: dict[str, list[str]]
     missing_data: list[str] = field(default_factory=list)
+    evaluator_market_data: dict[str, MarketData] = field(default_factory=dict)
+    evaluator_key_to_stable_key: dict[str, str] = field(default_factory=dict)
+    model_version: str = MARKET_DATA_MODEL_VERSION
 
     def to_core_market_data(self) -> dict[str, MarketData]:
+        if self.evaluator_market_data:
+            return dict(self.evaluator_market_data)
         return {
             key: normalized.to_market_data()
             for key, normalized in self.normalized_market_data.items()
@@ -149,6 +183,7 @@ class MarketDataAggregator:
     ) -> MarketDataAggregationResult:
         policy = market_data_policy or MarketDataPolicy()
         identities = instruments or [InstrumentIdentity.from_holding(holding) for holding in (holdings or [])]
+        holdings = holdings or []
         provider_registry = provider_registry or {}
         if client_supplied_quotes or client_supplied_fx_rates:
             client_provider = ClientSuppliedProvider(
@@ -162,18 +197,24 @@ class MarketDataAggregator:
         router = ProviderRouter(client_provider, equity_provider, fx_provider)
         fx_selector = FXSelector(client_provider, fx_provider)
 
-        normalized: dict[str, NormalizedMarketData] = {}
+        normalized: StableKeyedMarketDataDict = StableKeyedMarketDataDict()
         quality_report: dict[str, float] = {}
         warnings_by_instrument: dict[str, list[str]] = {}
         missing_data: list[str] = []
 
         for instrument in identities:
             quote, status, router_warnings = router.choose_quote_provider(data_mode, instrument, policy, now)
-            key = instrument.asset_id or instrument.stable_key
+            key = instrument.stable_key
+            normalized.set_alias(instrument.asset_id, key)
+            normalized.set_alias(instrument.symbol, key)
             if quote is None:
                 warnings_by_instrument[key] = router_warnings
+                warnings_by_instrument.setdefault(instrument.asset_id, router_warnings)
                 missing_data.append(key)
+                if instrument.asset_id != key:
+                    missing_data.append(instrument.asset_id)
                 quality_report[key] = 0.0
+                quality_report.setdefault(instrument.asset_id, 0.0)
                 continue
 
             quote_quality, warnings = score_quote(quote, status, policy, now)
@@ -213,6 +254,41 @@ class MarketDataAggregator:
             )
             normalized[key] = normalized_result
             quality_report[key] = normalized_result.data_quality_score
+            quality_report.setdefault(instrument.asset_id, normalized_result.data_quality_score)
             warnings_by_instrument[key] = normalized_result.warnings
+            warnings_by_instrument.setdefault(instrument.asset_id, normalized_result.warnings)
 
-        return MarketDataAggregationResult(normalized, quality_report, warnings_by_instrument, missing_data)
+
+        evaluator_market_data: dict[str, MarketData] = {}
+        evaluator_key_to_stable_key: dict[str, str] = {}
+        if holdings:
+            identity_by_asset_id = {identity.asset_id: identity for identity in identities}
+            for index, holding in enumerate(holdings):
+                identity = identity_by_asset_id.get(holding.asset_id)
+                if identity is None and index < len(identities):
+                    identity = identities[index]
+                if identity is None:
+                    identity = InstrumentIdentity.from_holding(holding)
+                stable_key = identity.stable_key
+                normalized_result = normalized.get(stable_key)
+                if normalized_result is None:
+                    missing_data.append(holding.asset_id)
+                    warnings_by_instrument.setdefault(holding.asset_id, ["missing_quote_for_holding"])
+                    quality_report.setdefault(holding.asset_id, 0.0)
+                    continue
+                if holding.asset_id in evaluator_market_data:
+                    warnings_by_instrument.setdefault(holding.asset_id, []).append("duplicate_evaluator_key")
+                    raise ValueError(f"duplicate evaluator market data key: {holding.asset_id}")
+                evaluator_market_data[holding.asset_id] = replace(
+                    normalized_result.to_market_data(), asset_id=holding.asset_id
+                )
+                evaluator_key_to_stable_key[holding.asset_id] = stable_key
+
+        return MarketDataAggregationResult(
+            normalized,
+            quality_report,
+            warnings_by_instrument,
+            missing_data,
+            evaluator_market_data,
+            evaluator_key_to_stable_key,
+        )

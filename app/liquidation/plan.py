@@ -61,17 +61,34 @@ def build_liquidation_plan(
             )
         )
 
+    estimated_total_recovery = sum(order.estimated_cash_recovery for order in orders)
+    unrecovered = max(0.0, target_cash_recovery - estimated_total_recovery)
+    plan_complete = unrecovered <= 0.01
+
     if not orders:
-        return None
+        return LiquidationPlan(
+            action="liquidate" if margin_state == MarginState.LIQUIDATION else "recommend_liquidation_or_cure",
+            target_cash_recovery=round(target_cash_recovery, 2),
+            orders=[],
+            reason="insufficient_liquid_collateral_to_meet_target_recovery",
+            estimated_total_recovery=0.0,
+            unrecovered_target_amount=round(target_cash_recovery, 2),
+            plan_complete=False,
+        )
 
     reason = (
         "forced_liquidation_recovery_breach"
         if margin_state == MarginState.LIQUIDATION
         else "margin_call_dynamic_coverage_breach"
     )
+    if not plan_complete:
+        reason = f"{reason}; insufficient_liquid_collateral_to_meet_target_recovery"
     return LiquidationPlan(
         action="liquidate" if margin_state == MarginState.LIQUIDATION else "recommend_liquidation_or_cure",
         target_cash_recovery=round(target_cash_recovery, 2),
         orders=orders,
         reason=reason,
+        estimated_total_recovery=round(estimated_total_recovery, 2),
+        unrecovered_target_amount=round(unrecovered, 2),
+        plan_complete=plan_complete,
     )
