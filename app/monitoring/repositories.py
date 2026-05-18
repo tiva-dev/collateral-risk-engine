@@ -103,22 +103,22 @@ class InMemoryMonitoringEventRepository(MonitoringEventRepository):
     def __init__(self) -> None:
         self._events: list[MonitoringEvent] = []
         self._by_id: dict[str, MonitoringEvent] = {}
-        self._dedupe_keys: set[str] = set()
+        self._dedupe_keys: dict[str, MonitoringEvent] = {}
         self._lock = RLock()
 
     def append(self, event: MonitoringEvent) -> MonitoringEvent:
         with self._lock:
             if event.dedupe_key and event.dedupe_key in self._dedupe_keys:
-                return event
+                return self._dedupe_keys[event.dedupe_key]
             self._events.append(event)
             self._by_id[event.event_id] = event
             if event.dedupe_key:
-                self._dedupe_keys.add(event.dedupe_key)
+                self._dedupe_keys[event.dedupe_key] = event
             return event
 
     def list(self, account_ref: str | None = None, event_type: MonitoringEventType | str | None = None, severity: MonitoringSeverity | str | None = None, limit: int = 100) -> list[MonitoringEvent]:
         with self._lock:
-            events = list(reversed(self._events))
+            events = sorted(self._events, key=lambda event: event.created_at, reverse=True)
         if account_ref is not None:
             events = [event for event in events if event.account_ref == account_ref]
         if event_type is not None:

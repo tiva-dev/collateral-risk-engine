@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 
-from fastapi.testclient import TestClient
+try:
+    from fastapi.testclient import TestClient
+except RuntimeError as exc:  # pragma: no cover - exercised only in minimal local envs
+    TestClient = None
+    TESTCLIENT_IMPORT_ERROR = exc
+else:
+    TESTCLIENT_IMPORT_ERROR = None
 
 from app.core.enums import AssetType, DataMode, MarginState
 from app.core.evaluator import CollateralRiskEngine
@@ -189,6 +195,7 @@ class MonitoringServiceTests(unittest.TestCase):
         )
         result = svc.ingest_market_data_update({"SPY": quote(price=90.0)}, {}, [], "test", False)
         self.assertIn("ambiguous_symbol:SPY", result["warnings"])
+        self.assertEqual(result["affected_accounts"], ["ambig1"])
 
     def test_fx_update_affects_foreign_currency_account(self):
         svc = service()
@@ -219,6 +226,7 @@ class MonitoringServiceTests(unittest.TestCase):
         self.assertIn("id: evt_stream", payload)
 
 
+@unittest.skipIf(TestClient is None, f"fastapi TestClient unavailable: {TESTCLIENT_IMPORT_ERROR}")
 class MonitoringEndpointTests(unittest.TestCase):
     def test_endpoints_register_get_list_events_stream_delete(self):
         client = TestClient(app)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from threading import RLock
 
@@ -47,7 +47,6 @@ class CachedMarketDataProvider(BaseProvider):
         for key in keys:
             if key in data.quotes:
                 quote = data.quotes[key]
-                from dataclasses import replace
                 return replace(quote, instrument=instrument, provider_name=self.provider_name)
         return None
 

@@ -300,9 +300,8 @@ class MonitoringService:
             inst = quote.instrument
             keys.update({key, inst.asset_id, inst.asset_id.upper(), inst.stable_key, inst.symbol, inst.symbol.upper()})
         for key in keys:
-            matches = self.account_repo.list_by_instrument(key)
-            if key and ":" not in key and len({InstrumentIdentity.from_holding(h).stable_key for a in self.account_repo.list() for h in a.holdings if InstrumentIdentity.from_holding(h).symbol.upper() == key.upper()}) > 1:
-                warnings.append(f"ambiguous_symbol:{key}")
+            matches, key_warnings = self._match_accounts_for_market_key(key)
+            warnings.extend(key_warnings)
             affected.update(account.account_ref for account in matches)
         if fx_rates:
             pairs = {(src.upper(), dst.upper()) for src, dst in fx_rates}
@@ -311,6 +310,30 @@ class MonitoringService:
                 if any((currency, account.loan_currency.upper()) in pairs or (account.loan_currency.upper(), currency) in pairs for currency in currencies):
                     affected.add(account.account_ref)
         return sorted(affected), sorted(set(warnings))
+
+
+    def _match_accounts_for_market_key(self, key: str) -> tuple[list[MonitoredAccount], list[str]]:
+        if not key:
+            return [], []
+        exact_matches: dict[str, MonitoredAccount] = {}
+        symbol_matches: dict[str, MonitoredAccount] = {}
+        stable_keys_for_symbol: set[str] = set()
+        lookup = key.upper()
+        for account in self.account_repo.list():
+            for holding in account.holdings:
+                identity = InstrumentIdentity.from_holding(holding)
+                if lookup in {holding.asset_id.upper(), identity.stable_key.upper()}:
+                    exact_matches[account.account_ref] = account
+                if lookup == identity.symbol.upper():
+                    symbol_matches[account.account_ref] = account
+                    stable_keys_for_symbol.add(identity.stable_key.upper())
+
+        warnings: list[str] = []
+        if symbol_matches and len(stable_keys_for_symbol) > 1:
+            warnings.append(f"ambiguous_symbol:{key}")
+            return list(exact_matches.values()), warnings
+        merged = {**symbol_matches, **exact_matches}
+        return list(merged.values()), warnings
 
     def _credit_changed(self, previous: float, new: float) -> bool:
         delta = abs(new - previous)
