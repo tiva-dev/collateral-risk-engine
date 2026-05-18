@@ -13,6 +13,7 @@ from app.core.enums import (
     RiskAppetite,
     RiskDecision,
     TransferDirection,
+    DataMode,
 )
 from app.core.models import (
     Holding,
@@ -216,6 +217,171 @@ class PolicyIn(BaseModel):
             min_data_quality_score=self.min_data_quality_score,
             allow_lending_on_stale_or_halted_assets=self.allow_lending_on_stale_or_halted_assets,
         )
+
+
+class InstrumentIdentityIn(BaseModel):
+    asset_id: str
+    symbol: str
+    exchange: str
+    currency: str
+    asset_type: AssetType
+    isin: str | None = None
+    figi: str | None = None
+    provider_symbol: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def to_domain(self):
+        from app.market_data.identity import InstrumentIdentity
+
+        return InstrumentIdentity(
+            asset_id=self.asset_id,
+            symbol=self.symbol,
+            exchange=self.exchange,
+            currency=self.currency,
+            asset_type=self.asset_type,
+            isin=self.isin,
+            figi=self.figi,
+            provider_symbol=self.provider_symbol,
+            metadata=self.metadata,
+        )
+
+
+class ClientQuoteIn(BaseModel):
+    asset_id: str
+    symbol: str | None = None
+    exchange: str | None = None
+    currency: str | None = None
+    asset_type: AssetType = AssetType.LISTED_EQUITY
+    local_price: float
+    bid: float | None = None
+    ask: float | None = None
+    average_daily_volume: float | None = None
+    average_dollar_volume: float | None = None
+    volatility_30d: float | None = None
+    volatility_90d: float | None = None
+    intraday_volatility: float | None = None
+    recent_return_1d: float | None = None
+    order_book: OrderBookIn | None = None
+    timestamp: datetime | None = None
+    data_quality_score: float = 1.0
+    warnings: list[str] = Field(default_factory=list)
+    provider_name: str = "client_supplied"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def to_raw_quote(self):
+        from app.market_data.identity import InstrumentIdentity
+        from app.market_data.providers import RawQuote
+
+        instrument = InstrumentIdentity(
+            asset_id=self.asset_id,
+            symbol=self.symbol or self.asset_id,
+            exchange=self.exchange or "UNKNOWN",
+            currency=self.currency or "USD",
+            asset_type=self.asset_type,
+        )
+        return RawQuote(
+            instrument=instrument,
+            local_price=self.local_price,
+            bid=self.bid,
+            ask=self.ask,
+            average_daily_volume=self.average_daily_volume,
+            average_dollar_volume=self.average_dollar_volume,
+            volatility_30d=self.volatility_30d,
+            volatility_90d=self.volatility_90d,
+            intraday_volatility=self.intraday_volatility,
+            recent_return_1d=self.recent_return_1d,
+            order_book=self.order_book.to_domain() if self.order_book else None,
+            timestamp=self.timestamp or datetime.now().astimezone(),
+            source="client_supplied",
+            provider_name=self.provider_name,
+            data_quality_score=self.data_quality_score,
+            warnings=self.warnings,
+            metadata=self.metadata,
+        )
+
+
+class ClientFXRateIn(BaseModel):
+    from_currency: str
+    to_currency: str
+    rate: float
+    timestamp: datetime | None = None
+    quality_score: float = 1.0
+    warnings: list[str] = Field(default_factory=list)
+    provider_name: str = "client_supplied"
+
+    def to_fx_rate(self):
+        from app.market_data.providers import FXRate
+
+        return FXRate(
+            from_currency=self.from_currency,
+            to_currency=self.to_currency,
+            rate=self.rate,
+            timestamp=self.timestamp or datetime.now().astimezone(),
+            source="client_supplied",
+            provider_name=self.provider_name,
+            quality_score=self.quality_score,
+            warnings=self.warnings,
+        )
+
+
+class FXPolicyIn(BaseModel):
+    preferred_source: str = "client"
+    allow_fallback_provider: bool = True
+    max_fx_age_minutes: int = 24 * 60
+    stale_fx_haircut: float = 0.35
+    use_conservative_rate_when_sources_disagree: bool = False
+    minimum_fx_quality_score: float = 0.50
+
+    def to_domain(self):
+        from app.market_data.policy import FXPolicy
+
+        return FXPolicy(**self.model_dump())
+
+
+class MarketDataPolicyIn(BaseModel):
+    fx: FXPolicyIn = Field(default_factory=FXPolicyIn)
+    max_quote_age_minutes_by_asset_type: dict[AssetType, int] = Field(default_factory=dict)
+    max_quote_age_minutes_by_exchange: dict[str, int] = Field(default_factory=dict)
+    stale_quote_haircut: float = 0.35
+    minimum_quote_quality_score: float = 0.50
+    allow_fallback_provider: bool = True
+
+    def to_domain(self):
+        from app.market_data.policy import MarketDataPolicy
+
+        default_policy = MarketDataPolicy()
+        return MarketDataPolicy(
+            fx=self.fx.to_domain(),
+            max_quote_age_minutes_by_asset_type={
+                **default_policy.max_quote_age_minutes_by_asset_type,
+                **self.max_quote_age_minutes_by_asset_type,
+            },
+            max_quote_age_minutes_by_exchange={
+                key.upper(): value
+                for key, value in self.max_quote_age_minutes_by_exchange.items()
+            },
+            stale_quote_haircut=self.stale_quote_haircut,
+            minimum_quote_quality_score=self.minimum_quote_quality_score,
+            allow_fallback_provider=self.allow_fallback_provider,
+        )
+
+
+class MarketDataNormalizeRequest(BaseModel):
+    instruments: list[InstrumentIdentityIn] = Field(default_factory=list)
+    holdings: list[HoldingIn] = Field(default_factory=list)
+    loan_currency: str = "USD"
+    data_mode: DataMode = DataMode.HYBRID
+    market_data_policy: MarketDataPolicyIn = Field(default_factory=MarketDataPolicyIn)
+    client_supplied_quotes: dict[str, ClientQuoteIn] = Field(default_factory=dict)
+    client_supplied_fx_rates: list[ClientFXRateIn] = Field(default_factory=list)
+
+
+class MarketDataNormalizeResponse(BaseModel):
+    normalized_market_data: dict[str, Any]
+    warnings: dict[str, list[str]]
+    quality_scores: dict[str, float]
+    fx_decisions: dict[str, Any]
+    missing_data: list[str]
 
 
 class EvaluateRequest(BaseModel):
