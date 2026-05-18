@@ -222,3 +222,84 @@ The canonical provider contract is `app.market_data.providers.MarketDataProvider
 - Numeric inputs validate positive FX rates/prices, positive bid/ask when supplied, `bid <= ask`, quality scores and LTV/haircut-like rates in `[0, 1]`, positive max-age windows, non-negative loan components, and non-negative holding quantities.
 - Backtesting compares flat LTV with the lifecycle safe credit limit rather than raw approved credit.
 - Stress scenarios now shock order-book bid and ask depth: prices follow price/spread shocks, quantities follow volume shocks, and liquidity collapse materially reduces visible depth.
+
+## v0.4 Monitoring engine, internal event stream, and market data update ingestion
+
+v0.4 adds an internal monitoring layer in `app/monitoring` for continuously re-evaluating registered collateral accounts when account state or market data changes. The monitoring layer uses the existing v0.3 market data aggregation path and the existing `CreditLifecycleEngine.monitor(...)` flow; it does not rewrite the core evaluator or simplify risk logic.
+
+### Monitored account registry
+
+The monitoring registry stores `MonitoredAccount` records containing account reference, holdings, pledged cash, loan, loan currency, policy, market data mode/policy, optional client-supplied quotes and FX rates, monitoring status, last evaluation summary, latest margin state, latest available credit, market-data warnings, last check time, and next check time.
+
+The API exposes:
+
+- `POST /monitoring/accounts` to register an account and run the initial monitoring evaluation.
+- `GET /monitoring/accounts/{account_ref}` to retrieve current monitored account state and last evaluation summary.
+- `GET /monitoring/accounts` to list registered monitored accounts with status and latest risk state.
+- `DELETE /monitoring/accounts/{account_ref}` to disable/remove a monitored account from the in-memory registry.
+
+Registration normalizes current market data with the v0.3 aggregator, runs the lifecycle monitor evaluation, stores the latest state, emits an initial `monitoring_tick_completed` event, and emits entry events if the account starts in `margin_call` or `liquidation`.
+
+### Repository interfaces and development adapters
+
+Monitoring storage is behind repository/cache interfaces:
+
+- `MonitoredAccountRepository`
+- `MonitoringEventRepository`
+- `MarketDataCache`
+
+The included `InMemoryMonitoredAccountRepository`, `InMemoryMonitoringEventRepository`, and `InMemoryMarketDataCache` are development/test adapters only. Production deployments should replace them with durable implementations backed by Postgres, DynamoDB, Redis, S3, or another production store appropriate for the deployment's durability, replay, retention, and consistency requirements.
+
+### Manual monitoring ticks and scheduling policy
+
+v0.4 intentionally does not start a background scheduler. Manual tick endpoints are provided:
+
+- `POST /monitoring/accounts/{account_ref}/tick` evaluates one account.
+- `POST /monitoring/tick` evaluates all active monitored accounts.
+
+Each tick refreshes/reuses market data through `MarketDataAggregator`, runs `CreditLifecycleEngine.monitor(...)`, compares prior and new state, emits only meaningful events, updates the account's last evaluation fields, and writes audit records.
+
+The simple scheduling abstraction computes `next_check_after` with these default intervals:
+
+- `safe`: 15 minutes
+- `watch`: 5 minutes
+- `restrict_new_borrowing`: 1 minute
+- `margin_call`: 30 seconds
+- `liquidation`: immediate
+
+### Event types, severities, and deduplication
+
+Monitoring events support these event types:
+
+- `monitoring_tick_completed`
+- `risk_state_changed`
+- `available_credit_changed`
+- `margin_call_triggered`
+- `liquidation_triggered`
+- `market_data_degraded`
+- `fx_missing`
+- `monitoring_error`
+
+Severity levels are `info`, `warning`, and `critical`. Safe ticks are informational and unchanged informational ticks are not persisted repeatedly by default. Watch/restrict/margin-call conditions are warnings by default, liquidation is critical, missing FX can become warning/critical depending on resulting exposure, and monitoring errors are warning/critical depending on failure type.
+
+Deduplication rules avoid event spam: state-change events require an actual margin-state transition, credit-change events require configured absolute or percentage thresholds, market-data degradation requires warning/quality deterioration, missing-FX events fire when missing required FX appears, and margin/liquidation events fire only when entering those states.
+
+### Market data update ingestion
+
+`POST /monitoring/market-data/update` is an internal ingestion interface for future provider adapters or internal jobs. It is not an external provider WebSocket and does not connect to any paid/real provider stream.
+
+The endpoint accepts quote updates, FX updates, affected instrument hints, source, and `trigger_tick`. Updates are merged into the in-memory market data cache, affected accounts are identified by stable key, asset id, or unambiguous symbol, and the response returns affected account refs plus ambiguity warnings. If `trigger_tick=true`, affected active accounts are evaluated immediately.
+
+### Event retrieval and internal stream
+
+Events can be retrieved with:
+
+- `GET /monitoring/events` with optional `account_ref`, `event_type`, `severity`, and `limit` filters; results are newest first.
+- `GET /monitoring/events/{event_id}` for a single event.
+- `GET /monitoring/events/stream` for an internal `text/event-stream` Server-Sent Events response built with FastAPI `StreamingResponse` and no additional heavy dependency.
+
+### Audit coverage and non-goals
+
+v0.4 audit records cover account registration, account deletion/disablement, monitoring ticks, emitted events, monitoring errors, and market data update ingestion. Audit payloads include account/event identifiers, previous/new state where applicable, market-data warnings, missing data, model versions, and lifecycle evaluation audit ids.
+
+v0.4 does **not** add real external data-provider WebSockets, does **not** execute broker orders, and does **not** connect a production database. It is an internal monitoring/event foundation designed so production storage and provider adapters can be plugged in behind the interfaces later.
