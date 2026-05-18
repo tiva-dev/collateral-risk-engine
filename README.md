@@ -129,3 +129,53 @@ Lifecycle draw-check decisions include `approved`, `partially_approved`, or `rej
 ## Design principle
 
 Client policy controls the base LTV and risk appetite. The engine determines effective LTV, dynamic triggers, liquidation thresholds, and recovery confidence.
+
+## v0.3 Multi-market market data aggregation
+
+v0.3 adds a market data aggregation and normalization layer in `app/market_data` that sits before the existing collateral evaluator. The core evaluator still receives the same `MarketData` domain objects, so existing risk, lifecycle, pre-trade, pledged-cash, and portfolio action endpoints remain backward compatible.
+
+### Instrument identity
+
+Market data is no longer identified only by ticker. The new instrument identity model includes `asset_id`, `symbol`, `exchange`, `currency`, `asset_type`, optional `isin`, optional `figi`, optional `provider_symbol`, and optional metadata. Internally, instruments expose a stable key such as `NASDAQ:AAPL:USD`, `NGX:MTNN:NGN`, `XPAR:AIR:EUR`, or `XTKS:7203:JPY`.
+
+### Data source modes
+
+The aggregation layer supports the existing `DataMode` values:
+
+- `client_supplied`: use only client-supplied quotes and FX rates, then validate and normalize them.
+- `provided_by_us`: use configured provider adapters. v0.3 ships mock providers only.
+- `hybrid`: prefer valid client-supplied data and fall back to configured mock providers when policy allows.
+
+### Mock provider interface
+
+The provider interface supports quote lookup, batch quote lookup, FX lookup, and market status lookup. v0.3 includes:
+
+- `MockEquityProvider` for configured exchange-aware equity snapshots.
+- `MockFXProvider` for configured mock FX rates.
+- `ClientSuppliedProvider` for request-provided quotes and FX rates.
+
+No paid or real external market data providers are connected in v0.3.
+
+### FX conversion and quality scoring
+
+Normalized market data includes the local price and currency, the loan currency, the converted price, bid/ask, volume, liquidity, volatility, recent return, optional order book, timestamp, source, provider name, exchange, market status, data quality score, warnings, and FX metadata. If asset currency equals loan currency, no FX conversion or FX warning is added. If currencies differ, the aggregator selects an FX rate according to policy and converts price and liquidity values into loan currency before the result is converted into the existing `MarketData` object.
+
+The FX policy controls preferred source, fallback provider use, maximum FX age, stale FX haircut, conservative selection when sources disagree, and minimum FX quality score. Missing required FX is not guessed; the normalized result receives a `missing_required_fx` warning and a low data quality score so the existing risk engine heavily discounts or rejects the asset.
+
+### Stale data and market status
+
+Market data policy supports freshness thresholds by asset type and exchange, stale quote haircuts, and minimum quote quality. Fresh data receives high quality. Stale data receives warnings and a lower score. Closed markets add a `market_closed` warning but are not automatically rejected. Halted markets add a `halted` warning and convert into `MarketData.halted=True`, preserving compatibility with existing halted-asset risk logic.
+
+Mock market status support covers `NASDAQ`, `NYSE`, `NGX`, `XPAR`, `XLON`, and `XTKS` using simple configured statuses rather than full exchange calendars.
+
+### Normalization endpoint
+
+`POST /market-data/normalize` is a validation and debugging endpoint. It accepts instruments or holdings, loan currency, data mode, market data policy, optional client-supplied quotes, and optional client-supplied FX rates. It returns normalized market data, per-instrument warnings, quality scores, FX decisions, and missing data. This endpoint does not replace the existing risk endpoints.
+
+### Evaluation helper
+
+`app/market_data/evaluation_adapter.py` exposes `normalize_market_data_for_evaluation(...)`, which returns core `MarketData` objects plus the full aggregation result for callers that want to evaluate a portfolio after normalization without changing existing endpoint contracts.
+
+### Not included until v0.4
+
+v0.3 does not implement live WebSocket streaming, live monitoring feeds, exchange calendar completeness, or real external provider connections. v0.4 is expected to handle live monitoring and event streams.
