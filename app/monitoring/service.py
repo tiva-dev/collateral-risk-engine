@@ -72,6 +72,7 @@ class MonitoringService:
         client_supplied_quotes: dict[str, RawQuote] | None = None,
         client_supplied_fx_rates: dict[tuple[str, str], FXRate] | None = None,
         monitoring_status: MonitoringStatus = MonitoringStatus.ACTIVE,
+        run_initial_evaluation: bool = True,
     ) -> tuple[MonitoredAccount, list[MonitoringEvent]]:
         now = utc_now()
         account = MonitoredAccount(
@@ -89,10 +90,18 @@ class MonitoringService:
             created_at=now,
             updated_at=now,
         )
-        self.account_repo.save(account)
-        self._audit("monitoring_account_registered", account_ref, {"monitoring_status": monitoring_status.value})
-        account, events = self.evaluate_account(account_ref, force_tick_event=True, is_initial=True)
-        return account, events
+        saved = self.account_repo.save(account)
+        self._audit("monitoring_account_registered", account_ref, {"monitoring_status": monitoring_status.value, "run_initial_evaluation": run_initial_evaluation})
+        should_evaluate = monitoring_status == MonitoringStatus.ACTIVE or run_initial_evaluation
+        if not should_evaluate:
+            return saved, []
+        try:
+            account, events = self.evaluate_account(account_ref, force_tick_event=True, is_initial=True, force=True)
+            return account, events
+        except Exception:
+            self.account_repo.delete(account_ref)
+            self._audit("monitoring_account_registration_rolled_back", account_ref, {"monitoring_status": monitoring_status.value})
+            raise
 
     def get_account(self, account_ref: str) -> MonitoredAccount | None:
         return self.account_repo.get(account_ref)
@@ -101,21 +110,27 @@ class MonitoringService:
         return self.account_repo.list()
 
     def delete_account(self, account_ref: str) -> bool:
-        account = self.account_repo.get(account_ref)
-        if account:
-            previous = account.monitoring_status
-            account.monitoring_status = MonitoringStatus.DISABLED
-            account.updated_at = utc_now()
-            self.account_repo.update(account)
-            self._audit("monitoring_account_disabled", account_ref, {"previous_status": previous.value, "new_status": account.monitoring_status.value})
         deleted = self.account_repo.delete(account_ref)
         self._audit("monitoring_account_deleted", account_ref, {"deleted": deleted})
         return deleted
 
-    def evaluate_account(self, account_ref: str, *, force_tick_event: bool = False, is_initial: bool = False) -> tuple[MonitoredAccount, list[MonitoringEvent]]:
+    def update_account_status(self, account_ref: str, monitoring_status: MonitoringStatus) -> MonitoredAccount:
         account = self.account_repo.get(account_ref)
         if account is None:
             raise KeyError(account_ref)
+        previous = account.monitoring_status
+        account.monitoring_status = monitoring_status
+        account.updated_at = utc_now()
+        updated = self.account_repo.update(account)
+        self._audit("monitoring_account_status_updated", account_ref, {"previous_status": previous.value, "new_status": monitoring_status.value})
+        return updated
+
+    def evaluate_account(self, account_ref: str, *, force_tick_event: bool = False, is_initial: bool = False, force: bool = False) -> tuple[MonitoredAccount, list[MonitoringEvent]]:
+        account = self.account_repo.get(account_ref)
+        if account is None:
+            raise KeyError(account_ref)
+        if account.monitoring_status != MonitoringStatus.ACTIVE and not force:
+            raise ValueError(f"monitoring account is {account.monitoring_status.value}; pass force=true to tick anyway")
         previous_state = account.last_margin_state
         previous_credit = account.last_available_credit
         previous_warnings = dict(account.last_market_data_warnings)
@@ -162,9 +177,8 @@ class MonitoringService:
                 reason=decision.reason,
                 audit_id=decision.audit_id,
             )
-            for event in events:
-                self._append_event(event)
-            return account, events
+            saved_events = [self._append_event(event) for event in events]
+            return account, saved_events
         except Exception as exc:
             event = self._event(
                 account,
@@ -181,8 +195,8 @@ class MonitoringService:
                 audit_id=None,
                 dedupe_key=f"{account.account_ref}:monitoring_error:{type(exc).__name__}:{exc}",
             )
-            self._append_event(event)
-            self._audit("monitoring_error", account.account_ref, {"error": str(exc), "event_id": event.event_id})
+            saved_event = self._append_event(event)
+            self._audit("monitoring_error", account.account_ref, {"error": str(exc), "event_id": saved_event.event_id, "audit_id": saved_event.audit_id})
             raise
 
     def tick_all(self) -> list[dict[str, Any]]:
@@ -287,9 +301,13 @@ class MonitoringService:
         )
 
     def _append_event(self, event: MonitoringEvent) -> MonitoringEvent:
-        saved = self.event_repo.append(event)
-        audit_id = self._audit("monitoring_event_emitted", event.account_ref, {"event_id": event.event_id, "event_type": event.event_type.value, "severity": event.severity.value, "previous_state": event.previous_margin_state.value if event.previous_margin_state else None, "new_state": event.new_margin_state.value if event.new_margin_state else None, "market_data_warnings": event.market_data_warnings, "missing_data": event.missing_data, "model_versions": event.model_versions, "evaluation_audit_id": event.audit_id})
-        event.audit_id = event.audit_id or audit_id
+        result = self.event_repo.append(event, dedupe_ttl_seconds=self.thresholds.dedupe_ttl_seconds)
+        saved = result.event
+        if result.created:
+            audit_id = self._audit("monitoring_event_emitted", saved.account_ref, {"event_id": saved.event_id, "event_type": saved.event_type.value, "severity": saved.severity.value, "previous_state": saved.previous_margin_state.value if saved.previous_margin_state else None, "new_state": saved.new_margin_state.value if saved.new_margin_state else None, "market_data_warnings": saved.market_data_warnings, "missing_data": saved.missing_data, "model_versions": saved.model_versions, "evaluation_audit_id": saved.audit_id})
+            if not saved.audit_id:
+                saved.audit_id = audit_id
+                self.event_repo.update_event_audit_id(saved.event_id, audit_id) if hasattr(self.event_repo, "update_event_audit_id") else None
         return saved
 
     def _affected_accounts(self, quotes: dict[str, RawQuote], fx_rates: dict[tuple[str, str], FXRate], instruments: list[str]) -> tuple[list[str], list[str]]:
@@ -306,7 +324,7 @@ class MonitoringService:
         if fx_rates:
             pairs = {(src.upper(), dst.upper()) for src, dst in fx_rates}
             for account in self.account_repo.list_active():
-                currencies = {holding.currency.upper() for holding in account.holdings}
+                currencies = {InstrumentIdentity.from_holding(holding).currency.upper() for holding in account.holdings}
                 if any((currency, account.loan_currency.upper()) in pairs or (account.loan_currency.upper(), currency) in pairs for currency in currencies):
                     affected.add(account.account_ref)
         return sorted(affected), sorted(set(warnings))

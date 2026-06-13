@@ -223,7 +223,7 @@ The canonical provider contract is `app.market_data.providers.MarketDataProvider
 - Backtesting compares flat LTV with the lifecycle safe credit limit rather than raw approved credit.
 - Stress scenarios now shock order-book bid and ask depth: prices follow price/spread shocks, quantities follow volume shocks, and liquidity collapse materially reduces visible depth.
 
-## v0.4 Monitoring engine, internal event stream, and market data update ingestion
+## v0.4/v0.4.1 Monitoring engine, internal event stream, and market data update ingestion
 
 v0.4 adds an internal monitoring layer in `app/monitoring` for continuously re-evaluating registered collateral accounts when account state or market data changes. The monitoring layer uses the existing v0.3 market data aggregation path and the existing `CreditLifecycleEngine.monitor(...)` flow; it does not rewrite the core evaluator or simplify risk logic.
 
@@ -233,12 +233,15 @@ The monitoring registry stores `MonitoredAccount` records containing account ref
 
 The API exposes:
 
-- `POST /monitoring/accounts` to register an account and run the initial monitoring evaluation.
+- `POST /monitoring/accounts` to register an account. `run_initial_evaluation` defaults to `true`; active accounts run the initial evaluation and emit initial events, while paused/disabled accounts can be stored without evaluation by setting `run_initial_evaluation=false`. When evaluation is skipped, `last_evaluation`, `last_margin_state`, and `next_check_after` remain `null` and no monitoring tick event is emitted. If initial evaluation fails, registration rolls back and no partial account remains.
 - `GET /monitoring/accounts/{account_ref}` to retrieve current monitored account state and last evaluation summary.
 - `GET /monitoring/accounts` to list registered monitored accounts with status and latest risk state.
-- `DELETE /monitoring/accounts/{account_ref}` to disable/remove a monitored account from the in-memory registry.
+- `PATCH /monitoring/accounts/{account_ref}/status` to set `monitoring_status` to `active`, `paused`, or `disabled` and audit the previous and new status.
+- `DELETE /monitoring/accounts/{account_ref}` to remove a monitored account from the in-memory registry. Delete is separate from disable and does not first mark the account disabled.
 
-Registration normalizes current market data with the v0.3 aggregator, runs the lifecycle monitor evaluation, stores the latest state, emits an initial `monitoring_tick_completed` event, and emits entry events if the account starts in `margin_call` or `liquidation`.
+Monitoring status controls evaluation: active accounts are included in `list_active` and global ticks; paused and disabled accounts are excluded from global ticks. Single-account ticks reject paused/disabled accounts unless `?force=true` is supplied. v0.4.1 permits forced ticks for both paused and disabled accounts for operator diagnostics, and audits/evaluates them without changing status.
+
+Registration that runs an initial evaluation normalizes current market data with the v0.3 aggregator, runs the lifecycle monitor evaluation, stores the latest state, emits an initial `monitoring_tick_completed` event, and emits entry events if the account starts in `margin_call` or `liquidation`.
 
 ### Repository interfaces and development adapters
 
@@ -248,14 +251,14 @@ Monitoring storage is behind repository/cache interfaces:
 - `MonitoringEventRepository`
 - `MarketDataCache`
 
-The included `InMemoryMonitoredAccountRepository`, `InMemoryMonitoringEventRepository`, and `InMemoryMarketDataCache` are development/test adapters only. Production deployments should replace them with durable implementations backed by Postgres, DynamoDB, Redis, S3, or another production store appropriate for the deployment's durability, replay, retention, and consistency requirements.
+The included `InMemoryMonitoredAccountRepository`, `InMemoryMonitoringEventRepository`, and `InMemoryMarketDataCache` are development/test adapters only. They return/store copies where practical to reduce accidental mutation, but they are not durable, are not cross-process stores, and should not be used as production persistence. Production deployments should replace them with durable implementations backed by Postgres, DynamoDB, Redis, S3, or another production store appropriate for the deployment's durability, replay, retention, and consistency requirements.
 
 ### Manual monitoring ticks and scheduling policy
 
 v0.4 intentionally does not start a background scheduler. Manual tick endpoints are provided:
 
-- `POST /monitoring/accounts/{account_ref}/tick` evaluates one account.
-- `POST /monitoring/tick` evaluates all active monitored accounts.
+- `POST /monitoring/accounts/{account_ref}/tick` evaluates one active account, or a paused/disabled account only when `force=true` is supplied.
+- `POST /monitoring/tick` evaluates all active monitored accounts only.
 
 Each tick refreshes/reuses market data through `MarketDataAggregator`, runs `CreditLifecycleEngine.monitor(...)`, compares prior and new state, emits only meaningful events, updates the account's last evaluation fields, and writes audit records.
 
@@ -282,13 +285,13 @@ Monitoring events support these event types:
 
 Severity levels are `info`, `warning`, and `critical`. Safe ticks are informational and unchanged informational ticks are not persisted repeatedly by default. Watch/restrict/margin-call conditions are warnings by default, liquidation is critical, missing FX can become warning/critical depending on resulting exposure, and monitoring errors are warning/critical depending on failure type.
 
-Deduplication rules avoid event spam: state-change events require an actual margin-state transition, credit-change events require configured absolute or percentage thresholds, market-data degradation requires warning/quality deterioration, missing-FX events fire when missing required FX appears, and margin/liquidation events fire only when entering those states.
+Deduplication rules avoid event spam: state-change events require an actual margin-state transition, credit-change events require configured absolute or percentage thresholds, market-data degradation requires warning/quality deterioration, missing-FX events fire when missing required FX appears, and margin/liquidation events fire only when entering those states. v0.4.1 deduplication uses `MonitoringThresholds.dedupe_ttl_seconds` (default 300 seconds), so the same dedupe key is suppressed only within the TTL and may emit again after the TTL. This lets conditions such as missing FX resolve and later reappear as a new event.
 
 ### Market data update ingestion
 
 `POST /monitoring/market-data/update` is an internal ingestion interface for future provider adapters or internal jobs. It is not an external provider WebSocket and does not connect to any paid/real provider stream.
 
-The endpoint accepts quote updates, FX updates, affected instrument hints, source, and `trigger_tick`. Updates are merged into the in-memory market data cache, affected accounts are identified by stable key, asset id, or unambiguous symbol, and the response returns affected account refs plus ambiguity warnings. If `trigger_tick=true`, affected active accounts are evaluated immediately.
+The endpoint accepts quote updates, FX updates, affected instrument hints, source, and `trigger_tick`. Updates are merged into the in-memory market data cache, affected accounts are identified by stable key, exact asset id, or unambiguous symbol, and the response returns affected account refs plus ambiguity warnings. Symbol-only lookup/update is allowed only when the symbol maps to one stable instrument identity; ambiguous symbols return warnings and are not silently applied to unrelated instruments. The cache provider always permits stable-key and exact-asset-id lookup, but it does not serve symbol-only cached quotes when a symbol is ambiguous across exchanges or currencies. FX affected-account detection uses `InstrumentIdentity.from_holding(holding).currency` rather than relying only on `holding.currency`, so stable identities like `NGX:MTNN:NGN` can still be matched even if the holding currency field is stale or wrong. If `trigger_tick=true`, affected active accounts are evaluated immediately.
 
 ### Event retrieval and internal stream
 
@@ -296,10 +299,10 @@ Events can be retrieved with:
 
 - `GET /monitoring/events` with optional `account_ref`, `event_type`, `severity`, and `limit` filters; results are newest first.
 - `GET /monitoring/events/{event_id}` for a single event.
-- `GET /monitoring/events/stream` for an internal `text/event-stream` Server-Sent Events response built with FastAPI `StreamingResponse` and no additional heavy dependency.
+- `GET /monitoring/events/stream` for an internal snapshot `text/event-stream` Server-Sent Events response built with FastAPI `StreamingResponse` and no additional heavy dependency. It streams currently stored events and then closes; if no events are available it emits a readiness comment (`: monitoring stream ready`) and closes. It is not a live external WebSocket or long-running provider feed.
 
 ### Audit coverage and non-goals
 
-v0.4 audit records cover account registration, account deletion/disablement, monitoring ticks, emitted events, monitoring errors, and market data update ingestion. Audit payloads include account/event identifiers, previous/new state where applicable, market-data warnings, missing data, model versions, and lifecycle evaluation audit ids.
+v0.4 audit records cover account registration, status changes, account deletion, monitoring ticks, emitted events, monitoring errors, and market data update ingestion. Audit payloads include account/event identifiers, previous/new state where applicable, market-data warnings, missing data, model versions, and lifecycle evaluation audit ids.
 
-v0.4 does **not** add real external data-provider WebSockets, does **not** execute broker orders, and does **not** connect a production database. It is an internal monitoring/event foundation designed so production storage and provider adapters can be plugged in behind the interfaces later.
+v0.4/v0.4.1 does **not** add real external data-provider WebSockets, does **not** execute broker orders, and does **not** connect a production database. It is an internal monitoring/event foundation designed so production storage and provider adapters can be plugged in behind the interfaces later.

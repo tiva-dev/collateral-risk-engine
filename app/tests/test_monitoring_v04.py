@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     from fastapi.testclient import TestClient
@@ -21,7 +21,7 @@ from app.market_data.policy import MarketDataPolicy
 from app.market_data.providers import FXRate, RawQuote
 from app.monitoring.events import serialize_sse_event
 from app.monitoring.market_updates import InMemoryMarketDataCache
-from app.monitoring.models import MonitoringEvent, MonitoringEventType, MonitoringSeverity
+from app.monitoring.models import MonitoringEvent, MonitoringEventType, MonitoringSeverity, MonitoringStatus, MonitoringThresholds
 from app.monitoring.repositories import InMemoryMonitoredAccountRepository, InMemoryMonitoringEventRepository
 from app.monitoring.scheduler import SimpleMonitoringScheduler
 from app.monitoring.service import MonitoringService
@@ -69,7 +69,7 @@ def service() -> MonitoringService:
     )
 
 
-def register(svc: MonitoringService, account_ref="acct", loan=1_000.0, price=100.0, status_data_mode=DataMode.CLIENT_SUPPLIED):
+def register(svc: MonitoringService, account_ref="acct", loan=1_000.0, price=100.0, status_data_mode=DataMode.CLIENT_SUPPLIED, monitoring_status=MonitoringStatus.ACTIVE, run_initial_evaluation=True):
     return svc.register_account(
         account_ref=account_ref,
         holdings=[Holding("SPY", AssetType.ETF, 100.0, "USD")],
@@ -80,6 +80,8 @@ def register(svc: MonitoringService, account_ref="acct", loan=1_000.0, price=100
         data_mode=status_data_mode,
         market_data_policy=MarketDataPolicy(),
         client_supplied_quotes={"SPY": quote(price=price)},
+        monitoring_status=monitoring_status,
+        run_initial_evaluation=run_initial_evaluation,
     )
 
 
@@ -87,7 +89,8 @@ class MonitoringRepositoryTests(unittest.TestCase):
     def test_in_memory_event_repository_append_get_list_filter(self):
         repo = InMemoryMonitoringEventRepository()
         event = MonitoringEvent("evt1", "acct", MonitoringEventType.FX_MISSING, MonitoringSeverity.WARNING)
-        repo.append(event)
+        result = repo.append(event)
+        self.assertTrue(result.created)
         self.assertEqual(repo.get("evt1"), event)
         self.assertEqual(repo.list(account_ref="acct"), [event])
         self.assertEqual(repo.list(event_type="fx_missing"), [event])
@@ -169,6 +172,7 @@ class MonitoringServiceTests(unittest.TestCase):
         register(svc, "err_acct")
         account = svc.get_account("err_acct")
         account.holdings = []
+        svc.account_repo.update(account)
         with self.assertRaises(Exception):
             svc.evaluate_account("err_acct")
         self.assertIn(MonitoringEventType.MONITORING_ERROR, [event.event_type for event in svc.event_repo.list(account_ref="err_acct")])
@@ -212,6 +216,85 @@ class MonitoringServiceTests(unittest.TestCase):
         )
         result = svc.ingest_market_data_update({}, {("EUR", "USD"): FXRate("EUR", "USD", 1.1)}, [], "test", False)
         self.assertEqual(result["affected_accounts"], ["fx_update_acct"])
+
+
+    def test_tick_status_enforcement_and_force(self):
+        svc = service()
+        register(svc, "active_acct")
+        self.assertTrue(svc.evaluate_account("active_acct", force_tick_event=True)[1])
+        register(svc, "paused_acct", monitoring_status=MonitoringStatus.PAUSED, run_initial_evaluation=False)
+        with self.assertRaises(ValueError):
+            svc.evaluate_account("paused_acct")
+        _, events = svc.evaluate_account("paused_acct", force=True, force_tick_event=True)
+        self.assertTrue(events)
+        register(svc, "disabled_acct", monitoring_status=MonitoringStatus.DISABLED, run_initial_evaluation=False)
+        with self.assertRaises(ValueError):
+            svc.evaluate_account("disabled_acct")
+        self.assertTrue(svc.evaluate_account("disabled_acct", force=True, force_tick_event=True)[1])
+
+    def test_paused_registration_can_skip_initial_evaluation(self):
+        svc = service()
+        account, events = register(svc, "paused_reg", monitoring_status=MonitoringStatus.PAUSED, run_initial_evaluation=False)
+        self.assertEqual(events, [])
+        self.assertIsNone(account.last_evaluation)
+        self.assertIsNone(account.last_margin_state)
+        self.assertIsNone(account.next_check_after)
+        self.assertEqual(svc.event_repo.list(account_ref="paused_reg"), [])
+
+    def test_failed_registration_rolls_back_account(self):
+        svc = service()
+        with self.assertRaises(Exception):
+            svc.register_account(
+                account_ref="bad_reg", holdings=[], pledged_cash_balance=0.0,
+                loan=Loan(100.0), loan_currency="USD", policy=Policy.default(),
+                data_mode=DataMode.CLIENT_SUPPLIED, market_data_policy=MarketDataPolicy(),
+            )
+        self.assertIsNone(svc.get_account("bad_reg"))
+
+    def test_status_update_and_delete_semantics(self):
+        svc = service()
+        register(svc, "status_acct")
+        svc.update_account_status("status_acct", MonitoringStatus.PAUSED)
+        self.assertEqual(svc.account_repo.list_active(), [])
+        svc.update_account_status("status_acct", MonitoringStatus.ACTIVE)
+        self.assertEqual([a.account_ref for a in svc.account_repo.list_active()], ["status_acct"])
+        self.assertTrue(svc.delete_account("status_acct"))
+        self.assertIsNone(svc.get_account("status_acct"))
+
+    def test_fx_update_uses_stable_identity_currency(self):
+        svc = service()
+        svc.register_account(
+            account_ref="ngx_acct", holdings=[Holding("NGX:MTNN:NGN", AssetType.LISTED_EQUITY, 10.0, "USD")],
+            pledged_cash_balance=0.0, loan=Loan(100.0), loan_currency="USD", policy=Policy.default(),
+            data_mode=DataMode.CLIENT_SUPPLIED, market_data_policy=MarketDataPolicy(),
+            client_supplied_quotes={"NGX:MTNN:NGN": quote(asset_id="NGX:MTNN:NGN", symbol="MTNN", price=100.0, currency="NGN", exchange="NGX")},
+            client_supplied_fx_rates={("NGN", "USD"): FXRate("NGN", "USD", 0.001)},
+        )
+        result = svc.ingest_market_data_update({}, {("NGN", "USD"): FXRate("NGN", "USD", 0.0011)}, [], "test", False)
+        self.assertEqual(result["affected_accounts"], ["ngx_acct"])
+
+    def test_event_dedupe_ttl_and_repository_mutability(self):
+        repo = InMemoryMonitoringEventRepository()
+        event = MonitoringEvent("evt_a", "acct", MonitoringEventType.FX_MISSING, MonitoringSeverity.WARNING, dedupe_key="k")
+        self.assertTrue(repo.append(event, dedupe_ttl_seconds=1).created)
+        self.assertFalse(repo.append(MonitoringEvent("evt_b", "acct", MonitoringEventType.FX_MISSING, MonitoringSeverity.WARNING, dedupe_key="k"), dedupe_ttl_seconds=1).created)
+        later = MonitoringEvent("evt_c", "acct", MonitoringEventType.FX_MISSING, MonitoringSeverity.WARNING, dedupe_key="k", created_at=event.created_at + timedelta(seconds=2))
+        self.assertTrue(repo.append(later, dedupe_ttl_seconds=1).created)
+        svc = service()
+        account, _ = register(svc, "mutable_acct")
+        returned = svc.get_account("mutable_acct")
+        returned.monitoring_status = MonitoringStatus.DISABLED
+        self.assertEqual(svc.get_account("mutable_acct").monitoring_status, MonitoringStatus.ACTIVE)
+
+    def test_market_data_cache_ambiguous_symbol_provider_lookup(self):
+        cache = InMemoryMarketDataCache()
+        q1 = quote(asset_id="NYSE:ABC:USD", symbol="ABC", exchange="NYSE", currency="USD")
+        q2 = quote(asset_id="LSE:ABC:GBP", symbol="ABC", exchange="LSE", currency="GBP")
+        cache.merge({q1.instrument.stable_key: q1}, {}, "test")
+        cache.merge({q2.instrument.stable_key: q2}, {}, "test")
+        self.assertIsNotNone(cache.provider().get_quote(q1.instrument))
+        self.assertIsNone(cache.snapshot().quotes.get("ABC"))
+        self.assertIsNone(cache.provider().get_quote(InstrumentIdentity("TSX:ABC:CAD", "ABC", "TSX", "CAD", AssetType.ETF)))
 
     def test_scheduling_policy_by_margin_state(self):
         scheduler = SimpleMonitoringScheduler()
@@ -258,6 +341,19 @@ class MonitoringEndpointTests(unittest.TestCase):
         stream = client.get("/monitoring/events/stream")
         self.assertEqual(stream.status_code, 200)
         self.assertIn("text/event-stream", stream.headers["content-type"])
+        paused_ref = "api_paused_acct"
+        paused_payload = {**payload, "account_ref": paused_ref, "monitoring_status": "paused", "run_initial_evaluation": False}
+        paused = client.post("/monitoring/accounts", json=paused_payload)
+        self.assertEqual(paused.status_code, 200, paused.text)
+        self.assertEqual(paused.json()["events"], [])
+        self.assertEqual(client.post(f"/monitoring/accounts/{paused_ref}/tick").status_code, 422)
+        self.assertEqual(client.post(f"/monitoring/accounts/{paused_ref}/tick", params={"force": True}).status_code, 200)
+        patched = client.patch(f"/monitoring/accounts/{paused_ref}/status", json={"monitoring_status": "disabled"})
+        self.assertEqual(patched.status_code, 200, patched.text)
+        self.assertEqual(patched.json()["account"]["monitoring_status"], "disabled")
+        empty_stream = client.get("/monitoring/events/stream", params={"limit": 0})
+        self.assertIn(": monitoring stream ready", empty_stream.text)
+        self.assertIn("data:", stream.text)
         self.assertEqual(client.delete(f"/monitoring/accounts/{account_ref}").status_code, 200)
 
 
