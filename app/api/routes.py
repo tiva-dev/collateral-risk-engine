@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from fastapi.encoders import jsonable_encoder
 
@@ -24,6 +24,7 @@ from app.api.schemas import (
     MonitoringEventsResponse,
     MonitoringEventOut,
     MonitoringTickResponse,
+    MonitoringStatusUpdateRequest,
     PreTradeRiskCheckRequest,
     PortfolioActionCheckRequest,
     PortfolioActionCheckResponse,
@@ -271,6 +272,7 @@ def register_monitored_account(request: MonitoredAccountCreateRequest) -> Monito
             client_supplied_quotes={key: quote.to_raw_quote() for key, quote in request.client_supplied_quotes.items()},
             client_supplied_fx_rates={(fx.from_currency.upper(), fx.to_currency.upper()): fx.to_fx_rate() for fx in request.client_supplied_fx_rates},
             monitoring_status=request.monitoring_status,
+            run_initial_evaluation=request.run_initial_evaluation,
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -298,14 +300,27 @@ def delete_monitored_account(account_ref: str) -> dict[str, bool | str]:
     return {"account_ref": account_ref, "deleted": True}
 
 
-@router.post("/monitoring/accounts/{account_ref}/tick", response_model=MonitoringTickResponse)
-def tick_monitored_account(account_ref: str) -> MonitoringTickResponse:
+@router.patch("/monitoring/accounts/{account_ref}/status", response_model=MonitoringAccountResponse)
+def update_monitored_account_status(account_ref: str, request: MonitoringStatusUpdateRequest) -> MonitoringAccountResponse:
     try:
-        account, events = monitoring_service.evaluate_account(account_ref, force_tick_event=True)
+        account = monitoring_service.update_account_status(account_ref, request.monitoring_status)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="monitored account not found") from exc
+    return MonitoringAccountResponse(account=_monitoring_account_out(account), events=[])
+
+
+@router.post("/monitoring/accounts/{account_ref}/tick", response_model=MonitoringTickResponse)
+def tick_monitored_account(account_ref: str, force: bool = Query(default=False)) -> MonitoringTickResponse:
+    try:
+        account, events = monitoring_service.evaluate_account(account_ref, force_tick_event=True, force=force)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="monitored account not found") from exc
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        event = monitoring_event_repo.list(account_ref=account_ref, event_type=MonitoringEventType.MONITORING_ERROR, limit=1)
+        detail = {"detail": str(exc)}
+        if event:
+            detail.update({"event_id": event[0].event_id, "audit_id": event[0].audit_id})
+        raise HTTPException(status_code=422, detail=detail) from exc
     return MonitoringTickResponse(account=_monitoring_account_out(account), events=_events_out(events))
 
 

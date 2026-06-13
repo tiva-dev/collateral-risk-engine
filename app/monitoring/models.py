@@ -44,6 +44,7 @@ class MonitoringThresholds:
     available_credit_pct_change_threshold: float = 0.01
     data_quality_change_threshold: float = 0.15
     persist_unchanged_info_ticks: bool = False
+    dedupe_ttl_seconds: int = 300
 
 
 @dataclass

@@ -613,6 +613,7 @@ class MonitoredAccountCreateRequest(BaseModel):
     client_supplied_quotes: dict[str, ClientQuoteIn] = Field(default_factory=dict)
     client_supplied_fx_rates: list[ClientFXRateIn] = Field(default_factory=list)
     monitoring_status: MonitoringStatus = MonitoringStatus.ACTIVE
+    run_initial_evaluation: bool = True
 
 
 class MonitoringEventOut(BaseModel):
@@ -661,6 +662,16 @@ class MonitoringAccountResponse(BaseModel):
 
 class MonitoringAccountsListResponse(BaseModel):
     accounts: list[MonitoredAccountOut]
+
+
+class MonitoringStatusUpdateRequest(BaseModel):
+    monitoring_status: MonitoringStatus
+
+
+class MonitoringErrorResponse(BaseModel):
+    detail: str
+    event_id: str | None = None
+    audit_id: str | None = None
 
 
 class MonitoringTickResponse(BaseModel):
