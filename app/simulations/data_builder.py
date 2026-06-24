@@ -21,17 +21,79 @@ class OfficialDatasetBuilder:
             if "ngnmarket" in self.provider_names: calls.append({"provider":"ngnmarket","operation":"fetch_fx_history","pair":pair})
             if "alpha_vantage" in self.provider_names: calls.append({"provider":"alpha_vantage","operation":"fetch_fx_history","pair":pair})
         return calls
-    def build(self,start_date:date=START_DATE,end_date:date|None=None,force_refresh:bool=False,dry_run:bool=True):
-        end=end_date or datetime.now(timezone.utc).date(); missing=[]; cache_paths=[]; quota={}; notes=["Dry-run mode does not call provider APIs."] if dry_run else ["Cache-first provider retrieval used unless force_refresh=true."]
-        if not dry_run:
-            providers={"alpaca":AlpacaTradingHistoricalProvider(),"ngnmarket":NGNMarketHistoricalProvider(),"alpha_vantage":AlphaVantageHistoricalProvider()}
-            for s in (US_UNIVERSE if "alpaca" in self.provider_names else []):
-                try: providers["alpaca"].fetch_equity_history(s,start_date,end,force_refresh=force_refresh)
-                except Exception: missing.append(s)
-            for s in (NGX_UNIVERSE if "ngnmarket" in self.provider_names else []):
-                try: providers["ngnmarket"].fetch_equity_history(s,start_date,end,force_refresh=force_refresh)
-                except Exception: missing.append(s)
-            quota={k:getattr(v,"quota_metadata",{}) for k,v in providers.items() if k in self.provider_names}
-        manifest=HistoricalDatasetManifest(dataset_id="official-validation-"+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"), provider=",".join(sorted(self.provider_names)), universe=official_universe(), instruments=US_UNIVERSE+NGX_UNIVERSE, fx_pairs=FX_PAIRS, start_date=start_date, end_date=end, cache_paths=cache_paths, provider_quota_metadata=quota, missing_symbols=missing, methodology_notes=notes)
+def build(
+    self,
+    start_date: date = START_DATE,
+    end_date: date | None = None,
+    force_refresh: bool = False,
+    dry_run: bool = True,
+):
+    end = end_date or datetime.now(timezone.utc).date()
+    missing: list[str] = []
+    cache_paths: list[str] = []
+    quota: dict[str, dict] = {}
+    notes = (
+        ["Dry-run mode does not call provider APIs."]
+        if dry_run
+        else ["Cache-first provider retrieval used unless force_refresh=true."]
+    )
+
+    if not dry_run:
+        providers = {
+            "alpaca": AlpacaTradingHistoricalProvider(),
+            "ngnmarket": NGNMarketHistoricalProvider(),
+            "alpha_vantage": AlphaVantageHistoricalProvider(),
+        }
+        for s in (US_UNIVERSE if "alpaca" in self.provider_names else []):
+            try:
+                providers["alpaca"].fetch_equity_history(
+                    s, start_date, end, force_refresh=force_refresh
+                )
+            except Exception:
+                missing.append(s)
+        for s in (NGX_UNIVERSE if "ngnmarket" in self.provider_names else []):
+            try:
+                providers["ngnmarket"].fetch_equity_history(
+                    s, start_date, end, force_refresh=force_refresh
+                )
+            except Exception:
+                missing.append(s)
+        for pair in FX_PAIRS:
+            fc, tc = pair.split("/")
+            if "ngnmarket" in self.provider_names:
+                try:
+                    providers["ngnmarket"].fetch_fx_history(
+                        fc, tc, start_date, end, force_refresh=force_refresh
+                    )
+                except Exception:
+                    missing.append(pair)
+            if "alpha_vantage" in self.provider_names:
+                try:
+                    providers["alpha_vantage"].fetch_fx_history(
+                        fc, tc, start_date, end, force_refresh=force_refresh
+                    )
+                except Exception:
+                    missing.append(pair)
+        quota = {
+            k: getattr(v, "quota_metadata", {})
+            for k, v in providers.items()
+            if k in self.provider_names
+        }
+
+    manifest = HistoricalDatasetManifest(
+        dataset_id="official-validation-"
+        + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+        provider=",".join(sorted(self.provider_names)),
+        universe=official_universe(),
+        instruments=US_UNIVERSE + NGX_UNIVERSE,
+        fx_pairs=FX_PAIRS,
+        start_date=start_date,
+        end_date=end,
+        cache_paths=cache_paths,
+        provider_quota_metadata=quota,
+        missing_symbols=missing,
+        methodology_notes=notes,
+    )
+    return manifest
         return manifest
     def write_manifest(self, manifest): return write_manifest(manifest,self.output_dir)
