@@ -62,6 +62,60 @@ def apply_fx(value: float, from_currency: str, to_currency: str, fx_rates: dict[
     if stress and from_currency=="NGN": rate*=1-stress.fx_devaluation
     return value*rate, False
 
+
+def convert_market_data_currency(
+    market_data: MarketData,
+    to_currency: str,
+    fx_rates: dict[tuple[str, str], float],
+    stress: StressOverlay | None = None,
+) -> tuple[MarketData, bool]:
+    from_currency = market_data.metadata.get("currency", to_currency)
+    converted_price, missing = apply_fx(market_data.last_price, from_currency, to_currency, fx_rates, stress)
+    converted_bid, bid_missing = (
+        apply_fx(market_data.bid, from_currency, to_currency, fx_rates, stress)
+        if market_data.bid is not None
+        else (None, False)
+    )
+    converted_ask, ask_missing = (
+        apply_fx(market_data.ask, from_currency, to_currency, fx_rates, stress)
+        if market_data.ask is not None
+        else (None, False)
+    )
+    converted_adv, adv_missing = (
+        apply_fx(market_data.average_dollar_volume, from_currency, to_currency, fx_rates, stress)
+        if market_data.average_dollar_volume is not None
+        else (None, False)
+    )
+    converted_order_book = None
+    order_book_missing = False
+    if market_data.order_book is not None:
+        converted_bids = []
+        converted_asks = []
+        for level in market_data.order_book.bids:
+            price, level_missing = apply_fx(level.price, from_currency, to_currency, fx_rates, stress)
+            converted_bids.append(replace(level, price=price))
+            order_book_missing = order_book_missing or level_missing
+        for level in market_data.order_book.asks:
+            price, level_missing = apply_fx(level.price, from_currency, to_currency, fx_rates, stress)
+            converted_asks.append(replace(level, price=price))
+            order_book_missing = order_book_missing or level_missing
+        converted_order_book = OrderBook(converted_bids, converted_asks)
+    any_missing = missing or bid_missing or ask_missing or adv_missing or order_book_missing
+    return replace(
+        market_data,
+        last_price=converted_price,
+        bid=converted_bid,
+        ask=converted_ask,
+        average_dollar_volume=converted_adv,
+        order_book=converted_order_book,
+        metadata={
+            **market_data.metadata,
+            "original_currency": from_currency,
+            "currency": to_currency,
+            "fx_missing": any_missing,
+        },
+    ), any_missing
+
 class HistoricalReplayEngine:
     def __init__(self, manifest: HistoricalDatasetManifest|dict[str,Any]|None=None, seed:int=42):
         self.manifest=manifest; self.random=random.Random(seed); self.seed=seed; self.risk_engine=CollateralRiskEngine(); self.lifecycle=CreditLifecycleEngine(self.risk_engine)
@@ -88,12 +142,9 @@ class HistoricalReplayEngine:
                 if s in prev_price and prev_price[s]>0: returns.setdefault(s,[]).append(b.close/prev_price[s]-1)
                 prev_price[s]=b.close
                 raw_md=historical_bar_to_market_data(b, returns.get(s,[]), stress)
-                converted_price, missing=apply_fx(raw_md.last_price, raw_md.metadata.get("currency", "USD"), scenario.loan_currency, fx_rates, stress)
-                converted_bid = apply_fx(raw_md.bid, raw_md.metadata.get("currency", "USD"), scenario.loan_currency, fx_rates, stress)[0] if raw_md.bid is not None else None
-                converted_ask = apply_fx(raw_md.ask, raw_md.metadata.get("currency", "USD"), scenario.loan_currency, fx_rates, stress)[0] if raw_md.ask is not None else None
-                converted_adv = apply_fx(raw_md.average_dollar_volume, raw_md.metadata.get("currency", "USD"), scenario.loan_currency, fx_rates, stress)[0] if raw_md.average_dollar_volume is not None else None
+                converted_md, missing = convert_market_data_currency(raw_md, scenario.loan_currency, fx_rates, stress)
                 fx_missing = fx_missing or missing
-                md[s]=replace(raw_md, last_price=converted_price, bid=converted_bid, ask=converted_ask, average_dollar_volume=converted_adv, metadata={**raw_md.metadata, "original_currency": raw_md.metadata.get("currency"), "currency": scenario.loan_currency, "fx_missing": missing})
+                md[s]=converted_md
             if not md: continue
             if fx_missing: missing_fx_dates.append(d.isoformat())
             if loan.principal==0:

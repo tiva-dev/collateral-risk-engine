@@ -10,7 +10,7 @@ from app.historical_data.models import HistoricalBar
 from app.historical_data.ngnmarket import NGNMarketHistoricalProvider
 from app.historical_data.providers import ProviderError
 from app.simulations.metrics import compute_simulation_metrics
-from app.simulations.replay import StressOverlay, generate_synthetic_order_book, historical_bar_to_market_data, rolling_volatility
+from app.simulations.replay import StressOverlay, convert_market_data_currency, generate_synthetic_order_book, historical_bar_to_market_data, rolling_volatility
 from app.simulations.reporting import generate_evidence_package
 from app.simulations.scenarios.official_portfolios import official_portfolio_scenarios
 
@@ -59,6 +59,12 @@ class V052ReplayMetricsReportingTests(unittest.TestCase):
         bar=HistoricalBar("AAPL",datetime(2024,1,2,tzinfo=timezone.utc),100,101,99,100,volume=1_000_000,provider_name="test")
         md=historical_bar_to_market_data(bar,[0.01,-0.02,0.03],StressOverlay(spread_widening=2.0,order_book_thinning=0.5))
         self.assertEqual(md.asset_id,"AAPL")
+        converted, missing_fx = convert_market_data_currency(md, "EUR", {("USD", "EUR"): 0.9})
+        self.assertFalse(missing_fx)
+        self.assertEqual(converted.metadata["currency"], "EUR")
+        self.assertAlmostEqual(converted.last_price, 90.0)
+        self.assertAlmostEqual(converted.bid, md.bid * 0.9)
+        self.assertAlmostEqual(converted.order_book.bids[0].price, md.order_book.bids[0].price * 0.9)
         self.assertGreater(rolling_volatility([0.01,-0.02,0.03],3),0)
         ob=generate_synthetic_order_book(100,1_000_000,1,thinning=0.5)
         self.assertTrue(ob.bids and ob.asks)
