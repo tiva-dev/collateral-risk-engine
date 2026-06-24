@@ -1,4 +1,4 @@
-# DATA PROVIDER GUIDE
+# OFFICIAL VALIDATION METHODOLOGY
 
 This document is part of the v0.5B official validation evidence package.
 

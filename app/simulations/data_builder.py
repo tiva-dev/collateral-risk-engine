@@ -3,6 +3,7 @@ from dataclasses import asdict
 from datetime import date, datetime, timezone
 from typing import Iterable
 from app.historical_data.alpaca import AlpacaTradingHistoricalProvider
+from app.historical_data.providers import ProviderError
 from app.historical_data.alpha_vantage import AlphaVantageHistoricalProvider
 from app.historical_data.config import load_config
 from app.historical_data.manifest import write_manifest
@@ -27,10 +28,21 @@ class OfficialDatasetBuilder:
         providers = {}
         if not dry_run:
             providers={"alpaca":AlpacaTradingHistoricalProvider(),"ngnmarket":NGNMarketHistoricalProvider(),"alpha_vantage":AlphaVantageHistoricalProvider()}
+            if "ngnmarket" in self.provider_names:
+                try:
+                    companies=providers["ngnmarket"].fetch_company_list("NGX", force_refresh=force_refresh)
+                    company_symbols={str(c.get("symbol") or c.get("ticker") or c.get("code")) for c in companies} if isinstance(companies,list) else set()
+                    for sym in NGX_UNIVERSE:
+                        if company_symbols and sym not in company_symbols:
+                            missing.append(sym); reasons[sym]="NGNMarket company list mapping missing"; warnings.append(f"NGNMarket mapping missing for {sym}")
+                except Exception as exc:
+                    warnings.append(f"NGNMarket company list validation failed: {exc}")
             def record(name: str, symbol: str, fn):
                 try:
                     series=fn(); count=len(series.bars) if isinstance(series,HistoricalSeries) else len(series.rates) if isinstance(series,HistoricalFXSeries) else 0
-                    coverage.setdefault(name,{"requested":0,"available":0,"missing":0}); coverage[name]["requested"]+=1
+                    coverage.setdefault(name,{"requested":0,"available":0,"missing":0,"cached":0,"fetched":0,"page_count":0}); coverage[name]["requested"]+=1
+                    pcs=getattr(providers.get(name),"provider_coverage_summary",{}) or {}
+                    coverage[name]["cached"] += int(pcs.get("cached",0)); coverage[name]["fetched"] += int(pcs.get("fetched",0)); coverage[name]["page_count"] += int(pcs.get("page_count",0))
                     if count: coverage[name]["available"]+=1
                     else:
                         coverage[name]["missing"]+=1; missing.append(symbol); reasons[symbol]="provider returned no data"
@@ -39,7 +51,7 @@ class OfficialDatasetBuilder:
                     if isinstance(series,HistoricalSeries) and series.bars: earliest[symbol]=min(b.timestamp for b in series.bars)
                     if isinstance(series,HistoricalFXSeries) and series.rates: earliest[symbol]=min(r.timestamp for r in series.rates)
                 except Exception as exc:
-                    coverage.setdefault(name,{"requested":0,"available":0,"missing":0}); coverage[name]["requested"]+=1; coverage[name]["missing"]+=1
+                    coverage.setdefault(name,{"requested":0,"available":0,"missing":0,"cached":0,"fetched":0,"page_count":0}); coverage[name]["requested"]+=1; coverage[name]["missing"]+=1
                     missing.append(symbol); reasons[symbol]=str(exc); warnings.append(f"{name} failed for {symbol}: {exc}")
             for s in (US_UNIVERSE if "alpaca" in self.provider_names else []): record("alpaca",s,lambda s=s: providers["alpaca"].fetch_equity_history(s,start_date,end,force_refresh=force_refresh))
             for s in (NGX_UNIVERSE if "ngnmarket" in self.provider_names else []): record("ngnmarket",s,lambda s=s: providers["ngnmarket"].fetch_equity_history(s,start_date,end,force_refresh=force_refresh))
@@ -51,6 +63,6 @@ class OfficialDatasetBuilder:
                 if k in self.provider_names:
                     quota[k]=getattr(v,"quota_metadata",{}); cache_paths += getattr(v,"cache_paths",[]); raw_paths += getattr(v,"raw_response_paths",[])
         else:
-            coverage={p:{"planned_calls":sum(1 for c in self.plan_calls() if c["provider"]==p)} for p in self.provider_names}
+            coverage={p:{"planned_calls":sum(1 for c in self.plan_calls() if c["provider"]==p),"requested":0,"available":0,"missing":0,"cached":0,"fetched":0,"page_count":0,"cache_paths":"none in dry-run"} for p in self.provider_names}
         return HistoricalDatasetManifest(dataset_id="official-validation-"+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),provider=",".join(sorted(self.provider_names)),universe=official_universe(),instruments=US_UNIVERSE+NGX_UNIVERSE,fx_pairs=FX_PAIRS,start_date=start_date,end_date=end,cache_paths=cache_paths,raw_response_paths=raw_paths,provider_quota_metadata=quota,warnings=warnings,missing_symbols=missing,earliest_available_date_by_symbol=earliest,methodology_notes=notes,missing_symbol_reasons=reasons,provider_coverage_summary=coverage,instrument_identities=identities)
     def write_manifest(self, manifest): return write_manifest(manifest,self.output_dir)
