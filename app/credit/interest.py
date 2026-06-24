@@ -26,12 +26,25 @@ def calculate_day_count_fraction(start: datetime, end: datetime, convention: str
     raise ValueError("unsupported day_count_convention")
 
 def next_accrual_time(loan_terms: InterestPolicy, from_datetime: datetime) -> datetime:
-    if loan_terms.accrual_frequency == "daily": return from_datetime + timedelta(days=1)
+    def add_months(dt: datetime, months: int) -> datetime:
+        year = dt.year + (dt.month - 1 + months) // 12
+        month = (dt.month - 1 + months) % 12 + 1
+        day = dt.day
+        while day > 28:
+            try:
+                return dt.replace(year=year, month=month, day=day)
+            except ValueError:
+                day -= 1
+        return dt.replace(year=year, month=month, day=day)
+
+    if loan_terms.accrual_frequency == "daily":
+        return from_datetime + timedelta(days=1)
     if loan_terms.accrual_frequency == "monthly":
-        y=from_datetime.year + (from_datetime.month//12); m=from_datetime.month%12+1
-        return from_datetime.replace(year=y, month=m, day=min(from_datetime.day,28))
-    if loan_terms.accrual_frequency == "quarterly": return from_datetime + timedelta(days=91)
-    if loan_terms.accrual_frequency == "yearly": return from_datetime.replace(year=from_datetime.year+1)
+        return add_months(from_datetime, 1)
+    if loan_terms.accrual_frequency == "quarterly":
+        return add_months(from_datetime, 3)
+    if loan_terms.accrual_frequency == "yearly":
+        return add_months(from_datetime, 12)
     raise ValueError("unsupported accrual_frequency")
 
 def accrue_interest(loan: Loan, loan_terms: InterestPolicy, from_datetime: datetime, to_datetime: datetime) -> tuple[Loan, dict]:
