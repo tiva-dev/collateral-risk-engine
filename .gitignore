@@ -27,3 +27,8 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+.env
+.env.*
+!.env.example
+data/historical_cache/
+data/simulation_results/

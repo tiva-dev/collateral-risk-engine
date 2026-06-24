@@ -306,3 +306,15 @@ Events can be retrieved with:
 v0.4 audit records cover account registration, status changes, account deletion, monitoring ticks, emitted events, monitoring errors, and market data update ingestion. Audit payloads include account/event identifiers, previous/new state where applicable, market-data warnings, missing data, model versions, and lifecycle evaluation audit ids.
 
 v0.4/v0.4.1 does **not** add real external data-provider WebSockets, does **not** execute broker orders, and does **not** connect a production database. It is an internal monitoring/event foundation designed so production storage and provider adapters can be plugged in behind the interfaces later.
+
+## v0.5A Historical Data + Interest Accrual Foundation
+
+v0.5A adds the institutional validation foundation for historical simulations without changing the core collateral risk evaluator or existing API endpoints.
+
+- Historical provider clients live under `app/historical_data/` and use environment variables via `os.getenv`; missing credentials do not break imports or normal unit tests.
+- GitHub Actions Secrets are the source of truth for real provider credentials. `.env.example` documents variable names only; real keys must never be committed and a local `.env` file is not required.
+- Provider integration is isolated in `.github/workflows/provider-integration.yml`, is `workflow_dispatch` only, and does not run on push or pull request.
+- Retrieval is cache-first through `HISTORICAL_DATA_CACHE_DIR`; `force_refresh=true` is required to bypass valid cached data.
+- The official validation universe includes US ETFs/equities, NGX equities, loan currencies NGN/USD/EUR, and FX pairs USD/NGN, NGN/USD, EUR/USD, USD/EUR, EUR/NGN, and NGN/EUR from 2018-01-01 through the configured/latest available end date.
+- Loan interest accrual supports simple and compound accrual, daily/monthly/quarterly/yearly scheduling, actual/365, actual/360, and 30/360 day counts, plus client-supplied mode for externally calculated balances.
+- Build planning is available with `python -m app.simulations.build_official_dataset --dry-run`, which records planned calls without spending real provider API quota.
