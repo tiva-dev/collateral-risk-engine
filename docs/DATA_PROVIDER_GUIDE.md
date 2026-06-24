@@ -15,3 +15,8 @@ Provider credentials are supplied through GitHub Actions Secrets for integration
 ## Integration workflow
 
 `.github/workflows/provider-integration.yml` is manual only (`workflow_dispatch`). It maps expected GitHub Secrets into environment variables and must not echo secret values.
+
+## v0.5A provider operations
+Historical providers use cache-first retrieval and maintain separate raw response and normalized cache artifacts. Dry runs of the official dataset builder only print planned calls and create manifest metadata; they do not call external APIs or consume quota. Real credentials must be stored as GitHub Actions Secrets for the manual provider-integration workflow, not committed to the repository or logged. Provider integration tests are skipped unless `RUN_PROVIDER_INTEGRATION_TESTS=true` is set and provider-specific secrets are present.
+
+Known limitation: full replay, simulation, and reporting are deferred to v0.5B.

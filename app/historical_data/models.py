@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
 
+from app.market_data.identity import InstrumentIdentity
+
 
 @dataclass(frozen=True)
 class HistoricalBar:
@@ -19,6 +21,7 @@ class HistoricalBar:
     currency: str = "USD"
     source: str = "historical_provider"
     provider_name: str = "unknown"
+    instrument_identity: InstrumentIdentity | None = None
     data_quality_score: float = 1.0
     warnings: list[str] = field(default_factory=list)
     raw_metadata: dict[str, Any] = field(default_factory=dict)
@@ -48,6 +51,7 @@ class HistoricalSeries:
     interval: str = "1d"
     warnings: list[str] = field(default_factory=list)
     data_quality_summary: dict[str, Any] = field(default_factory=dict)
+    instrument_identity: InstrumentIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -81,3 +85,6 @@ class HistoricalDatasetManifest:
     missing_symbols: list[str] = field(default_factory=list)
     earliest_available_date_by_symbol: dict[str, date | str] = field(default_factory=dict)
     methodology_notes: list[str] = field(default_factory=list)
+    missing_symbol_reasons: dict[str, str] = field(default_factory=dict)
+    provider_coverage_summary: dict[str, Any] = field(default_factory=dict)
+    instrument_identities: dict[str, dict[str, Any]] = field(default_factory=dict)
