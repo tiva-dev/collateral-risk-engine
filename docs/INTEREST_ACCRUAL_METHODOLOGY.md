@@ -20,3 +20,6 @@ Simple interest is added to `accrued_interest`. Compound interest capitalizes ex
 ## Repayment order
 
 Repayments apply to fees first, accrued interest second, and principal last.
+
+## v0.5A interest accrual foundation
+Interest policies validate annual rate, accrual frequency, compounding method, day-count convention, and accrual mode. `accrual_frequency` is used for scheduling and simulation stepping; simple and compound accrual paths are explicit. `client_supplied` mode is preserved for clients that provide externally calculated accrued interest. Full replay/simulation/reporting integration is planned for v0.5B.
