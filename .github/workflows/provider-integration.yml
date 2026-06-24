@@ -1,0 +1,33 @@
+name: Provider Integration
+
+on:
+  workflow_dispatch:
+
+jobs:
+  provider-integration:
+    runs-on: ubuntu-latest
+    env:
+      ALPACA_AUTH_MODE: ${{ secrets.ALPACA_AUTH_MODE }}
+      ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }}
+      ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+      ALPHA_VANTAGE_BASE_URL: ${{ secrets.ALPHA_VANTAGE_BASE_URL }}
+      NGNMARKET_API_KEY: ${{ secrets.NGNMARKET_API_KEY }}
+      NGNMARKET_BASE_URL: ${{ secrets.NGNMARKET_BASE_URL }}
+      RUN_PROVIDER_INTEGRATION_TESTS: ${{ secrets.RUN_PROVIDER_INTEGRATION_TESTS }}
+      HISTORICAL_DATA_CACHE_DIR: ${{ secrets.HISTORICAL_DATA_CACHE_DIR }}
+      SIMULATION_OUTPUT_DIR: ${{ secrets.SIMULATION_OUTPUT_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.txt
+      - name: Run provider integration tests only when explicitly enabled
+        run: |
+          if [ "${RUN_PROVIDER_INTEGRATION_TESTS}" != "true" ]; then
+            echo "RUN_PROVIDER_INTEGRATION_TESTS not enabled; skipping."
+            exit 0
+          fi
+          python -m unittest discover -s app/tests -p 'test_provider_integration*.py'
