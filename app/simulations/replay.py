@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json, math, random
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -73,16 +73,29 @@ class HistoricalReplayEngine:
         if start_date: all_dates=[d for d in all_dates if d>=start_date]
         if end_date: all_dates=[d for d in all_dates if d<=end_date]
         loan=Loan(0.0,currency=scenario.loan_currency); policy=Policy.default(); records=[]; events=[]; prev_dt=datetime.combine(all_dates[0], datetime.min.time(), tzinfo=timezone.utc) if all_dates else datetime.now(timezone.utc)
-        returns={s:[] for s in bars_by_symbol}; prev_price={}
+        returns={s:[] for s in bars_by_symbol}; prev_price={}; positions={s:0 for s in bars_by_symbol}; latest={}; missing_fx_dates=[]
+        dated_bars={s: sorted(bars, key=lambda b: b.timestamp) for s,bars in bars_by_symbol.items()}
         for d in all_dates:
-            md={}
-            for s,bars in bars_by_symbol.items():
-                day=[b for b in bars if (b.timestamp.date() if isinstance(b.timestamp,datetime) else b.timestamp)<=d]
-                if not day: continue
-                b=day[-1]
+            md={}; fx_missing=False
+            for s,bars in dated_bars.items():
+                while positions[s] < len(bars):
+                    candidate=bars[positions[s]]
+                    candidate_date=candidate.timestamp.date() if isinstance(candidate.timestamp,datetime) else candidate.timestamp
+                    if candidate_date>d: break
+                    latest[s]=candidate; positions[s]+=1
+                b=latest.get(s)
+                if not b: continue
                 if s in prev_price and prev_price[s]>0: returns.setdefault(s,[]).append(b.close/prev_price[s]-1)
-                prev_price[s]=b.close; md[s]=historical_bar_to_market_data(b, returns.get(s,[]), stress)
+                prev_price[s]=b.close
+                raw_md=historical_bar_to_market_data(b, returns.get(s,[]), stress)
+                converted_price, missing=apply_fx(raw_md.last_price, raw_md.metadata.get("currency", "USD"), scenario.loan_currency, fx_rates, stress)
+                converted_bid = apply_fx(raw_md.bid, raw_md.metadata.get("currency", "USD"), scenario.loan_currency, fx_rates, stress)[0] if raw_md.bid is not None else None
+                converted_ask = apply_fx(raw_md.ask, raw_md.metadata.get("currency", "USD"), scenario.loan_currency, fx_rates, stress)[0] if raw_md.ask is not None else None
+                converted_adv = apply_fx(raw_md.average_dollar_volume, raw_md.metadata.get("currency", "USD"), scenario.loan_currency, fx_rates, stress)[0] if raw_md.average_dollar_volume is not None else None
+                fx_missing = fx_missing or missing
+                md[s]=replace(raw_md, last_price=converted_price, bid=converted_bid, ask=converted_ask, average_dollar_volume=converted_adv, metadata={**raw_md.metadata, "original_currency": raw_md.metadata.get("currency"), "currency": scenario.loan_currency, "fx_missing": missing})
             if not md: continue
+            if fx_missing: missing_fx_dates.append(d.isoformat())
             if loan.principal==0:
                 gross=sum((md[h.asset_id].last_price*h.quantity if h.asset_id in md else 0) for h in scenario.holdings)
                 loan=Loan(gross*scenario.initial_draw_assumption*scenario.base_ltv_policy,currency=scenario.loan_currency)
@@ -91,5 +104,5 @@ class HistoricalReplayEngine:
             safe=min(ev.approved_credit_limit, ev.stressed_liquidation_value/max(ev.trigger_levels.dynamic_warning_coverage,1e-9))
             state=ev.margin_state.value if hasattr(ev.margin_state,'value') else str(ev.margin_state)
             if state != MarginState.SAFE.value: events.append({"date":d.isoformat(),"state":state,"severity":"warning"})
-            records.append({"date":d.isoformat(),"loan_balance":loan.balance,"principal":loan.principal,"accrued_interest":loan.accrued_interest,"interest_accrued":acc.interest_accrued,"approved_credit_limit":ev.approved_credit_limit,"lifecycle_safe_credit_limit":safe,"margin_state":state,"shortfall":max(0,loan.balance-safe),"with_interest_balance":loan.balance,"without_interest_balance":loan.principal,"model_versions":{"core":RISK_MODEL_VERSION,"lifecycle":LIFECYCLE_MODEL_VERSION}})
-        return {"scenario":scenario.name,"seed":self.seed,"records":records,"events":events,"stress_assumptions":asdict(stress),"interest_policy":asdict(scenario.loan_terms)}
+            records.append({"date":d.isoformat(),"loan_balance":loan.balance,"principal":loan.principal,"accrued_interest":loan.accrued_interest,"interest_accrued":acc.interest_accrued,"approved_credit_limit":ev.approved_credit_limit,"lifecycle_safe_credit_limit":safe,"margin_state":state,"shortfall":max(0,loan.balance-safe),"with_interest_balance":loan.balance,"without_interest_balance":loan.principal,"fx_missing":fx_missing,"model_versions":{"core":RISK_MODEL_VERSION,"lifecycle":LIFECYCLE_MODEL_VERSION}})
+        return {"scenario":scenario.name,"seed":self.seed,"records":records,"events":events,"missing_fx_dates":missing_fx_dates,"stress_assumptions":asdict(stress),"interest_policy":asdict(scenario.loan_terms)}

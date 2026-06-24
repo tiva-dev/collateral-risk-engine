@@ -6,9 +6,11 @@ from typing import Any
 from app.historical_data.cache import content_hash
 from app.historical_data.config import load_config
 
+SIMULATION_CONFIG_VERSION = "v0.5B"
+
 def generate_evidence_package(results:list[dict[str,Any]], metrics:list[dict[str,Any]], output_dir:str|None=None, config:dict[str,Any]|None=None) -> dict[str,str]:
     out=Path(output_dir or load_config().simulation_output_dir); out.mkdir(parents=True, exist_ok=True)
-    manifest={"artifact":"official_validation_manifest","simulation_config_version":"v0.5.2","run_timestamp":datetime.now(timezone.utc).isoformat(),"config":config or {},"result_count":len(results),"metrics_checksum":content_hash(metrics)}
+    manifest={"artifact":"official_validation_manifest","simulation_config_version":SIMULATION_CONFIG_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"config":config or {},"result_count":len(results),"metrics_checksum":content_hash(metrics)}
     files={}
     def w(name, text):
         p=out/name; p.write_text(text); files[name]=str(p)
