@@ -1,0 +1,113 @@
+name: Official Provider Validation Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Plan only; do not call real providers"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      force_refresh:
+        description: "Bypass provider cache"
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      providers:
+        description: "Provider selection"
+        required: true
+        default: "all"
+        type: choice
+        options: ["alpaca", "ngnmarket", "alpha_vantage", "all"]
+      start_date:
+        description: "Dataset start date"
+        required: true
+        default: "2018-01-01"
+      end_date:
+        description: "Dataset end date (YYYY-MM-DD)"
+        required: false
+        default: ""
+      scenario:
+        description: "Scenario name or all"
+        required: true
+        default: "all"
+      run_validation_after_build:
+        description: "Run official validation after dataset build"
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      quota_override:
+        description: "Override per-run call budget safety gate"
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+jobs:
+  provider-validation:
+    runs-on: ubuntu-latest
+    env:
+      ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+      ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+      NGNMARKET_API_KEY: ${{ secrets.NGNMARKET_API_KEY }}
+      NGNMARKET_MONTHLY_CALL_BUDGET: "3000"
+      NGNMARKET_MAX_CALLS_PER_RUN: "500"
+      ALPHA_VANTAGE_MAX_CALLS_PER_RUN: "100"
+      ALPACA_MAX_CALLS_PER_RUN: "500"
+      SIMULATION_OUTPUT_DIR: data/simulation_results
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test/runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Build or plan official provider dataset
+        shell: bash
+        env:
+          PROVIDERS: ${{ inputs.providers }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FORCE_REFRESH: ${{ inputs.force_refresh }}
+          QUOTA_OVERRIDE: ${{ inputs.quota_override }}
+        run: |
+          set -euo pipefail
+          mkdir -p data/simulation_results
+          args=(--providers "$PROVIDERS" --start-date "$START_DATE" --output-dir data/simulation_results)
+          if [ -n "$END_DATE" ]; then args+=(--end-date "$END_DATE"); fi
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ "$FORCE_REFRESH" = "true" ]; then args+=(--force-refresh); fi
+          if [ "$QUOTA_OVERRIDE" = "true" ]; then args+=(--quota-override); fi
+          python -m app.simulations.build_official_dataset "${args[@]}" | tee data/simulation_results/dataset_build.log
+      - name: Run official validation
+        if: ${{ inputs.run_validation_after_build == 'true' }}
+        shell: bash
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+        run: |
+          set -euo pipefail
+          manifest=$(find data/simulation_results -name '*.manifest.json' | sort | tail -n 1)
+          python -m app.simulations.run_official_validation --dataset-manifest "$manifest" --scenario "$SCENARIO" --qa --calibration --allow-synthetic --output-dir data/simulation_results
+      - name: Upload evidence artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-provider-validation-evidence
+          path: |
+            data/simulation_results/**/*.manifest.json
+            data/simulation_results/**/official_validation_*.json
+            data/simulation_results/**/official_validation_*.csv
+            data/simulation_results/**/official_validation_*.md
+            data/simulation_results/**/provider_coverage_report.md
+            data/simulation_results/**/data_methodology.md
+            data/simulation_results/**/interest_accrual_methodology.md
+            data/simulation_results/**/simulation_assumptions.md
+            data/simulation_results/**/calibration_diagnostics.*
+            data/simulation_results/**/dataset_build.log
+          if-no-files-found: warn

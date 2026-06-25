@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 from typing import Iterable
+import os
 from app.historical_data.alpaca import AlpacaTradingHistoricalProvider
 from app.historical_data.providers import ProviderError
 from app.historical_data.alpha_vantage import AlphaVantageHistoricalProvider
@@ -10,6 +11,15 @@ from app.historical_data.manifest import write_manifest
 from app.historical_data.models import HistoricalDatasetManifest, HistoricalFXSeries, HistoricalSeries
 from app.historical_data.ngnmarket import NGNMarketHistoricalProvider
 from app.simulations.config.official_validation_universe import FX_PAIRS, NGX_UNIVERSE, START_DATE, US_UNIVERSE, official_universe
+
+DEFAULT_CALL_BUDGETS={"ngnmarket":{"monthly":3000,"max_per_run":500},"alpha_vantage":{"monthly":None,"max_per_run":100},"alpaca":{"monthly":None,"max_per_run":500}}
+
+def _provider_budget(provider: str) -> dict:
+    key=provider.upper()
+    defaults=DEFAULT_CALL_BUDGETS[provider]
+    monthly=os.getenv(f"{key}_MONTHLY_CALL_BUDGET")
+    max_run=os.getenv(f"{key}_MAX_CALLS_PER_RUN")
+    return {"monthly_call_budget": int(monthly) if monthly else defaults["monthly"], "max_calls_per_run": int(max_run) if max_run else defaults["max_per_run"]}
 
 class OfficialDatasetBuilder:
     def __init__(self, providers: Iterable[str] | None=None, output_dir: str | None=None):
@@ -22,8 +32,22 @@ class OfficialDatasetBuilder:
             if "ngnmarket" in self.provider_names: calls.append({"provider":"ngnmarket","operation":"fetch_fx_history","pair":pair})
             if "alpha_vantage" in self.provider_names: calls.append({"provider":"alpha_vantage","operation":"fetch_fx_history","pair":pair})
         return calls
-    def build(self,start_date: date = START_DATE,end_date: date | None = None,force_refresh: bool = False,dry_run: bool = True) -> HistoricalDatasetManifest:
+    def estimate_call_counts(self):
+        counts={}
+        for call in self.plan_calls(): counts[call["provider"]]=counts.get(call["provider"],0)+1
+        return counts
+    def enforce_call_budgets(self, override: bool=False, max_provider_calls: int|None=None):
+        planned=self.estimate_call_counts(); out={}
+        errors=[]
+        for provider,count in planned.items():
+            budget=_provider_budget(provider); limit=max_provider_calls if max_provider_calls is not None else budget["max_calls_per_run"]
+            out[provider]={**budget,"planned_calls":count,"effective_max_calls_per_run":limit,"override":override}
+            if count>limit and not override: errors.append(f"{provider} planned calls {count} exceed max calls per run {limit}")
+        if errors: raise RuntimeError("; ".join(errors))
+        return out
+    def build(self,start_date: date = START_DATE,end_date: date | None = None,force_refresh: bool = False,dry_run: bool = True, override_quota: bool=False, max_provider_calls: int|None=None) -> HistoricalDatasetManifest:
         end = end_date or datetime.now(timezone.utc).date(); missing=[]; reasons={}; warnings=[]; cache_paths=[]; raw_paths=[]; quota={}; earliest={}; identities={}; coverage={}
+        planned_counts=self.estimate_call_counts(); budget_summary=self.enforce_call_budgets(override_quota, max_provider_calls) if not dry_run else {p:{**_provider_budget(p),"planned_calls":c,"actual_calls":0} for p,c in planned_counts.items()}
         notes = ["Dry-run mode does not call provider APIs."] if dry_run else ["Cache-first provider retrieval used unless force_refresh=true."]
         providers = {}
         if not dry_run:
@@ -61,8 +85,11 @@ class OfficialDatasetBuilder:
                 if "alpha_vantage" in self.provider_names: record("alpha_vantage",pair,lambda fc=fc,tc=tc: providers["alpha_vantage"].fetch_fx_history(fc,tc,start_date,end,force_refresh=force_refresh))
             for k,v in providers.items():
                 if k in self.provider_names:
-                    quota[k]=getattr(v,"quota_metadata",{}); cache_paths += getattr(v,"cache_paths",[]); raw_paths += getattr(v,"raw_response_paths",[])
+                    meta=getattr(v,"quota_metadata",{}) or {}
+                    quota[k]={**budget_summary.get(k,{}),"actual_calls": int((coverage.get(k,{}) or {}).get("fetched",0)),"provider_metadata": meta}
+                    cache_paths += getattr(v,"cache_paths",[]); raw_paths += getattr(v,"raw_response_paths",[])
         else:
+            quota={p:{**budget_summary.get(p,{}),"actual_calls":0} for p in self.provider_names}
             coverage={p:{"planned_calls":sum(1 for c in self.plan_calls() if c["provider"]==p),"requested":0,"available":0,"missing":0,"cached":0,"fetched":0,"page_count":0,"cache_paths":"none in dry-run"} for p in self.provider_names}
         return HistoricalDatasetManifest(dataset_id="official-validation-"+datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),provider=",".join(sorted(self.provider_names)),universe=official_universe(),instruments=US_UNIVERSE+NGX_UNIVERSE,fx_pairs=FX_PAIRS,start_date=start_date,end_date=end,cache_paths=cache_paths,raw_response_paths=raw_paths,provider_quota_metadata=quota,warnings=warnings,missing_symbols=missing,earliest_available_date_by_symbol=earliest,methodology_notes=notes,missing_symbol_reasons=reasons,provider_coverage_summary=coverage,instrument_identities=identities)
     def write_manifest(self, manifest): return write_manifest(manifest,self.output_dir)

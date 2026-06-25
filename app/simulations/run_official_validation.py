@@ -8,6 +8,8 @@ from app.simulations.reporting import SIMULATION_CONFIG_VERSION, generate_eviden
 from app.simulations.replay import HistoricalReplayEngine, StressOverlay
 from app.historical_data.models import HistoricalBar, HistoricalFXRate, HistoricalFXSeries
 from app.simulations.scenarios.official_portfolios import official_portfolio_scenarios
+from app.simulations.evidence_quality import scenario_eligibility, validate_provider_coverage, validate_evidence_package
+from app.simulations.calibration import generate_calibration_diagnostics
 
 def parse_date(v): return date.fromisoformat(v)
 
@@ -87,7 +89,7 @@ def _synthetic_thin_bars(start: date|None, end: date|None, seed:int) -> list[His
 
 def main():
     p=argparse.ArgumentParser(description="Run v0.5B official validation replay")
-    p.add_argument("--dataset-manifest"); p.add_argument("--start-date",type=parse_date); p.add_argument("--end-date",type=parse_date); p.add_argument("--scenario",default="all"); p.add_argument("--output-dir"); p.add_argument("--seed",type=int,default=42); p.add_argument("--flat-ltv",type=float,default=0.70); p.add_argument("--static-haircut-profile",default="standard"); p.add_argument("--dry-run",action="store_true")
+    p.add_argument("--dataset-manifest"); p.add_argument("--start-date",type=parse_date); p.add_argument("--end-date",type=parse_date); p.add_argument("--scenario",default="all"); p.add_argument("--output-dir"); p.add_argument("--seed",type=int,default=42); p.add_argument("--flat-ltv",type=float,default=0.70); p.add_argument("--static-haircut-profile",default="standard"); p.add_argument("--dry-run",action="store_true"); p.add_argument("--qa",action="store_true"); p.add_argument("--calibration",action="store_true"); p.add_argument("--strict-coverage",action="store_true"); p.add_argument("--allow-synthetic",action="store_true"); p.add_argument("--max-provider-calls",type=int); p.add_argument("--stress",choices=["all","baseline","severe"],default="all"); p.add_argument("--write-artifacts",choices=["true","false"],default="true")
     a=p.parse_args(); scenarios=official_portfolio_scenarios(); selected=list(scenarios) if a.scenario=="all" else [a.scenario]
     missing=[s for s in selected if s not in scenarios]
     if missing: raise SystemExit(f"Unknown scenario(s): {', '.join(missing)}")
@@ -97,18 +99,25 @@ def main():
     out=Path(a.output_dir or "simulation_outputs"); out.mkdir(parents=True, exist_ok=True)
     config={"seed":a.seed,"flat_ltv":a.flat_ltv,"static_haircut_profile":a.static_haircut_profile,"scenario":a.scenario,"start_date":str(a.start_date) if a.start_date else None,"end_date":str(a.end_date) if a.end_date else None,"manifest_checksum":content_hash(manifest) if manifest else None,"simulation_config_version":SIMULATION_CONFIG_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat()}
     stress_overlays={"baseline":StressOverlay(),"price_gap":StressOverlay(price_gap=0.25),"fx_devaluation":StressOverlay(fx_devaluation=0.25),"volume_collapse":StressOverlay(volume_collapse=0.8),"spread_widening":StressOverlay(spread_widening=4.0),"order_book_thinning":StressOverlay(order_book_thinning=0.8),"trading_halt":StressOverlay(trading_halt=True),"stale_market_data":StressOverlay(market_data_stale=True),"missing_fx":StressOverlay(missing_fx=True),"single_name_crash":StressOverlay(single_name_crash={"AAPL":0.35,"THIN":0.50}),"correlated_portfolio_selloff":StressOverlay(correlated_selloff=0.30),"combined_severe":StressOverlay(price_gap=0.30,fx_devaluation=0.25,volume_collapse=0.8,spread_widening=4.0,order_book_thinning=0.8)}
+    eligibility=scenario_eligibility(manifest, selected, allow_synthetic=a.allow_synthetic, stress=a.stress)
+    if a.strict_coverage and manifest:
+        req=sorted({h.asset_id for s in selected for h in scenarios[s].holdings if h.asset_id!="THIN"})
+        coverage=validate_provider_coverage(manifest, req, manifest.get("fx_pairs", []))
+        if coverage["blocking_errors"]: raise SystemExit("Strict coverage failed: "+"; ".join(coverage["blocking_errors"]))
     if a.dry_run:
-        print(json.dumps({"dry_run":True,"scenarios":selected,"stress_overlays":list(stress_overlays),"manifest_loaded":bool(manifest),"output_dir":str(out),"config":config},indent=2,sort_keys=True)); return
+        print(json.dumps({"dry_run":True,"scenarios":selected,"stress_overlays":list(stress_overlays),"manifest_loaded":bool(manifest),"output_dir":str(out),"config":config,"scenario_eligibility":eligibility},indent=2,sort_keys=True)); return
     bars_by_symbol, fx_rates = _load_replay_inputs(manifest)
     if not bars_by_symbol:
         raise SystemExit("No cached historical bars found in dataset manifest cache_paths; run the dataset builder first or pass a manifest with normalized caches.")
     engine=HistoricalReplayEngine(manifest,a.seed)
     results=[]
+    if a.stress=="baseline": stress_overlays={"baseline":stress_overlays["baseline"]}
+    elif a.stress=="severe": stress_overlays={k:v for k,v in stress_overlays.items() if k in {"combined_severe","price_gap","fx_devaluation"}}
     for s in selected:
         scenario=scenarios[s]
         scenario_bars={h.asset_id: bars_by_symbol[h.asset_id] for h in scenario.holdings if h.asset_id in bars_by_symbol}
         missing=[h.asset_id for h in scenario.holdings if h.asset_id not in scenario_bars]
-        if "THIN" in missing:
+        if "THIN" in missing and a.allow_synthetic:
             scenario_bars["THIN"]=_synthetic_thin_bars(a.start_date, a.end_date, a.seed); missing=[m for m in missing if m!="THIN"]
         if missing:
             raise SystemExit(f"Missing cached bars for scenario {s}: {', '.join(missing)}")
@@ -121,5 +130,12 @@ def main():
             r["scenario"] = base_scenario if stress_name == "baseline" else f"{base_scenario}::{stress_name}"
             results.append(r)
     metrics=[compute_simulation_metrics(r,a.flat_ltv,manifest=manifest) for r in results]
-    files=generate_evidence_package(results,metrics,str(out),config); print(json.dumps(files,indent=2,sort_keys=True))
+    if a.write_artifacts=="false":
+        print(json.dumps({"result_count":len(results),"metric_count":len(metrics)},indent=2,sort_keys=True)); return
+    files=generate_evidence_package(results,metrics,str(out),config)
+    if a.qa:
+        qa=validate_evidence_package(files); (out/"official_validation_qa.json").write_text(json.dumps(qa,indent=2,sort_keys=True)); (out/"official_validation_qa_report.md").write_text("# Official Validation QA Report\n\n"+("PASS" if qa["passed"] else "FAIL")+"\n\n## Blocking Errors\n"+"\n".join(f"- {e}" for e in qa["blocking_errors"])+"\n\n## Warnings\n"+"\n".join(f"- {w}" for w in qa["warnings"])); files["official_validation_qa.json"]=str(out/"official_validation_qa.json"); files["official_validation_qa_report.md"]=str(out/"official_validation_qa_report.md")
+    if a.calibration:
+        generate_calibration_diagnostics(metrics,str(out)); files["calibration_diagnostics.json"]=str(out/"calibration_diagnostics.json"); files["calibration_diagnostics.md"]=str(out/"calibration_diagnostics.md")
+    print(json.dumps(files,indent=2,sort_keys=True))
 if __name__=="__main__": main()
