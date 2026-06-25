@@ -5,8 +5,8 @@ from pathlib import Path
 from app.historical_data.cache import content_hash
 from app.simulations.metrics import compute_simulation_metrics
 from app.simulations.reporting import SIMULATION_CONFIG_VERSION, generate_evidence_package
-from app.simulations.replay import HistoricalReplayEngine
-from app.historical_data.models import HistoricalBar
+from app.simulations.replay import HistoricalReplayEngine, StressOverlay
+from app.historical_data.models import HistoricalBar, HistoricalFXRate, HistoricalFXSeries
 from app.simulations.scenarios.official_portfolios import official_portfolio_scenarios
 
 def parse_date(v): return date.fromisoformat(v)
@@ -37,9 +37,9 @@ def _bar_from_payload(payload: dict) -> HistoricalBar:
         raw_metadata=dict(payload.get("raw_metadata", {})),
     )
 
-def _load_replay_inputs(manifest: dict) -> tuple[dict[str, list[HistoricalBar]], dict[tuple[str, str], float]]:
+def _load_replay_inputs(manifest: dict) -> tuple[dict[str, list[HistoricalBar]], dict[tuple[str, str], list[HistoricalFXRate]]]:
     bars_by_symbol: dict[str, list[HistoricalBar]] = {}
-    fx_rates: dict[tuple[str, str], float] = {}
+    fx_rates: dict[tuple[str, str], list[HistoricalFXRate]] = {}; warnings=[]
     for cache_path in manifest.get("cache_paths", []):
         path = Path(cache_path)
         if not path.exists():
@@ -54,8 +54,7 @@ def _load_replay_inputs(manifest: dict) -> tuple[dict[str, list[HistoricalBar]],
                 to = item.get("to_currency")
                 rates = item.get("rates") or []
                 if frm and to and rates:
-                    latest = rates[-1]
-                    fx_rates[(frm, to)] = float(latest.get("rate", 0) or 0)
+                    fx_rates[(frm, to)] = [HistoricalFXRate(frm,to,float(r.get("rate",0) or 0),_parse_timestamp(r.get("timestamp") or r.get("date")),provider_name=item.get("provider_name", item.get("provider", "cache")),quality_score=float(r.get("quality_score",1.0))) for r in rates if float(r.get("rate",0) or 0)>0]
                 continue
             bars = item.get("bars")
             if isinstance(bars, dict):
@@ -75,7 +74,17 @@ def _load_replay_inputs(manifest: dict) -> tuple[dict[str, list[HistoricalBar]],
                 bars_by_symbol.setdefault(symbol, []).extend(parsed)
     for symbol in list(bars_by_symbol):
         bars_by_symbol[symbol].sort(key=lambda b: b.timestamp)
-    return bars_by_symbol, {k: v for k, v in fx_rates.items() if v > 0}
+    return bars_by_symbol, {k: v for k, v in fx_rates.items() if v}
+def _synthetic_thin_bars(start: date|None, end: date|None, seed:int) -> list[HistoricalBar]:
+    import random
+    rng=random.Random(seed); start=start or date(2020,1,1); end=end or date(2020,1,10); price=10.0; rows=[]; d=start
+    from datetime import timedelta
+    while d<=end:
+        price=max(1.0, price*(1+rng.uniform(-0.03,0.03)))
+        rows.append(HistoricalBar("THIN", d, price*0.99, price*1.01, price*0.98, price, volume=500+rng.randint(0,50), currency="USD", source="synthetic", provider_name="synthetic", data_quality_score=0.7, warnings=["synthetic_thin_liquidity"]))
+        d+=timedelta(days=1)
+    return rows
+
 def main():
     p=argparse.ArgumentParser(description="Run v0.5B official validation replay")
     p.add_argument("--dataset-manifest"); p.add_argument("--start-date",type=parse_date); p.add_argument("--end-date",type=parse_date); p.add_argument("--scenario",default="all"); p.add_argument("--output-dir"); p.add_argument("--seed",type=int,default=42); p.add_argument("--flat-ltv",type=float,default=0.70); p.add_argument("--static-haircut-profile",default="standard"); p.add_argument("--dry-run",action="store_true")
@@ -87,8 +96,9 @@ def main():
         manifest=json.loads(Path(a.dataset_manifest).read_text())
     out=Path(a.output_dir or "simulation_outputs"); out.mkdir(parents=True, exist_ok=True)
     config={"seed":a.seed,"flat_ltv":a.flat_ltv,"static_haircut_profile":a.static_haircut_profile,"scenario":a.scenario,"start_date":str(a.start_date) if a.start_date else None,"end_date":str(a.end_date) if a.end_date else None,"manifest_checksum":content_hash(manifest) if manifest else None,"simulation_config_version":SIMULATION_CONFIG_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat()}
+    stress_overlays={"baseline":StressOverlay(),"price_gap":StressOverlay(price_gap=0.25),"fx_devaluation":StressOverlay(fx_devaluation=0.25),"volume_collapse":StressOverlay(volume_collapse=0.8),"spread_widening":StressOverlay(spread_widening=4.0),"order_book_thinning":StressOverlay(order_book_thinning=0.8),"trading_halt":StressOverlay(trading_halt=True),"stale_market_data":StressOverlay(market_data_stale=True),"missing_fx":StressOverlay(missing_fx=True),"single_name_crash":StressOverlay(single_name_crash={"AAPL":0.35,"THIN":0.50}),"correlated_portfolio_selloff":StressOverlay(correlated_selloff=0.30),"combined_severe":StressOverlay(price_gap=0.30,fx_devaluation=0.25,volume_collapse=0.8,spread_widening=4.0,order_book_thinning=0.8)}
     if a.dry_run:
-        print(json.dumps({"dry_run":True,"scenarios":selected,"manifest_loaded":bool(manifest),"output_dir":str(out),"config":config},indent=2,sort_keys=True)); return
+        print(json.dumps({"dry_run":True,"scenarios":selected,"stress_overlays":list(stress_overlays),"manifest_loaded":bool(manifest),"output_dir":str(out),"config":config},indent=2,sort_keys=True)); return
     bars_by_symbol, fx_rates = _load_replay_inputs(manifest)
     if not bars_by_symbol:
         raise SystemExit("No cached historical bars found in dataset manifest cache_paths; run the dataset builder first or pass a manifest with normalized caches.")
@@ -98,9 +108,18 @@ def main():
         scenario=scenarios[s]
         scenario_bars={h.asset_id: bars_by_symbol[h.asset_id] for h in scenario.holdings if h.asset_id in bars_by_symbol}
         missing=[h.asset_id for h in scenario.holdings if h.asset_id not in scenario_bars]
+        if "THIN" in missing:
+            scenario_bars["THIN"]=_synthetic_thin_bars(a.start_date, a.end_date, a.seed); missing=[m for m in missing if m!="THIN"]
         if missing:
             raise SystemExit(f"Missing cached bars for scenario {s}: {', '.join(missing)}")
-        results.append(engine.replay(scenario, scenario_bars, fx_rates=fx_rates, start_date=a.start_date, end_date=a.end_date))
+
+        for stress_name, overlay in stress_overlays.items():
+            r=engine.replay(scenario, scenario_bars, fx_rates=fx_rates, start_date=a.start_date, end_date=a.end_date, stress=overlay, flat_ltv=a.flat_ltv)
+            base_scenario = r.get("scenario") or scenario.name
+            r["base_scenario"] = base_scenario
+            r["stress_name"] = stress_name
+            r["scenario"] = base_scenario if stress_name == "baseline" else f"{base_scenario}::{stress_name}"
+            results.append(r)
     metrics=[compute_simulation_metrics(r,a.flat_ltv,manifest=manifest) for r in results]
     files=generate_evidence_package(results,metrics,str(out),config); print(json.dumps(files,indent=2,sort_keys=True))
 if __name__=="__main__": main()

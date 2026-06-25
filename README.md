@@ -356,3 +356,34 @@ Run an evidence package generation into an output directory:
 ```bash
 python -m app.simulations.run_official_validation --dataset-manifest path/to/manifest.json --output-dir simulation_outputs
 ```
+
+
+## v0.5C Simulation Readiness and Evidence Integrity Hardening
+
+The official validation workflow is cache-first and uses a canonical normalized replay cache: equity data is stored as `HistoricalSeries` payloads and FX data as `HistoricalFXSeries` payloads. Replay no longer depends on raw provider response shapes; incompatible provider-native cache files should be skipped with warnings rather than treated as replay evidence.
+
+FX is evaluated by replay date using date-indexed curves with nearest-prior lookup, inverse-pair support, stale-rate flags, and missing-FX flags. If an asset currency differs from the loan currency and required FX is unavailable, the loan-currency price, bid/ask, dollar volume, and order book are suppressed conservatively so local prices cannot be mistaken for loan-currency prices.
+
+Validation compares three actual replay outputs: flat LTV, static haircut, and the dynamic lifecycle engine. Scenario base LTV, risk appetite, loan terms, and initial draw assumptions are applied consistently. The `thin_liquidity_portfolio` uses deterministic synthetic-only `THIN` bars by seed and is documented as excluded from provider dataset requirements.
+
+Stress overlays include price gaps, FX devaluation, volume collapse, spread widening, order-book thinning, trading halt, stale market data, missing FX, single-name crash, correlated selloff, and combined severe stress. Monitoring replay transition events are labeled as simulated transition events unless an actual monitoring service is explicitly used.
+
+### Running fixture or cache-backed simulation
+
+```bash
+python -m app.simulations.run_official_validation --dataset-manifest path/to/manifest.json --output-dir simulation_outputs
+```
+
+### Running the real provider dataset build manually
+
+Provider-backed builds remain manual and require explicit secrets outside normal CI:
+
+```bash
+python -m app.simulations.build_official_dataset --providers alpaca,ngnmarket,alpha_vantage --output-dir simulation_outputs
+```
+
+After the provider dataset is built, run official validation against the generated manifest:
+
+```bash
+python -m app.simulations.run_official_validation --dataset-manifest simulation_outputs/official_dataset_manifest.json --output-dir simulation_outputs
+```
