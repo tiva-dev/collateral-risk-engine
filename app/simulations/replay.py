@@ -175,8 +175,8 @@ class HistoricalReplayEngine:
     @classmethod
     def load_manifest(cls,path:str|Path,seed:int=42):
         return cls(json.loads(Path(path).read_text()), seed)
-    def replay(self, scenario: OfficialPortfolioScenario, bars_by_symbol: dict[str,list[HistoricalBar]], fx_rates: dict[tuple[str,str],float]|None=None, start_date:date|None=None, end_date:date|None=None, stress:StressOverlay|None=None, include_monitoring:bool=True) -> dict[str,Any]:
-        fx_rates=fx_rates or {}; stress=stress or StressOverlay(); all_dates=sorted({(b.timestamp.date() if isinstance(b.timestamp,datetime) else b.timestamp) for bars in bars_by_symbol.values() for b in bars})
+    def replay(self, scenario: OfficialPortfolioScenario, bars_by_symbol: dict[str,list[HistoricalBar]], fx_rates: dict[tuple[str,str],float]|None=None, start_date:date|None=None, end_date:date|None=None, stress:StressOverlay|None=None, include_monitoring:bool=True, flat_ltv: float | None = None) -> dict[str,Any]:
+        fx_rates=fx_rates or {}; stress=stress or StressOverlay(); configured_flat_ltv=scenario.base_ltv_policy if flat_ltv is None else flat_ltv; all_dates=sorted({(b.timestamp.date() if isinstance(b.timestamp,datetime) else b.timestamp) for bars in bars_by_symbol.values() for b in bars})
         if start_date: all_dates=[d for d in all_dates if d>=start_date]
         if end_date: all_dates=[d for d in all_dates if d<=end_date]
         loan=Loan(0.0,currency=scenario.loan_currency); policy=Policy.default(); policy=replace(policy, base_ltv={k: min(v, scenario.base_ltv_policy) for k,v in policy.base_ltv.items()}, risk_appetite=scenario.risk_appetite); records=[]; flat_records=[]; static_records=[]; dynamic_records=[]; events=[]; prev_dt=datetime.combine(all_dates[0], datetime.min.time(), tzinfo=timezone.utc) if all_dates else datetime.now(timezone.utc)
@@ -214,7 +214,7 @@ class HistoricalReplayEngine:
                 safe=0.0; state=MarginState.LIQUIDATION.value
             if state != MarginState.SAFE.value: events.append({"date":d.isoformat(),"state":state,"severity":"warning"})
             collateral_value=sum((md[h.asset_id].last_price*h.quantity if h.asset_id in md else 0) for h in scenario.holdings)
-            flat_limit=collateral_value*0.70
+            flat_limit=collateral_value*configured_flat_ltv
             static_limit=sum((md[h.asset_id].last_price*h.quantity*(1-_static_haircut(h.asset_type)) if h.asset_id in md else 0) for h in scenario.holdings)
             flat_records.append(_baseline_record(d, collateral_value, loan.balance, flat_limit, "flat_ltv"))
             static_records.append(_baseline_record(d, collateral_value, loan.balance, static_limit, "static_haircut"))
