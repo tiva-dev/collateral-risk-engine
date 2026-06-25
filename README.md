@@ -387,3 +387,20 @@ After the provider dataset is built, run official validation against the generat
 ```bash
 python -m app.simulations.run_official_validation --dataset-manifest simulation_outputs/official_dataset_manifest.json --output-dir simulation_outputs
 ```
+
+## v0.6 Official Provider Validation Readiness
+
+v0.6 adds the manual provider-backed validation workflow, quota safety, coverage gates, evidence QA, calibration diagnostics, and a minimal real-data smoke command. The stage prepares reviewable evidence before final whitepaper production; it does not change model parameters automatically.
+
+Key commands:
+
+```bash
+python -m app.simulations.build_official_dataset --dry-run --providers all
+python -m app.simulations.run_provider_validation_smoke
+python -m app.simulations.run_provider_validation_smoke --confirm-real-provider-calls
+python -m app.simulations.run_official_validation --dry-run --qa --calibration --allow-synthetic
+```
+
+The manual workflow `.github/workflows/official-validation-provider-run.yml` is `workflow_dispatch` only. It reads provider credentials from GitHub Actions Secrets, defaults to dry-run, enforces provider call budgets, and uploads evidence artifacts.
+
+See `docs/OFFICIAL_PROVIDER_VALIDATION_RUNBOOK.md`, `docs/EVIDENCE_QA_CHECKLIST.md`, and `docs/CALIBRATION_REVIEW_GUIDE.md`. Broker execution, live WebSocket market data, and production database connections are not part of v0.6.
