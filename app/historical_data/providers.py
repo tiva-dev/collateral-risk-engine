@@ -7,6 +7,16 @@ from typing import Any, ClassVar
 from .models import HistoricalFXSeries, HistoricalSeries
 
 
+class ProviderError(RuntimeError):
+    """Structured historical data provider error safe for manifests/logs."""
+
+    def __init__(self, message: str, *, provider: str | None = None, code: str | None = None, metadata: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.provider = provider
+        self.code = code
+        self.metadata = metadata or {}
+
+
 class HistoricalDataProvider(ABC):
     provider_name: ClassVar[str] = "base"
     provider_capabilities: ClassVar[frozenset[str]] = frozenset()

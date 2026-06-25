@@ -321,3 +321,38 @@ v0.5A adds the institutional validation foundation for historical simulations wi
 
 ### v0.5A Historical Data and Interest Foundation
 v0.5A establishes historical data connectors, cache-first retrieval, official validation universe metadata, and the loan interest accrual foundation. `.env.example` is documentation only; GitHub Actions Secrets are the source of truth for real provider credentials. The provider integration workflow is manual-only, and provider integration tests are opt-in via `RUN_PROVIDER_INTEGRATION_TESTS=true` so normal CI does not consume API quota. `python -m app.simulations.build_official_dataset --dry-run` plans calls and writes a manifest without using provider quota. Full replay, simulation, and reporting are known limitations planned for v0.5B.
+
+## v0.5B Official Historical Replay and Validation Evidence
+
+v0.5B adds the official validation simulation package used to support institutional whitepaper evidence. The runner compares flat LTV lending, static haircut lending, and the dynamic collateral risk engine using cache-first historical datasets plus deterministic synthetic stress overlays.
+
+### What is included
+
+- Historical replay that converts cached historical bars into daily `MarketData` snapshots.
+- Rolling volatility, liquidity, bid/ask spread, synthetic order book, and stale/missing data handling.
+- Multi-currency replay for USD, NGN, and EUR loan cases with historical FX conversion support.
+- Interest-aware loan simulation that preserves principal, accrued interest, and fees separately.
+- Baseline comparison for configurable flat LTV and static haircut policies.
+- Dynamic engine comparison using lifecycle safe credit limit semantics.
+- Monitoring-style transition metrics for safe, watch, margin call, and liquidation states.
+- Evidence outputs: JSON metrics, CSV metrics, Markdown reports, provider coverage, data methodology, interest methodology, and simulation assumptions.
+
+### Commands
+
+Build or inspect the official dataset manifest without provider calls:
+
+```bash
+python -m app.simulations.build_official_dataset --dry-run
+```
+
+Dry-run the validation runner and list scenarios:
+
+```bash
+python -m app.simulations.run_official_validation --dry-run --scenario all
+```
+
+Run an evidence package generation into an output directory:
+
+```bash
+python -m app.simulations.run_official_validation --dataset-manifest path/to/manifest.json --output-dir simulation_outputs
+```

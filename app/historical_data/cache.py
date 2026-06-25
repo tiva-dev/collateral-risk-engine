@@ -40,6 +40,9 @@ class HistoricalDataCache:
         key = content_hash({"namespace": namespace, **parts})
         return self.cache_dir / namespace / f"{key}.json"
 
+    def read_path(self, namespace: str, **parts: Any) -> Path:
+        return self.key_path(namespace, **parts)
+
     def read(self, namespace: str, **parts: Any) -> dict[str, Any] | None:
         path = self.key_path(namespace, **parts)
         try:
