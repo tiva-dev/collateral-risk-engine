@@ -70,21 +70,31 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
       - name: Build or plan official provider dataset
         shell: bash
+        env:
+          PROVIDERS: ${{ inputs.providers }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FORCE_REFRESH: ${{ inputs.force_refresh }}
+          QUOTA_OVERRIDE: ${{ inputs.quota_override }}
         run: |
           set -euo pipefail
-          args=(--providers "${{ inputs.providers }}" --start-date "${{ inputs.start_date }}" --output-dir data/simulation_results)
-          if [ -n "${{ inputs.end_date }}" ]; then args+=(--end-date "${{ inputs.end_date }}"); fi
-          if [ "${{ inputs.dry_run }}" = "true" ]; then args+=(--dry-run); fi
-          if [ "${{ inputs.force_refresh }}" = "true" ]; then args+=(--force-refresh); fi
-          if [ "${{ inputs.quota_override }}" = "true" ]; then args+=(--quota-override); fi
+          mkdir -p data/simulation_results
+          args=(--providers "$PROVIDERS" --start-date "$START_DATE" --output-dir data/simulation_results)
+          if [ -n "$END_DATE" ]; then args+=(--end-date "$END_DATE"); fi
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ "$FORCE_REFRESH" = "true" ]; then args+=(--force-refresh); fi
+          if [ "$QUOTA_OVERRIDE" = "true" ]; then args+=(--quota-override); fi
           python -m app.simulations.build_official_dataset "${args[@]}" | tee data/simulation_results/dataset_build.log
       - name: Run official validation
         if: ${{ inputs.run_validation_after_build == 'true' }}
         shell: bash
+        env:
+          SCENARIO: ${{ inputs.scenario }}
         run: |
           set -euo pipefail
           manifest=$(find data/simulation_results -name '*.manifest.json' | sort | tail -n 1)
-          python -m app.simulations.run_official_validation --dataset-manifest "$manifest" --scenario "${{ inputs.scenario }}" --qa --calibration --allow-synthetic --output-dir data/simulation_results
+          python -m app.simulations.run_official_validation --dataset-manifest "$manifest" --scenario "$SCENARIO" --qa --calibration --allow-synthetic --output-dir data/simulation_results
       - name: Upload evidence artifacts
         uses: actions/upload-artifact@v4
         with:
