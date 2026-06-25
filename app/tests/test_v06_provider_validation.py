@@ -18,6 +18,12 @@ class V06ProviderValidationTests(unittest.TestCase):
         self.assertNotIn('push:', text)
         self.assertIn('secrets.NGNMARKET_API_KEY', text)
 
+    def test_workflow_creates_log_directory_before_tee(self):
+        text=Path('.github/workflows/official-validation-provider-run.yml').read_text()
+        mkdir_index=text.index('mkdir -p data/simulation_results')
+        tee_index=text.index('tee data/simulation_results/dataset_build.log')
+        self.assertLess(mkdir_index, tee_index)
+
     def test_planned_call_count_and_budget(self):
         b=OfficialDatasetBuilder(['ngnmarket'])
         counts=b.estimate_call_counts()
