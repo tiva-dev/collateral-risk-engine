@@ -71,6 +71,11 @@ class V052ReplayMetricsReportingTests(unittest.TestCase):
         result={"scenario":"x","records":[{"loan_balance":100,"lifecycle_safe_credit_limit":90,"shortfall":10,"interest_accrued":1,"with_interest_balance":100,"without_interest_balance":99}],"events":[{"state":"margin_call","severity":"warning","date":"2024-01-02"}]}
         m=compute_simulation_metrics(result)
         self.assertEqual(m["worst_shortfall"],10)
+        lead_result={"scenario":"lead","records":[],"events":[{"state":"watch","severity":"warning","date":"2024-01-01"},{"state":"informational","date":"2024-01-03"},{"state":"margin_call","severity":"critical","date":"2024-01-10"}]}
+        lead_metrics=compute_simulation_metrics(lead_result)
+        self.assertEqual(lead_metrics["warning_lead_time"],9)
+        self.assertNotIn(None, lead_metrics["event_severity_distribution"])
+        self.assertEqual(lead_metrics["event_severity_distribution"], {"critical": 1, "warning": 1})
         with tempfile.TemporaryDirectory() as d:
             files=generate_evidence_package([result],[m],d,{"seed":1})
             self.assertIn("official_validation_metrics.json",files)
