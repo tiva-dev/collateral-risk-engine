@@ -115,7 +115,11 @@ def main():
 
         for stress_name, overlay in stress_overlays.items():
             r=engine.replay(scenario, scenario_bars, fx_rates=fx_rates, start_date=a.start_date, end_date=a.end_date, stress=overlay, flat_ltv=a.flat_ltv)
-            r["stress_name"]=stress_name; results.append(r)
+            base_scenario = r.get("scenario") or scenario.name
+            r["base_scenario"] = base_scenario
+            r["stress_name"] = stress_name
+            r["scenario"] = base_scenario if stress_name == "baseline" else f"{base_scenario}::{stress_name}"
+            results.append(r)
     metrics=[compute_simulation_metrics(r,a.flat_ltv,manifest=manifest) for r in results]
     files=generate_evidence_package(results,metrics,str(out),config); print(json.dumps(files,indent=2,sort_keys=True))
 if __name__=="__main__": main()

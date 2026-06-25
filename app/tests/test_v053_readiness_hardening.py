@@ -72,6 +72,20 @@ class V053ReadinessHardeningTests(unittest.TestCase):
         self.assertIsInstance(metrics["shortfall_reduction_versus_flat_ltv"], float)
         self.assertEqual(_synthetic_thin_bars(date(2024,1,1), date(2024,1,3), 7), _synthetic_thin_bars(date(2024,1,1), date(2024,1,3), 7))
 
+    def test_stress_overlay_identity_surfaces_in_metrics(self):
+        result = {
+            "scenario": "retail_stress::price_gap",
+            "base_scenario": "retail_stress",
+            "stress_name": "price_gap",
+            "records": [],
+            "events": [],
+            "baseline_results": {},
+        }
+        metrics = compute_simulation_metrics(result)
+        self.assertEqual(metrics["scenario"], "retail_stress::price_gap")
+        self.assertEqual(metrics["base_scenario"], "retail_stress")
+        self.assertEqual(metrics["stress_name"], "price_gap")
+
 
 if __name__ == "__main__":
     unittest.main()
