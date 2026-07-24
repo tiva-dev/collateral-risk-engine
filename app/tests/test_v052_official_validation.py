@@ -136,6 +136,10 @@ class V052ProviderFoundationTests(unittest.TestCase):
         self.assertEqual(
             provider.auth_headers()["Authorization"], "Bearer ngm_live_fixture"
         )
+        self.assertEqual(provider.auth_headers()["Accept"], "application/json")
+        self.assertEqual(
+            provider.auth_headers()["User-Agent"], "collateral-risk-engine/0.6.2"
+        )
 
     def test_ngnmarket_http_error_exposes_safe_status_and_code(self):
         import io
@@ -168,6 +172,33 @@ class V052ProviderFoundationTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "INVALID_API_KEY")
         self.assertIn("HTTP 401", str(caught.exception))
         self.assertNotIn("ngm_live_fixture", str(caught.exception))
+
+    def test_ngnmarket_non_json_http_error_preserves_safe_diagnostic(self):
+        import io
+        import urllib.error
+
+        error = urllib.error.HTTPError(
+            "https://api.ngnmarket.com/v1/companies",
+            403,
+            "Forbidden",
+            {"Content-Type": "text/html", "Server": "cloud-edge"},
+            io.BytesIO(
+                b"<html><body>Access denied for ngm_live_fixture</body></html>"
+            ),
+        )
+        with patch.dict("os.environ", {"NGNMARKET_API_KEY": "ngm_live_fixture"}):
+            provider = NGNMarketHistoricalProvider()
+        with (
+            patch("urllib.request.urlopen", side_effect=error),
+            self.assertRaises(ProviderError) as caught,
+        ):
+            provider._request_json("/companies")
+        self.assertEqual(caught.exception.code, "http_403")
+        self.assertIn("response=Access denied for [redacted]", str(caught.exception))
+        self.assertNotIn("ngm_live_fixture", str(caught.exception))
+        self.assertEqual(
+            caught.exception.metadata["response_headers"]["server"], "cloud-edge"
+        )
 
     def test_ngnmarket_uses_documented_chart_parameters_and_nested_company_list(
         self,

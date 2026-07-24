@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -58,7 +59,11 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
         return key
 
     def auth_headers(self):
-        return {"Authorization": f"Bearer {self._api_key()}"}
+        return {
+            "Authorization": f"Bearer {self._api_key()}",
+            "Accept": "application/json",
+            "User-Agent": "collateral-risk-engine/0.6.2",
+        }
 
     def parse_envelope(self, payload):
         if isinstance(payload, dict) and "meta" in payload:
@@ -90,27 +95,58 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
             with urllib.request.urlopen(req, timeout=30) as r:  # nosec B310
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as exc:
+            raw_body = ""
             try:
-                payload = json.loads(exc.read().decode())
+                raw_body = exc.read().decode(errors="replace")
+                payload = json.loads(raw_body)
             except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
                 payload = {}
             error = payload.get("error") if isinstance(payload, dict) else None
             provider_code = (
                 str(error.get("code"))
                 if isinstance(error, dict) and error.get("code")
+                else str(payload.get("code"))
+                if isinstance(payload, dict) and payload.get("code")
                 else f"http_{exc.code}"
             )
             provider_message = (
                 str(error.get("message"))
                 if isinstance(error, dict) and error.get("message")
-                else "request rejected"
+                else str(payload.get("message"))
+                if isinstance(payload, dict) and payload.get("message")
+                else ""
             )
+            if not provider_message and raw_body:
+                body_text = re.sub(r"<[^>]+>", " ", raw_body)
+                body_text = " ".join(body_text.split())
+                provider_message = f"request rejected; response={body_text[:240]}"
+            provider_message = provider_message or "request rejected"
             provider_message = provider_message.replace(self._api_key(), "[redacted]")
+            response_headers = {
+                name: value
+                for name, value in {
+                    "content_type": exc.headers.get("Content-Type")
+                    if exc.headers
+                    else None,
+                    "server": exc.headers.get("Server") if exc.headers else None,
+                    "request_id": (
+                        exc.headers.get("CF-Ray")
+                        or exc.headers.get("X-Request-ID")
+                        or exc.headers.get("X-Correlation-ID")
+                    )
+                    if exc.headers
+                    else None,
+                }.items()
+                if value
+            }
             raise ProviderError(
                 f"NGNMarket HTTP {exc.code}: {provider_code}: {provider_message}",
                 provider=self.provider_name,
                 code=provider_code,
-                metadata={"http_status": exc.code},
+                metadata={
+                    "http_status": exc.code,
+                    "response_headers": response_headers,
+                },
             ) from exc
         except urllib.error.URLError as exc:
             raise ProviderError(
