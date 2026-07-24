@@ -9,3 +9,6 @@ Over-conservatism examples include dynamic capacity below flat/static while shor
 Under-protection examples include remaining shortfalls, incomplete liquidation plans, short warning lead time, and FX/data gaps causing unprotected exposure.
 
 This stage reports review areas only. It does not automatically tune or change the model.
+
+## Credit diagnostics
+Approved-credit diagnostics use `average_approved_credit`; lifecycle-safe-limit diagnostics use `average_lifecycle_safe_credit_limit`; preserved capacity uses the corresponding capacity metric. Loan balance is never a substitute. Missing measures carry an explicit unavailable status and reason.

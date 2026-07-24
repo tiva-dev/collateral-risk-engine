@@ -9,7 +9,7 @@ from app.market_data.identity import InstrumentIdentity
 
 from .cache import HistoricalDataCache
 from .config import load_config
-from .models import HistoricalBar, HistoricalSeries
+from .models import HistoricalBar, HistoricalSeries, canonical_series_payload
 from .providers import HistoricalDataProvider, ProviderError
 
 
@@ -81,8 +81,11 @@ class AlpacaTradingHistoricalProvider(HistoricalDataProvider):
             self.cache_paths.append(str(self.cache.read_path("normalized", **key)))
             raw_path=self.cache.read_path("raw", **key)
             if raw_path.exists(): self.raw_response_paths.append(str(raw_path))
-            self.provider_coverage_summary.update({"requested":1,"available":1,"missing":0,"cached":1,"fetched":0,"page_count":cached.get("data",{}).get("metadata",{}).get("page_count",0)})
-            return self.parse_bars(instrument, cached["data"], start_date, end_date, interval)
+            data=cached["data"]
+            self.provider_coverage_summary.update({"requested":1,"available":1,"missing":0,"cached":1,"fetched":0,"page_count":data.get("data_quality_summary",{}).get("page_count",0)})
+            if data.get("cache_schema") == "historical_series/v1":
+                return _series_from_cache(data)
+            return self.parse_bars(instrument, data, start_date, end_date, interval)
         token=None; pages=[]; page_count=0
         try:
             while True:
@@ -100,5 +103,14 @@ class AlpacaTradingHistoricalProvider(HistoricalDataProvider):
         merged["metadata"]={"page_count":page_count,"adjustment":adjustment,"feed":feed,"currency":currency,"quota_metadata":self.quota_metadata}
         self.provider_coverage_summary.update({"requested":1,"available":1 if self._extract_symbol_bars(instrument, merged) else 0,"missing":0 if self._extract_symbol_bars(instrument, merged) else 1,"cached":0,"fetched":1,"page_count":page_count})
         self.raw_response_paths.append(str(self.cache.write("raw", merged, **key)))
-        self.cache_paths.append(str(self.cache.write("normalized", merged, **key)))
-        return self.parse_bars(instrument, merged, start_date, end_date, interval)
+        series=self.parse_bars(instrument, merged, start_date, end_date, interval)
+        self.cache_paths.append(str(self.cache.write("normalized", canonical_series_payload(series), **key)))
+        return series
+
+def _series_from_cache(data):
+    identity = InstrumentIdentity(**data["instrument_identity"]) if data.get("instrument_identity") else None
+    bars=[]
+    for row in data.get("bars",[]):
+        ri=InstrumentIdentity(**row["instrument_identity"]) if row.get("instrument_identity") else identity
+        bars.append(HistoricalBar(**{**row,"timestamp":datetime.fromisoformat(row["timestamp"].replace("Z","+00:00")),"instrument_identity":ri}))
+    return HistoricalSeries(data["instrument"],bars,data["provider_name"],datetime.fromisoformat(data["retrieved_at"].replace("Z","+00:00")),date.fromisoformat(data["start_date"]),date.fromisoformat(data["end_date"]),data.get("interval","1d"),data.get("warnings",[]),data.get("data_quality_summary",{}),identity)

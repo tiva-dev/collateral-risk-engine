@@ -61,6 +61,11 @@ jobs:
       SIMULATION_OUTPUT_DIR: data/simulation_results
     steps:
       - uses: actions/checkout@v4
+      - name: Reject validation after dry-run build
+        if: ${{ inputs.dry_run == 'true' && inputs.run_validation_after_build == 'true' }}
+        run: |
+          echo "Cannot run official validation after a dry-run dataset build because no provider cache data is generated."
+          exit 1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

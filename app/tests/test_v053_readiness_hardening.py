@@ -46,8 +46,8 @@ class V053ReadinessHardeningTests(unittest.TestCase):
 
     def test_normalized_cache_loader_and_provider_native_warning_tolerance(self):
         with tempfile.TemporaryDirectory() as td:
-            bar_path = Path(td) / "bar.json"; bar_path.write_text(json.dumps({"data":{"instrument":"AAPL","bars":[{"timestamp":"2024-01-01","open":10,"high":10,"low":10,"close":10,"volume":100,"currency":"USD"}]}}))
-            fx_path = Path(td) / "fx.json"; fx_path.write_text(json.dumps({"data":{"from_currency":"EUR","to_currency":"USD","rates":[{"timestamp":"2024-01-01","rate":1.1}]}}))
+            bar_path = Path(td) / "bar.json"; bar_path.write_text(json.dumps({"data":{"instrument":"AAPL","provider_name":"mock","retrieved_at":"2024-01-02T00:00:00+00:00","start_date":"2024-01-01","end_date":"2024-01-01","warnings":[],"data_quality_summary":{},"bars":[{"timestamp":"2024-01-01","open":10,"high":10,"low":10,"close":10,"volume":100,"currency":"USD"}]}}))
+            fx_path = Path(td) / "fx.json"; fx_path.write_text(json.dumps({"data":{"from_currency":"EUR","to_currency":"USD","provider_name":"mock","retrieved_at":"2024-01-02T00:00:00+00:00","start_date":"2024-01-01","end_date":"2024-01-01","warnings":[],"data_quality_summary":{},"rates":[{"timestamp":"2024-01-01","rate":1.1}]}}))
             native_path = Path(td) / "native.json"; native_path.write_text(json.dumps({"data":{"Time Series (Daily)":{"2024-01-01":{"4. close":"10"}}}}))
             bars, fx = _load_replay_inputs({"cache_paths":[str(bar_path), str(fx_path), str(native_path)]})
             self.assertIn("AAPL", bars)

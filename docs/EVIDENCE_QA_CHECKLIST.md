@@ -7,3 +7,6 @@ QA checks that metrics JSON/CSV, official report, provider coverage, data method
 A pass means evidence is reviewable. A fail means blocking evidence files or fields are missing. Intentional unknowns should be marked `N/A`, not left blank.
 
 v0.6 QA does not alter model parameters, perform broker execution, connect a production database, or use live WebSocket streams.
+
+## v0.6.1 blocking checks
+QA blocks empty dynamic/flat/static outcome tables, missing baseline columns, placeholder metrics, empty provider coverage in provider-backed evidence, and scenarios for which no result row can be proven. A genuinely inapplicable value must be encoded as `{"status":"not_applicable","reason":"..."}`.

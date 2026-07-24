@@ -1,5 +1,5 @@
 from __future__ import annotations
-import argparse, json
+import argparse, json, warnings
 from datetime import date, datetime, timezone
 from pathlib import Path
 from app.historical_data.cache import content_hash
@@ -41,7 +41,7 @@ def _bar_from_payload(payload: dict) -> HistoricalBar:
 
 def _load_replay_inputs(manifest: dict) -> tuple[dict[str, list[HistoricalBar]], dict[tuple[str, str], list[HistoricalFXRate]]]:
     bars_by_symbol: dict[str, list[HistoricalBar]] = {}
-    fx_rates: dict[tuple[str, str], list[HistoricalFXRate]] = {}; warnings=[]
+    fx_rates: dict[tuple[str, str], list[HistoricalFXRate]] = {}
     for cache_path in manifest.get("cache_paths", []):
         path = Path(cache_path)
         if not path.exists():
@@ -50,6 +50,13 @@ def _load_replay_inputs(manifest: dict) -> tuple[dict[str, list[HistoricalBar]],
         series_items = payload if isinstance(payload, list) else [payload]
         for item in series_items:
             if not isinstance(item, dict):
+                continue
+            canonical_fx = all(k in item for k in ("from_currency","to_currency","rates","provider_name","retrieved_at","start_date","end_date","warnings","data_quality_summary"))
+            canonical_bars = all(k in item for k in ("instrument","bars","provider_name","retrieved_at","start_date","end_date","warnings","data_quality_summary"))
+            if not (canonical_fx or canonical_bars):
+                message=f"Skipped provider-native cache payload (not official replay evidence): {path}"
+                warnings.warn(message, RuntimeWarning)
+                manifest.setdefault("qa_cache_warnings", []).append(message)
                 continue
             if "rates" in item:
                 frm = item.get("from_currency")
