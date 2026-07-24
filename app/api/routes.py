@@ -131,7 +131,7 @@ def evaluate_risk(request: EvaluateRequest) -> EvaluateResponse:
     try:
         holdings = [holding.to_domain() for holding in request.holdings]
         loan = request.loan.to_domain()
-        if {holding.currency.upper() for holding in holdings} != {loan.currency.upper()}:
+        if holdings and {holding.currency.upper() for holding in holdings} != {loan.currency.upper()}:
             raise RiskEvaluationError(
                 "direct risk endpoint requires holdings normalized to loan currency"
             )
