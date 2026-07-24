@@ -20,10 +20,25 @@ class Holding:
     asset_type: AssetType
     quantity: float
     currency: str = "USD"
+    exchange: str = "UNKNOWN"
+    provider_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.quantity < 0:
             raise ValueError("holding quantity must be greater than or equal to 0")
+        if not self.asset_id.strip() or not self.currency.strip() or not self.exchange.strip():
+            raise ValueError("holding requires stable asset_id, currency, and exchange")
+
+    @property
+    def stable_identity(self) -> tuple[str, str, str, AssetType, str]:
+        """Identity used for aggregation; never collapse cross-venue instruments."""
+        return (
+            self.asset_id.upper(),
+            self.exchange.upper(),
+            self.currency.upper(),
+            self.asset_type,
+            (self.provider_id or "").upper(),
+        )
 
 
 @dataclass(frozen=True)
@@ -261,6 +276,8 @@ class TriggerLevels:
     dynamic_restriction_coverage: float
     dynamic_warning_coverage: float
     required_cure_amount: float
+    repayment_only_cure: float = 0.0
+    collateral_injection_only_cure: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -329,7 +346,7 @@ class PreTradeRiskCheckResult:
     dynamic_safety_requirement: float
     minimum_stressed_liquidation_value: float
     required_repayment_amount: float
-    reduced_available_credit: float
+    reduced_available_credit: float | None
     projected_margin_state: MarginState
     projected_holdings: list[Holding]
     projected_evaluation: PortfolioEvaluation

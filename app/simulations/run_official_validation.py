@@ -6,7 +6,7 @@ from app.historical_data.cache import content_hash
 from app.simulations.metrics import compute_simulation_metrics
 from app.simulations.reporting import SIMULATION_CONFIG_VERSION, generate_evidence_package
 from app.simulations.replay import HistoricalReplayEngine, StressOverlay
-from app.historical_data.models import HistoricalBar, HistoricalFXRate, HistoricalFXSeries
+from app.historical_data.models import HistoricalBar, HistoricalFXRate
 from app.simulations.scenarios.official_portfolios import official_portfolio_scenarios
 from app.simulations.evidence_quality import scenario_eligibility, validate_provider_coverage, validate_evidence_package
 from app.simulations.calibration import generate_calibration_diagnostics

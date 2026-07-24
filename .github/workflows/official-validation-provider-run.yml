@@ -99,7 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           manifest=$(find data/simulation_results -name '*.manifest.json' | sort | tail -n 1)
-          python -m app.simulations.run_official_validation --dataset-manifest "$manifest" --scenario "$SCENARIO" --qa --calibration --allow-synthetic --output-dir data/simulation_results
+          python -m app.simulations.run_official_validation --dataset-manifest "$manifest" --scenario "$SCENARIO" --qa --calibration --output-dir data/simulation_results
       - name: Upload evidence artifacts
         uses: actions/upload-artifact@v4
         with:

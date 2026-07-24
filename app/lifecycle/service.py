@@ -12,7 +12,7 @@ from app.core.enums import (
     RiskDecision,
     TransferDirection,
 )
-from app.core.evaluator import CollateralRiskEngine
+from app.core.evaluator import CollateralRiskEngine, RiskEvaluationError
 from app.core.models import (
     AccountState,
     Holding,
@@ -42,8 +42,8 @@ def pledged_cash_asset_id(currency: str) -> str:
     return f"{PLEDGED_CASH_ASSET_ID_PREFIX}_{normalized_currency}"
 
 
-def holding_identity(holding: Holding) -> tuple[str, AssetType, str]:
-    return (holding.asset_id, holding.asset_type, holding.currency)
+def holding_identity(holding: Holding) -> tuple[str, str, str, AssetType, str]:
+    return holding.stable_identity
 
 
 class CreditLifecycleEngine:
@@ -78,6 +78,10 @@ class CreditLifecycleEngine:
         )
         safe_credit_limit = self._safe_credit_limit(evaluation)
         safe_available_credit = round_money(max(0.0, safe_credit_limit))
+        if safe_available_credit <= 0:
+            raise RiskEvaluationError(
+                "origination rejected: approved available credit is zero"
+            )
         audit_id = self._write_lifecycle_audit(
             event_type="origination",
             account_ref=account_ref,
@@ -783,7 +787,7 @@ class CreditLifecycleEngine:
 
     def _add_holding_delta(
         self,
-        holdings: dict[tuple[str, AssetType, str], Holding],
+        holdings: dict[tuple[str, str, str, AssetType, str], Holding],
         asset_id: str | None,
         asset_type: AssetType | None,
         delta: float,
@@ -794,7 +798,7 @@ class CreditLifecycleEngine:
         candidates = [
             key
             for key in holdings
-            if key[0] == asset_id and (asset_type is None or key[1] == asset_type)
+            if key[0] == asset_id.upper() and (asset_type is None or key[3] == asset_type)
         ]
         if len(candidates) > 1:
             raise ValueError(
@@ -1045,23 +1049,19 @@ def apply_repayment(loan: Loan, repayment_amount: float) -> Loan:
 
 
 def aggregate_holdings(holdings: list[Holding]) -> list[Holding]:
-    aggregated: dict[tuple[str, object, str], float] = {}
-    order: list[tuple[str, object, str]] = []
+    aggregated: dict[tuple[str, str, str, AssetType, str], float] = {}
+    originals: dict[tuple[str, str, str, AssetType, str], Holding] = {}
+    order: list[tuple[str, str, str, AssetType, str]] = []
     for holding in holdings:
-        key = (holding.asset_id, holding.asset_type, holding.currency)
+        key = holding.stable_identity
         if key not in aggregated:
             aggregated[key] = 0.0
+            originals[key] = holding
             order.append(key)
         aggregated[key] += holding.quantity
     return [
-        Holding(
-            asset_id=asset_id,
-            asset_type=asset_type,
-            quantity=quantity,
-            currency=currency,
-        )
-        for asset_id, asset_type, currency in order
-        for quantity in [round(aggregated[(asset_id, asset_type, currency)], 12)]
+        replace(originals[key], quantity=round(aggregated[key], 12))
+        for key in order
     ]
 
 
@@ -1069,36 +1069,28 @@ def project_holdings(
     current_holdings: list[Holding],
     proposed_holding_changes: list[Holding],
 ) -> tuple[list[Holding], str | None]:
-    quantities: dict[tuple[str, object, str], float] = {}
-    order: list[tuple[str, object, str]] = []
-    identities: dict[tuple[str, object, str], tuple[str, object, str]] = {}
+    quantities: dict[tuple[str, str, str, AssetType, str], float] = {}
+    order: list[tuple[str, str, str, AssetType, str]] = []
+    originals: dict[tuple[str, str, str, AssetType, str], Holding] = {}
 
     for holding in [*current_holdings, *proposed_holding_changes]:
-        key = (holding.asset_id, holding.asset_type, holding.currency)
+        key = holding.stable_identity
         if key not in quantities:
             quantities[key] = 0.0
-            identities[key] = key
+            originals[key] = holding
             order.append(key)
         quantities[key] += holding.quantity
 
     projected: list[Holding] = []
     for key in order:
         quantity = round(quantities[key], 12)
-        asset_id, asset_type, currency = identities[key]
         if quantity < 0:
             return (
                 [],
                 "projected holding quantity would be negative; action must not proceed",
             )
         if quantity > 0:
-            projected.append(
-                Holding(
-                    asset_id=asset_id,
-                    asset_type=asset_type,
-                    quantity=quantity,
-                    currency=currency,
-                )
-            )
+            projected.append(replace(originals[key], quantity=quantity))
 
     if not projected:
         return [], "projected holdings are empty; action must not proceed"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hashlib, json, os
+import hashlib, json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any

@@ -34,6 +34,7 @@ from app.audit.logger import AuditLogger
 from app.core.evaluator import CollateralRiskEngine, RiskEvaluationError
 from app.lifecycle.service import CreditLifecycleEngine
 from app.market_data.aggregator import MarketDataAggregator
+from app.market_data.providers import MissingProvider
 from app.version import MARKET_DATA_MODEL_VERSION
 from app.monitoring.events import serialize_event, serialize_sse_event
 from app.monitoring.market_updates import InMemoryMarketDataCache
@@ -48,11 +49,14 @@ lifecycle_engine = CreditLifecycleEngine(risk_engine=engine, audit_logger=audit_
 monitoring_account_repo = InMemoryMonitoredAccountRepository()
 monitoring_event_repo = InMemoryMonitoringEventRepository()
 monitoring_market_data_cache = InMemoryMarketDataCache()
+runtime_aggregator = MarketDataAggregator(
+    equity_provider=MissingProvider(), fx_provider=MissingProvider()
+)
 monitoring_service = MonitoringService(
     account_repo=monitoring_account_repo,
     event_repo=monitoring_event_repo,
     lifecycle_engine=lifecycle_engine,
-    aggregator=MarketDataAggregator(),
+    aggregator=runtime_aggregator,
     market_data_cache=monitoring_market_data_cache,
     audit_logger=audit_logger,
 )
@@ -72,7 +76,7 @@ def serialize(obj):
 def normalize_market_data(request: MarketDataNormalizeRequest) -> MarketDataNormalizeResponse:
     if not request.instruments and not request.holdings:
         raise HTTPException(status_code=422, detail="normalize request requires instruments or holdings")
-    aggregator = MarketDataAggregator()
+    aggregator = runtime_aggregator
     instruments = [instrument.to_domain() for instrument in request.instruments]
     holdings = [holding.to_domain() for holding in request.holdings]
     client_quotes = {
@@ -125,10 +129,16 @@ def normalize_market_data(request: MarketDataNormalizeRequest) -> MarketDataNorm
 @router.post("/risk/evaluate", response_model=EvaluateResponse)
 def evaluate_risk(request: EvaluateRequest) -> EvaluateResponse:
     try:
+        holdings = [holding.to_domain() for holding in request.holdings]
+        loan = request.loan.to_domain()
+        if any(holding.currency.upper() != loan.currency.upper() for holding in holdings):
+            raise RiskEvaluationError(
+                "direct risk endpoint requires holdings normalized to loan currency"
+            )
         result = engine.evaluate(
             account_ref=request.account_ref,
-            holdings=[holding.to_domain() for holding in request.holdings],
-            loan=request.loan.to_domain(),
+            holdings=holdings,
+            loan=loan,
             policy=request.policy.to_domain(),
             market_data={k: v.to_domain() for k, v in request.market_data.items()},
             requested_draw_amount=request.requested_draw_amount,
