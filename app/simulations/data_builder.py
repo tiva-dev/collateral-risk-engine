@@ -48,6 +48,9 @@ class OfficialDatasetBuilder:
         self.provider_names = set(providers or ["alpaca", "ngnmarket", "alpha_vantage"])
         self.config = load_config()
         self.output_dir = output_dir or self.config.simulation_output_dir
+        self.alpaca_feed = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower()
+        if self.alpaca_feed not in {"iex", "sip", "boats", "otc"}:
+            raise ValueError("ALPACA_DATA_FEED must be one of: iex, sip, boats, otc")
 
     def plan_calls(self):
         calls = []
@@ -150,6 +153,8 @@ class OfficialDatasetBuilder:
             if dry_run
             else ["Cache-first provider retrieval used unless force_refresh=true."]
         )
+        if "alpaca" in self.provider_names:
+            notes.append(f"Alpaca market-data feed: {self.alpaca_feed}.")
         providers = {}
         if not dry_run:
             providers = {
@@ -248,7 +253,11 @@ class OfficialDatasetBuilder:
                     "alpaca",
                     s,
                     lambda s=s: providers["alpaca"].fetch_equity_history(
-                        s, start_date, end, force_refresh=force_refresh
+                        s,
+                        start_date,
+                        end,
+                        force_refresh=force_refresh,
+                        feed=self.alpaca_feed,
                     ),
                 )
             for s in NGX_UNIVERSE if "ngnmarket" in self.provider_names else []:

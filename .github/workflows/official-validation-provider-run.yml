@@ -52,6 +52,7 @@ jobs:
     env:
       ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
       ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      ALPACA_DATA_FEED: "iex"
       ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
       NGNMARKET_API_KEY: ${{ secrets.NGNMARKET_API_KEY }}
       NGNMARKET_MONTHLY_CALL_BUDGET: "3000"
@@ -101,6 +102,7 @@ jobs:
           manifest=$(find data/simulation_results -name '*.manifest.json' | sort | tail -n 1)
           python -m app.simulations.run_official_validation --dataset-manifest "$manifest" --scenario "$SCENARIO" --qa --calibration --output-dir data/simulation_results
       - name: Upload evidence artifacts
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: official-provider-validation-evidence

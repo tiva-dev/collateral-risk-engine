@@ -41,6 +41,48 @@ class V06ProviderValidationTests(unittest.TestCase):
         mkdir_index = text.index("mkdir -p data/simulation_results")
         tee_index = text.index("tee data/simulation_results/dataset_build.log")
         self.assertLess(mkdir_index, tee_index)
+        self.assertIn('ALPACA_DATA_FEED: "iex"', text)
+        self.assertIn("if: ${{ always() }}", text)
+
+    def test_official_builder_requests_and_records_iex_feed(self):
+        from app.simulations import data_builder
+
+        series = HistoricalSeries(
+            "SPY",
+            [HistoricalBar("SPY", date(2024, 1, 2), 1, 1, 1, 1)],
+            "alpaca",
+            datetime.now(UTC),
+            date(2024, 1, 2),
+            date(2024, 1, 2),
+        )
+        with (
+            patch.dict("os.environ", {"ALPACA_DATA_FEED": "iex"}),
+            patch.object(data_builder, "US_UNIVERSE", ["SPY"]),
+            patch.object(
+                data_builder, "AlpacaTradingHistoricalProvider"
+            ) as provider_class,
+        ):
+            provider_class.return_value.fetch_equity_history.return_value = series
+            manifest = OfficialDatasetBuilder(["alpaca"]).build(
+                start_date=date(2024, 1, 1),
+                end_date=date(2024, 1, 3),
+                dry_run=False,
+            )
+        provider_class.return_value.fetch_equity_history.assert_called_once_with(
+            "SPY",
+            date(2024, 1, 1),
+            date(2024, 1, 3),
+            force_refresh=False,
+            feed="iex",
+        )
+        self.assertIn("Alpaca market-data feed: iex.", manifest.methodology_notes)
+
+    def test_official_builder_rejects_unknown_alpaca_feed(self):
+        with (
+            patch.dict("os.environ", {"ALPACA_DATA_FEED": "unknown"}),
+            self.assertRaisesRegex(ValueError, "ALPACA_DATA_FEED"),
+        ):
+            OfficialDatasetBuilder(["alpaca"])
 
     def test_planned_call_count_and_budget(self):
         b = OfficialDatasetBuilder(["ngnmarket"])
