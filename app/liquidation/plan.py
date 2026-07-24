@@ -12,7 +12,9 @@ def repayment_only_cure(
 ) -> float:
     if target_coverage <= 0:
         raise ValueError("target_coverage must be greater than zero")
-    return round_money(max(0.0, loan_balance - stressed_liquidation_value / target_coverage))
+    return round_money(
+        max(0.0, loan_balance - stressed_liquidation_value / target_coverage)
+    )
 
 
 def collateral_injection_only_cure(
@@ -23,7 +25,9 @@ def collateral_injection_only_cure(
     """Additional stressed collateral value required with obligation unchanged."""
     if target_coverage <= 0:
         raise ValueError("target_coverage must be greater than zero")
-    return round_money(max(0.0, target_coverage * loan_balance - stressed_liquidation_value))
+    return round_money(
+        max(0.0, target_coverage * loan_balance - stressed_liquidation_value)
+    )
 
 
 def build_liquidation_plan(
@@ -43,10 +47,20 @@ def build_liquidation_plan(
     def priority(asset: AssetRiskResult) -> float:
         liquidity_quality = 1.0 - asset.estimated_slippage_rate
         risk_contribution = asset.risk_score
-        concentration_proxy = asset.market_value / max(sum(a.market_value for a in asset_results), 1e-9)
-        return 0.45 * liquidity_quality + 0.35 * risk_contribution + 0.20 * concentration_proxy
+        concentration_proxy = asset.market_value / max(
+            sum(a.market_value for a in asset_results), 1e-9
+        )
+        return (
+            0.45 * liquidity_quality
+            + 0.35 * risk_contribution
+            + 0.20 * concentration_proxy
+        )
 
-    candidates = [a for a in asset_results if a.eligible and a.quantity > 0 and a.stressed_liquidation_value > 0]
+    candidates = [
+        a
+        for a in asset_results
+        if a.eligible and a.quantity > 0 and a.stressed_liquidation_value > 0
+    ]
     for asset in sorted(candidates, key=priority, reverse=True):
         if remaining <= 0:
             break
@@ -73,7 +87,9 @@ def build_liquidation_plan(
 
     if not orders:
         return LiquidationPlan(
-            action="liquidate" if margin_state == MarginState.LIQUIDATION else "recommend_liquidation_or_cure",
+            action="liquidate"
+            if margin_state == MarginState.LIQUIDATION
+            else "recommend_liquidation_or_cure",
             target_cash_recovery=round(target_cash_recovery, 2),
             orders=[],
             reason="insufficient_liquid_collateral_to_meet_target_recovery",
@@ -90,7 +106,9 @@ def build_liquidation_plan(
     if not plan_complete:
         reason = f"{reason}; insufficient_liquid_collateral_to_meet_target_recovery"
     return LiquidationPlan(
-        action="liquidate" if margin_state == MarginState.LIQUIDATION else "recommend_liquidation_or_cure",
+        action="liquidate"
+        if margin_state == MarginState.LIQUIDATION
+        else "recommend_liquidation_or_cure",
         target_cash_recovery=round(target_cash_recovery, 2),
         orders=orders,
         reason=reason,

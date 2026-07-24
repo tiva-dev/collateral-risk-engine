@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from datetime import timedelta
 from threading import RLock
 
-from app.monitoring.models import MonitoredAccount, MonitoringEvent, MonitoringEventType, MonitoringSeverity, MonitoringStatus
+from app.monitoring.models import (
+    MonitoredAccount,
+    MonitoringEvent,
+    MonitoringEventType,
+    MonitoringSeverity,
+    MonitoringStatus,
+)
 
 
 class MonitoredAccountRepository(ABC):
@@ -30,7 +36,9 @@ class MonitoredAccountRepository(ABC):
     def list_active(self) -> list[MonitoredAccount]: ...
 
     @abstractmethod
-    def list_by_instrument(self, stable_key_or_asset_id: str) -> list[MonitoredAccount]: ...
+    def list_by_instrument(
+        self, stable_key_or_asset_id: str
+    ) -> list[MonitoredAccount]: ...
 
     @abstractmethod
     def update(self, account: MonitoredAccount) -> MonitoredAccount: ...
@@ -49,15 +57,25 @@ class MonitoringEventRepository(ABC):
     """Storage contract for monitoring events; replace in-memory storage in production."""
 
     @abstractmethod
-    def append(self, event: MonitoringEvent, *, dedupe_ttl_seconds: int | None = None) -> EventAppendResult: ...
+    def append(
+        self, event: MonitoringEvent, *, dedupe_ttl_seconds: int | None = None
+    ) -> EventAppendResult: ...
 
     @abstractmethod
-    def list(self, account_ref: str | None = None, event_type: MonitoringEventType | str | None = None, severity: MonitoringSeverity | str | None = None, limit: int = 100) -> list[MonitoringEvent]: ...
+    def list(
+        self,
+        account_ref: str | None = None,
+        event_type: MonitoringEventType | str | None = None,
+        severity: MonitoringSeverity | str | None = None,
+        limit: int = 100,
+    ) -> list[MonitoringEvent]: ...
 
     @abstractmethod
     def get(self, event_id: str) -> MonitoringEvent | None: ...
 
-    def update_event_audit_id(self, event_id: str, audit_id: str) -> MonitoringEvent | None: ...
+    def update_event_audit_id(
+        self, event_id: str, audit_id: str
+    ) -> MonitoringEvent | None: ...
 
 
 class InMemoryMonitoredAccountRepository(MonitoredAccountRepository):
@@ -93,21 +111,36 @@ class InMemoryMonitoredAccountRepository(MonitoredAccountRepository):
             return [deepcopy(account) for account in self._accounts.values()]
 
     def list_active(self) -> list[MonitoredAccount]:
-        return [account for account in self.list() if account.monitoring_status == MonitoringStatus.ACTIVE]
+        return [
+            account
+            for account in self.list()
+            if account.monitoring_status == MonitoringStatus.ACTIVE
+        ]
 
     def list_by_instrument(self, stable_key_or_asset_id: str) -> list[MonitoredAccount]:
         key = stable_key_or_asset_id.upper()
         with self._lock:
-            refs = set(self._instrument_index.get(stable_key_or_asset_id, set())) | set(self._instrument_index.get(key, set()))
-            return [deepcopy(self._accounts[ref]) for ref in refs if ref in self._accounts]
+            refs = set(self._instrument_index.get(stable_key_or_asset_id, set())) | set(
+                self._instrument_index.get(key, set())
+            )
+            return [
+                deepcopy(self._accounts[ref]) for ref in refs if ref in self._accounts
+            ]
 
     def _reindex(self, account: MonitoredAccount) -> None:
         for refs in self._instrument_index.values():
             refs.discard(account.account_ref)
         from app.market_data.identity import InstrumentIdentity
+
         for holding in account.holdings:
             identity = InstrumentIdentity.from_holding(holding)
-            keys = {holding.asset_id, holding.asset_id.upper(), identity.stable_key, identity.symbol, identity.symbol.upper()}
+            keys = {
+                holding.asset_id,
+                holding.asset_id.upper(),
+                identity.stable_key,
+                identity.symbol,
+                identity.symbol.upper(),
+            }
             for key in keys:
                 self._instrument_index.setdefault(key, set()).add(account.account_ref)
 
@@ -119,11 +152,17 @@ class InMemoryMonitoringEventRepository(MonitoringEventRepository):
         self._dedupe_keys: dict[str, MonitoringEvent] = {}
         self._lock = RLock()
 
-    def append(self, event: MonitoringEvent, *, dedupe_ttl_seconds: int | None = None) -> EventAppendResult:
+    def append(
+        self, event: MonitoringEvent, *, dedupe_ttl_seconds: int | None = None
+    ) -> EventAppendResult:
         with self._lock:
             if event.dedupe_key and event.dedupe_key in self._dedupe_keys:
                 existing = self._dedupe_keys[event.dedupe_key]
-                if dedupe_ttl_seconds is None or event.created_at <= existing.created_at + timedelta(seconds=dedupe_ttl_seconds):
+                if (
+                    dedupe_ttl_seconds is None
+                    or event.created_at
+                    <= existing.created_at + timedelta(seconds=dedupe_ttl_seconds)
+                ):
                     return EventAppendResult(deepcopy(existing), False)
             stored = deepcopy(event)
             self._events.append(stored)
@@ -132,13 +171,23 @@ class InMemoryMonitoringEventRepository(MonitoringEventRepository):
                 self._dedupe_keys[stored.dedupe_key] = stored
             return EventAppendResult(deepcopy(stored), True)
 
-    def list(self, account_ref: str | None = None, event_type: MonitoringEventType | str | None = None, severity: MonitoringSeverity | str | None = None, limit: int = 100) -> list[MonitoringEvent]:
+    def list(
+        self,
+        account_ref: str | None = None,
+        event_type: MonitoringEventType | str | None = None,
+        severity: MonitoringSeverity | str | None = None,
+        limit: int = 100,
+    ) -> list[MonitoringEvent]:
         with self._lock:
-            events = sorted(self._events, key=lambda event: event.created_at, reverse=True)
+            events = sorted(
+                self._events, key=lambda event: event.created_at, reverse=True
+            )
         if account_ref is not None:
             events = [event for event in events if event.account_ref == account_ref]
         if event_type is not None:
-            value = event_type.value if hasattr(event_type, "value") else str(event_type)
+            value = (
+                event_type.value if hasattr(event_type, "value") else str(event_type)
+            )
             events = [event for event in events if event.event_type.value == value]
         if severity is not None:
             value = severity.value if hasattr(severity, "value") else str(severity)
@@ -150,7 +199,9 @@ class InMemoryMonitoringEventRepository(MonitoringEventRepository):
             event = self._by_id.get(event_id)
             return deepcopy(event) if event is not None else None
 
-    def update_event_audit_id(self, event_id: str, audit_id: str) -> MonitoringEvent | None:
+    def update_event_audit_id(
+        self, event_id: str, audit_id: str
+    ) -> MonitoringEvent | None:
         with self._lock:
             event = self._by_id.get(event_id)
             if event is None:

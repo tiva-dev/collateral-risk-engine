@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ class AuditLogger:
 
     def write(self, payload: dict[str, Any]) -> str:
         enriched = dict(payload)
-        enriched["audit_created_at"] = datetime.now(timezone.utc).isoformat()
+        enriched["audit_created_at"] = datetime.now(UTC).isoformat()
         normalized = json.dumps(enriched, sort_keys=True, default=str)
         audit_id = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
         enriched["audit_id"] = audit_id

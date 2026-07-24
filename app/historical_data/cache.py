@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import hashlib, json
+import hashlib
+import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,14 @@ def content_hash(payload: Any) -> str:
 
 def scrub_secrets(payload: Any) -> Any:
     if isinstance(payload, dict):
-        return {k: ("[REDACTED]" if any(m in k.lower() for m in SECRET_MARKERS) else scrub_secrets(v)) for k, v in payload.items()}
+        return {
+            k: (
+                "[REDACTED]"
+                if any(m in k.lower() for m in SECRET_MARKERS)
+                else scrub_secrets(v)
+            )
+            for k, v in payload.items()
+        }
     if isinstance(payload, list):
         return [scrub_secrets(v) for v in payload]
     return payload
@@ -58,5 +66,7 @@ class HistoricalDataCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         safe = scrub_secrets(data)
         payload = {"checksum": content_hash(safe), "data": safe}
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default))
+        path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True, default=_json_default)
+        )
         return path

@@ -4,12 +4,15 @@ A testable reference engine for collateral valuation, borrowing limits, lifecycl
 
 ## Implemented and tested
 
-* Stable-identity holding aggregation before concentration, HHI, lending, recovery, portfolio-risk, and margin calculations.
+* Stable-identity holding aggregation and stable-keyed market-data resolution before concentration, HHI, lending, recovery, portfolio-risk, and margin calculations.
 * Distinct repayment-only and collateral-injection-only cure amounts.
 * Fail-closed treatment of ineligible or unusable collateral and zero-limit origination rejection.
 * Runtime API construction that does not supply mock AAPL, MTNN, or FX values when a provider is absent.
 * Historical adapters for NGNMarket, Alpaca, and Alpha Vantage with canonical checksummed caches, coverage metadata, pagination/call counts, error handling, and opt-in network tests.
 * Replay records that separate credit-limit breach from economic recovery shortfall, persist obligation components and provenance, and emit state-change events.
+* Separately labelled common-exposure surveillance and policy-origination outcome comparisons.
+* Adjusted-price replay, rolling volatility/volume inputs, valuation-only carry-forward markers, and directionally consistent FX stress.
+* Complete replay records, artifact checksums, independent metric recomputation, and fail-closed evidence QA.
 * Evidence QA and calibration utilities. Unavailable metrics are represented with a reason rather than invented zero/one values.
 
 Run the non-network suite:
@@ -20,7 +23,7 @@ python -m pytest -q
 
 ### API contract
 
-`/risk/evaluate` is the direct evaluation endpoint. `/portfolio/action/check` is the preferred endpoint for executable portfolio controls; `/risk/pre-trade-check` is the legacy endpoint. Responses distinguish `loan_balance`, `current_outstanding_balance`, `outstanding_balance`, `current_available_credit`, and `minimum_stressed_liquidation_value`. A `withdrawal` is an alias for `withdraw_security`; invalid or unsafe actions are rejected.
+`/risk/evaluate` is the direct evaluation endpoint. Requests use `loan_balance` for the current principal exposure; lifecycle responses expose `current_outstanding_balance` and `current_available_credit`. Monitoring records use `outstanding_balance` and `minimum_stressed_liquidation_value`. Direct market data, client quotes, and client FX rates require explicit timezone-aware timestamps. `/portfolio/action/check` is the preferred endpoint for executable portfolio controls and prices buys at ask and sells at bid, with a documented conservative proxy when the executable side is absent; an unsafe action is `rejected`. `/risk/pre-trade-check` is the legacy endpoint. The action type `withdrawal` is an alias for `withdraw_security`.
 
 ## Provider-backed validation
 

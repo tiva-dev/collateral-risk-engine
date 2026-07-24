@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.core.enums import AssetType
 from app.core.evaluator import CollateralRiskEngine
@@ -21,14 +21,10 @@ class FinancialSemanticsRecoveryTests(unittest.TestCase):
                 average_daily_volume=100_000,
                 average_dollar_volume=2_000_000,
                 volatility_30d=0.25,
-                timestamp=datetime(2025, 1, 2, tzinfo=timezone.utc),
+                timestamp=datetime(2025, 1, 2, tzinfo=UTC),
             )
         }
-        one = [
-            Holding(
-                "ABC", AssetType.LISTED_EQUITY, 1_000, "USD", "XNYS", "ABC"
-            )
-        ]
+        one = [Holding("ABC", AssetType.LISTED_EQUITY, 1_000, "USD", "XNYS", "ABC")]
         split = [
             Holding("ABC", AssetType.LISTED_EQUITY, 100, "USD", "XNYS", "ABC")
             for _ in range(10)
@@ -81,10 +77,14 @@ class FinancialSemanticsRecoveryTests(unittest.TestCase):
             (100, 100, 1.25, 20, 25),
             (0, 100, 2, 100, 200),
         )
-        for stressed_value, loan, target, expected_repayment, expected_injection in cases:
-            with self.subTest(
-                stressed_value=stressed_value, loan=loan, target=target
-            ):
+        for (
+            stressed_value,
+            loan,
+            target,
+            expected_repayment,
+            expected_injection,
+        ) in cases:
+            with self.subTest(stressed_value=stressed_value, loan=loan, target=target):
                 self.assertEqual(
                     repayment_only_cure(stressed_value, loan, target),
                     expected_repayment,
@@ -104,9 +104,12 @@ class FinancialSemanticsRecoveryTests(unittest.TestCase):
 class ReviewRegressionTests(unittest.TestCase):
     def test_replay_does_not_charge_stressed_haircut_as_an_extra_cost(self) -> None:
         from datetime import date
+
         from app.historical_data.models import HistoricalBar
         from app.simulations.replay import HistoricalReplayEngine
-        from app.simulations.scenarios.official_portfolios import OfficialPortfolioScenario
+        from app.simulations.scenarios.official_portfolios import (
+            OfficialPortfolioScenario,
+        )
 
         scenario = OfficialPortfolioScenario(
             "net_proceeds",
@@ -116,9 +119,9 @@ class ReviewRegressionTests(unittest.TestCase):
         bar = HistoricalBar(
             "ABC", date(2025, 1, 2), 10, 10, 10, 10, volume=10_000, currency="USD"
         )
-        record = HistoricalReplayEngine(seed=1).replay(
-            scenario, {"ABC": [bar]}
-        )["records"][0]
+        record = HistoricalReplayEngine(seed=1).replay(scenario, {"ABC": [bar]})[
+            "records"
+        ][0]
         obligation = record["total_obligation"]
         proceeds = record["stressed_liquidation_proceeds"]
         self.assertEqual(record["liquidation_costs"], 0.0)
@@ -179,6 +182,7 @@ class ReviewRegressionTests(unittest.TestCase):
 
     def test_empty_direct_evaluation_is_not_reported_as_currency_mismatch(self) -> None:
         from fastapi import HTTPException
+
         from app.api.routes import evaluate_risk
         from app.api.schemas import EvaluateRequest
 
@@ -200,6 +204,7 @@ class ReviewRegressionTests(unittest.TestCase):
     def test_alpha_vantage_reports_retry_attempt_count(self) -> None:
         import json
         from unittest.mock import patch
+
         from app.historical_data.alpha_vantage import AlphaVantageHistoricalProvider
 
         class Response:
@@ -222,9 +227,246 @@ class ReviewRegressionTests(unittest.TestCase):
             Response({"Time Series FX (Daily)": {}}),
         ]
         provider = AlphaVantageHistoricalProvider()
-        with patch("urllib.request.urlopen", side_effect=responses), patch("time.sleep"):
+        with (
+            patch("urllib.request.urlopen", side_effect=responses),
+            patch("time.sleep"),
+        ):
             provider._request_json({"function": "FX_DAILY"})
         self.assertEqual(provider.last_request_call_count, 2)
+
+
+class RecoveryEndToEndTests(unittest.TestCase):
+    def test_ineligible_asset_has_zero_borrowing_and_recovery(self) -> None:
+        market = {
+            "ABC": MarketData(
+                "ABC",
+                100,
+                bid=99,
+                ask=101,
+                average_daily_volume=10_000,
+                data_quality_score=0.10,
+                timestamp=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        }
+        result = CollateralRiskEngine().evaluate(
+            "ineligible",
+            [Holding("ABC", AssetType.LISTED_EQUITY, 10)],
+            Loan(100),
+            Policy.default(),
+            market,
+        )
+        self.assertFalse(result.asset_results[0].eligible)
+        self.assertEqual(result.approved_credit_limit, 0)
+        self.assertEqual(result.stressed_liquidation_value, 0)
+
+    def test_ngn_devaluation_is_directionally_consistent(self) -> None:
+        from datetime import date
+
+        from app.simulations.replay import (
+            StressOverlay,
+            build_fx_curves,
+            lookup_fx_rate,
+        )
+
+        curves = build_fx_curves({("USD", "NGN"): 1_000})
+        stress = StressOverlay(fx_devaluation=0.25)
+        usd_ngn, _ = lookup_fx_rate(
+            "USD", "NGN", curves, date(2025, 1, 2), stress=stress
+        )
+        ngn_usd, _ = lookup_fx_rate(
+            "NGN", "USD", curves, date(2025, 1, 2), stress=stress
+        )
+        self.assertAlmostEqual(usd_ngn, 1_000 / 0.75)
+        self.assertAlmostEqual(ngn_usd, 0.001 * 0.75)
+
+    def test_comparison_regimes_use_distinct_origination_paths(self) -> None:
+        from datetime import date
+
+        from app.historical_data.models import HistoricalBar
+        from app.simulations.replay import (
+            COMMON_EXPOSURE,
+            POLICY_ORIGINATION,
+            HistoricalReplayEngine,
+        )
+        from app.simulations.scenarios.official_portfolios import (
+            OfficialPortfolioScenario,
+        )
+
+        scenario = OfficialPortfolioScenario(
+            "regimes",
+            [Holding("ABC", AssetType.LISTED_EQUITY, 10)],
+            "USD",
+        )
+        bars = {
+            "ABC": [
+                HistoricalBar(
+                    "ABC",
+                    date(2025, 1, 2),
+                    100,
+                    101,
+                    99,
+                    100,
+                    adjusted_close=100,
+                    volume=1_000_000,
+                )
+            ]
+        }
+        common = HistoricalReplayEngine(seed=1).replay(
+            scenario, bars, comparison_regime=COMMON_EXPOSURE
+        )
+        originated = HistoricalReplayEngine(seed=1).replay(
+            scenario, bars, comparison_regime=POLICY_ORIGINATION
+        )
+        common_balances = {
+            common["records"][0]["total_obligation"],
+            common["baseline_results"]["flat_ltv"][0]["total_obligation"],
+            common["baseline_results"]["static_haircut"][0]["total_obligation"],
+        }
+        originated_balances = {
+            originated["records"][0]["total_obligation"],
+            originated["baseline_results"]["flat_ltv"][0]["total_obligation"],
+            originated["baseline_results"]["static_haircut"][0]["total_obligation"],
+        }
+        self.assertEqual(len(common_balances), 1)
+        self.assertGreater(len(originated_balances), 1)
+
+    def test_dataset_loader_fails_when_manifest_cache_is_missing(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from app.simulations.run_official_validation import _load_replay_inputs
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            missing = Path(temporary_directory) / "missing-normalized-cache.json"
+            with self.assertRaises(FileNotFoundError):
+                _load_replay_inputs({"cache_paths": [str(missing)]})
+
+    def test_mocked_provider_to_evidence_qa_and_calibration(self) -> None:
+        import json
+        import tempfile
+        from datetime import date
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from app.historical_data.alpha_vantage import (
+            AlphaVantageHistoricalProvider,
+        )
+        from app.historical_data.cache import HistoricalDataCache, content_hash
+        from app.historical_data.manifest import write_manifest
+        from app.historical_data.models import HistoricalDatasetManifest
+        from app.simulations.calibration import generate_calibration_diagnostics
+        from app.simulations.evidence_quality import validate_evidence_package
+        from app.simulations.metrics import compute_simulation_metrics
+        from app.simulations.replay import (
+            COMMON_EXPOSURE,
+            POLICY_ORIGINATION,
+            HistoricalReplayEngine,
+        )
+        from app.simulations.reporting import generate_evidence_package
+        from app.simulations.run_official_validation import _load_replay_inputs
+        from app.simulations.scenarios.official_portfolios import (
+            OfficialPortfolioScenario,
+        )
+
+        response = {
+            "Time Series (Daily)": {
+                "2025-01-02": {
+                    "1. open": "100",
+                    "2. high": "101",
+                    "3. low": "99",
+                    "4. close": "100",
+                    "5. adjusted close": "100",
+                    "6. volume": "1000000",
+                },
+                "2025-01-03": {
+                    "1. open": "90",
+                    "2. high": "91",
+                    "3. low": "89",
+                    "4. close": "90",
+                    "5. adjusted close": "90",
+                    "6. volume": "900000",
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            provider = AlphaVantageHistoricalProvider(
+                HistoricalDataCache(temporary_directory)
+            )
+            with patch.object(provider, "_request_json", return_value=response):
+                provider.fetch_equity_history(
+                    "AAPL",
+                    date(2025, 1, 2),
+                    date(2025, 1, 3),
+                    force_refresh=True,
+                )
+            dataset = HistoricalDatasetManifest(
+                dataset_id="fixture-dataset",
+                provider="alpha_vantage",
+                universe={"fixture": True},
+                instruments=["AAPL"],
+                fx_pairs=[],
+                start_date=date(2025, 1, 2),
+                end_date=date(2025, 1, 3),
+                cache_paths=provider.cache_paths,
+                provider_coverage_summary={
+                    "alpha_vantage": {"requested": 1, "available": 1}
+                },
+                earliest_available_date_by_symbol={"AAPL": date(2025, 1, 2)},
+            )
+            manifest_path = write_manifest(dataset, temporary_directory)
+            manifest = json.loads(manifest_path.read_text())
+            bars, fx = _load_replay_inputs(manifest)
+            self.assertFalse(fx)
+            scenario = OfficialPortfolioScenario(
+                "fixture",
+                [Holding("AAPL", AssetType.LISTED_EQUITY, 10)],
+                "USD",
+            )
+            results = []
+            for regime in (COMMON_EXPOSURE, POLICY_ORIGINATION):
+                replay = HistoricalReplayEngine(manifest, seed=7).replay(
+                    scenario, bars, comparison_regime=regime
+                )
+                replay.update(
+                    {
+                        "base_scenario": "fixture",
+                        "stress_name": "baseline",
+                        "synthetic_data_used": False,
+                    }
+                )
+                results.append(replay)
+            metrics = [
+                compute_simulation_metrics(result, manifest=manifest)
+                for result in results
+            ]
+            files = generate_evidence_package(
+                results,
+                metrics,
+                temporary_directory,
+                {
+                    "dataset_manifest": manifest,
+                    "dataset_manifest_identity": manifest["checksum"],
+                    "seed": 7,
+                },
+            )
+            qa = validate_evidence_package(files)
+            self.assertTrue(qa["passed"], qa["blocking_errors"])
+            saved_records = json.loads(
+                Path(files["official_validation_records.json"]).read_text()
+            )
+            recomputed = [
+                compute_simulation_metrics(result, manifest=manifest)
+                for result in saved_records
+            ]
+            self.assertEqual(content_hash(recomputed), content_hash(metrics))
+            calibration = generate_calibration_diagnostics(metrics, temporary_directory)
+            self.assertTrue(calibration["scenarios"])
+            Path(files["official_validation_metrics.json"]).write_text(
+                "[]", encoding="utf-8"
+            )
+            tampered_qa = validate_evidence_package(files)
+            self.assertFalse(tampered_qa["passed"])
+            self.assertTrue(tampered_qa["blocking_errors"])
 
 
 if __name__ == "__main__":

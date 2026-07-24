@@ -37,9 +37,13 @@ def compare_flat_ltv_to_dynamic_engine(
     it tests how much debt each policy would have permitted before the market moved.
     """
     engine = CollateralRiskEngine(audit_logger=None)
-    normal_eval = engine.evaluate(account_ref, holdings, Loan(principal=0), policy, market_data)
+    normal_eval = engine.evaluate(
+        account_ref, holdings, Loan(principal=0), policy, market_data
+    )
     flat_draw_limit = normal_eval.portfolio_market_value * flat_ltv
-    recovery_limited_limit = normal_eval.stressed_liquidation_value / max(normal_eval.trigger_levels.dynamic_warning_coverage, 1e-9)
+    recovery_limited_limit = normal_eval.stressed_liquidation_value / max(
+        normal_eval.trigger_levels.dynamic_warning_coverage, 1e-9
+    )
     dynamic_draw_limit = min(normal_eval.approved_credit_limit, recovery_limited_limit)
     credit_capacity_preserved = dynamic_draw_limit / max(flat_draw_limit, 1e-9)
 
@@ -49,7 +53,13 @@ def compare_flat_ltv_to_dynamic_engine(
             asset_id: apply_market_shock(snapshot, **shock)
             for asset_id, snapshot in market_data.items()
         }
-        scenario_eval = engine.evaluate(account_ref, holdings, Loan(principal=dynamic_draw_limit), policy, shocked_data)
+        scenario_eval = engine.evaluate(
+            account_ref,
+            holdings,
+            Loan(principal=dynamic_draw_limit),
+            policy,
+            shocked_data,
+        )
         stressed_recovery = scenario_eval.stressed_liquidation_value
         flat_shortfall_amount = max(0.0, flat_draw_limit - stressed_recovery)
         dynamic_shortfall_amount = max(0.0, dynamic_draw_limit - stressed_recovery)

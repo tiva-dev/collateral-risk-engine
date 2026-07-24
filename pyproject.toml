@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "collateral-risk-engine"
-version = "0.3.1"
+version = "0.6.2"
 description = "Dynamic collateral risk and liquidation intelligence engine for investment-backed lending."
 requires-python = ">=3.11"
 dependencies = [
@@ -10,6 +14,10 @@ dependencies = [
   "httpx>=0.27.0"
 ]
 
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["app.tests*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["app/tests"]
@@ -18,6 +26,9 @@ testpaths = ["app/tests"]
 # The inherited codebase intentionally uses compact one-line statements. Keep
 # lint enforcement focused on correctness until those modules are reformatted.
 ignore = ["E401", "E402", "E701", "E702"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/tests/**" = ["B017", "DTZ001", "DTZ011", "RUF012"]
 
 [tool.mypy]
 exclude = "^app/tests/"

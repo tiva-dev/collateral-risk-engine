@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 from app.market_data.identity import InstrumentIdentity
 
 
-def canonical_series_payload(series: "HistoricalSeries | HistoricalFXSeries") -> dict[str, Any]:
+def canonical_series_payload(
+    series: HistoricalSeries | HistoricalFXSeries,
+) -> dict[str, Any]:
     """Return the provider-independent representation accepted by official replay."""
     from dataclasses import asdict
 
     payload = asdict(series)
-    payload["cache_schema"] = "historical_fx_series/v1" if isinstance(series, HistoricalFXSeries) else "historical_series/v1"
+    payload["cache_schema"] = (
+        "historical_fx_series/v1"
+        if isinstance(series, HistoricalFXSeries)
+        else "historical_series/v1"
+    )
     return payload
 
 
@@ -85,14 +91,16 @@ class HistoricalDatasetManifest:
     fx_pairs: list[str]
     start_date: date
     end_date: date
-    retrieved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    retrieved_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     cache_paths: list[str] = field(default_factory=list)
     raw_response_paths: list[str] = field(default_factory=list)
     checksum: str = ""
     provider_quota_metadata: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     missing_symbols: list[str] = field(default_factory=list)
-    earliest_available_date_by_symbol: dict[str, date | str] = field(default_factory=dict)
+    earliest_available_date_by_symbol: dict[str, date | str] = field(
+        default_factory=dict
+    )
     methodology_notes: list[str] = field(default_factory=list)
     missing_symbol_reasons: dict[str, str] = field(default_factory=dict)
     provider_coverage_summary: dict[str, Any] = field(default_factory=dict)

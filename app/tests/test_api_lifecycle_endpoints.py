@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import unittest
 
-from app.api.routes import check_credit_draw, monitor_loan, originate_credit, pre_trade_check
-from app.api.schemas import DrawCheckRequest, MonitorRequest, OriginateRequest, PreTradeRiskCheckRequest
-from app.main import app
+from app.api.routes import (
+    check_credit_draw,
+    monitor_loan,
+    originate_credit,
+    pre_trade_check,
+)
+from app.api.schemas import (
+    DrawCheckRequest,
+    MonitorRequest,
+    OriginateRequest,
+    PreTradeRiskCheckRequest,
+)
 from app.core.enums import LifecycleDecisionValue, RiskDecision
-
+from app.main import app
 
 BASE_LTV = {
     "cash": 0.95,
@@ -27,7 +36,14 @@ def policy_payload() -> dict:
 
 
 def holdings_payload(quantity: float = 100.0) -> list[dict]:
-    return [{"asset_id": "SPY", "asset_type": "etf", "quantity": quantity, "currency": "USD"}]
+    return [
+        {
+            "asset_id": "SPY",
+            "asset_type": "etf",
+            "quantity": quantity,
+            "currency": "USD",
+        }
+    ]
 
 
 def market_payload() -> dict:
@@ -41,6 +57,7 @@ def market_payload() -> dict:
             "average_dollar_volume": 100_000_000,
             "volatility_30d": 0.15,
             "volatility_90d": 0.15,
+            "timestamp": "2025-01-02T10:00:00+00:00",
             "data_quality_score": 1.0,
             "order_book": {"bids": [{"price": 99.90, "quantity": 10_000}]},
         }
@@ -70,7 +87,11 @@ class LifecycleEndpointTests(unittest.TestCase):
             DrawCheckRequest.model_validate(
                 {
                     "account_ref": "acct_api_draw",
-                    "current_loan": {"principal": 1_000.0, "accrued_interest": 0.0, "fees": 0.0},
+                    "current_loan": {
+                        "principal": 1_000.0,
+                        "accrued_interest": 0.0,
+                        "fees": 0.0,
+                    },
                     "requested_draw_amount": 500.0,
                     "policy": policy_payload(),
                     "holdings": holdings_payload(),
@@ -89,7 +110,11 @@ class LifecycleEndpointTests(unittest.TestCase):
             MonitorRequest.model_validate(
                 {
                     "account_ref": "acct_api_monitor",
-                    "loan": {"principal": 1_000.0, "accrued_interest": 0.0, "fees": 0.0},
+                    "loan": {
+                        "principal": 1_000.0,
+                        "accrued_interest": 0.0,
+                        "fees": 0.0,
+                    },
                     "policy": policy_payload(),
                     "holdings": holdings_payload(),
                     "market_data": market_payload(),
@@ -102,17 +127,27 @@ class LifecycleEndpointTests(unittest.TestCase):
         self.assertEqual(response.result.projected_outstanding_balance, 1_000.0)
         self.assertEqual(response.result.projected_margin_state.value, "safe")
 
-    def test_pre_trade_endpoint_reject_and_reduced_available_credit_contract(self) -> None:
+    def test_pre_trade_endpoint_reject_and_reduced_available_credit_contract(
+        self,
+    ) -> None:
         reject_response = pre_trade_check(
             PreTradeRiskCheckRequest.model_validate(
                 {
                     "account_ref": "acct_api_pretrade_reject",
-                    "loan": {"principal": 1_000.0, "accrued_interest": 0.0, "fees": 0.0},
+                    "loan": {
+                        "principal": 1_000.0,
+                        "accrued_interest": 0.0,
+                        "fees": 0.0,
+                    },
                     "policy": policy_payload(),
                     "holdings": holdings_payload(),
                     "market_data": market_payload(),
                     "actions": [
-                        {"action_type": "withdrawal", "asset_id": "SPY", "quantity": 200.0},
+                        {
+                            "action_type": "withdrawal",
+                            "asset_id": "SPY",
+                            "quantity": 200.0,
+                        },
                     ],
                 }
             )
@@ -124,7 +159,11 @@ class LifecycleEndpointTests(unittest.TestCase):
             PreTradeRiskCheckRequest.model_validate(
                 {
                     "account_ref": "acct_api_pretrade_reduce",
-                    "loan": {"principal": 1_000.0, "accrued_interest": 0.0, "fees": 0.0},
+                    "loan": {
+                        "principal": 1_000.0,
+                        "accrued_interest": 0.0,
+                        "fees": 0.0,
+                    },
                     "policy": policy_payload(),
                     "holdings": holdings_payload(),
                     "market_data": market_payload(),
@@ -134,7 +173,9 @@ class LifecycleEndpointTests(unittest.TestCase):
                 }
             )
         )
-        self.assertEqual(reduce_response.result.decision, RiskDecision.REDUCE_AVAILABLE_CREDIT)
+        self.assertEqual(
+            reduce_response.result.decision, RiskDecision.REDUCE_AVAILABLE_CREDIT
+        )
         self.assertEqual(reduce_response.result.current_outstanding_balance, 1_000.0)
         self.assertEqual(
             reduce_response.result.current_available_credit,
@@ -149,7 +190,11 @@ class LifecycleEndpointTests(unittest.TestCase):
             PreTradeRiskCheckRequest.model_validate(
                 {
                     "account_ref": "acct_api_pretrade_approve",
-                    "loan": {"principal": 1_000.0, "accrued_interest": 0.0, "fees": 0.0},
+                    "loan": {
+                        "principal": 1_000.0,
+                        "accrued_interest": 0.0,
+                        "fees": 0.0,
+                    },
                     "policy": policy_payload(),
                     "holdings": holdings_payload(),
                     "market_data": market_payload(),

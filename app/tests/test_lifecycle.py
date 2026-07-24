@@ -7,7 +7,11 @@ from pathlib import Path
 from app.core.enums import AssetType, LifecycleDecisionValue, MarginState
 from app.core.evaluator import CollateralRiskEngine
 from app.core.models import Holding, Loan, MarketData, OrderBook, OrderBookLevel, Policy
-from app.lifecycle.service import CreditLifecycleEngine, aggregate_holdings, apply_repayment
+from app.lifecycle.service import (
+    CreditLifecycleEngine,
+    aggregate_holdings,
+    apply_repayment,
+)
 from app.risk.math_utils import round_money
 
 MIN_COVERAGE_RATIO = 1e-9
@@ -15,7 +19,9 @@ MIN_COVERAGE_RATIO = 1e-9
 
 class CreditLifecycleEngineTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.lifecycle = CreditLifecycleEngine(CollateralRiskEngine(audit_logger=None), audit_logger=None)
+        self.lifecycle = CreditLifecycleEngine(
+            CollateralRiskEngine(audit_logger=None), audit_logger=None
+        )
         self.policy = Policy.default()
         self.holdings = [Holding("SPY", AssetType.ETF, 100)]
         self.market_data = {
@@ -29,12 +35,16 @@ class CreditLifecycleEngineTests(unittest.TestCase):
                 volatility_30d=0.15,
                 volatility_90d=0.15,
                 data_quality_score=1.0,
-                order_book=OrderBook(bids=[OrderBookLevel(price=99.90, quantity=10_000)]),
+                order_book=OrderBook(
+                    bids=[OrderBookLevel(price=99.90, quantity=10_000)]
+                ),
             )
         }
 
     def test_zero_loan_origination_uses_outstanding_balance_terms(self) -> None:
-        result = self.lifecycle.originate("acct_origin", self.holdings, self.policy, self.market_data)
+        result = self.lifecycle.originate(
+            "acct_origin", self.holdings, self.policy, self.market_data
+        )
         payload = asdict(result)
 
         self.assertEqual(result.decision, LifecycleDecisionValue.APPROVED)
@@ -45,7 +55,10 @@ class CreditLifecycleEngineTests(unittest.TestCase):
             min(
                 result.approved_credit_limit,
                 result.evaluation.stressed_liquidation_value
-                / max(result.evaluation.trigger_levels.dynamic_warning_coverage, MIN_COVERAGE_RATIO),
+                / max(
+                    result.evaluation.trigger_levels.dynamic_warning_coverage,
+                    MIN_COVERAGE_RATIO,
+                ),
             )
         )
         self.assertEqual(result.current_available_credit, safe_credit_limit)
@@ -75,10 +88,16 @@ class CreditLifecycleEngineTests(unittest.TestCase):
             min(
                 result.approved_credit_limit,
                 result.evaluation.stressed_liquidation_value
-                / max(result.evaluation.trigger_levels.dynamic_warning_coverage, MIN_COVERAGE_RATIO),
+                / max(
+                    result.evaluation.trigger_levels.dynamic_warning_coverage,
+                    MIN_COVERAGE_RATIO,
+                ),
             )
         )
-        self.assertEqual(result.projected_available_credit, max(0.0, projected_safe_credit_limit - 2_000.0))
+        self.assertEqual(
+            result.projected_available_credit,
+            max(0.0, projected_safe_credit_limit - 2_000.0),
+        )
         self.assertEqual(result.projected_margin_state, MarginState.SAFE)
         self.assertIsNone(result.max_approved_draw_amount)
 
@@ -93,7 +112,9 @@ class CreditLifecycleEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(result.decision, LifecycleDecisionValue.REJECTED)
-        self.assertEqual(result.reason, "requested draw exceeds projected available credit")
+        self.assertEqual(
+            result.reason, "requested draw exceeds projected available credit"
+        )
         self.assertEqual(result.projected_outstanding_balance, 3_981.88)
         self.assertEqual(result.max_approved_draw_amount, 0.0)
 
@@ -108,7 +129,9 @@ class CreditLifecycleEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(result.decision, LifecycleDecisionValue.PARTIALLY_APPROVED)
-        self.assertEqual(result.reason, "requested draw exceeds projected available credit")
+        self.assertEqual(
+            result.reason, "requested draw exceeds projected available credit"
+        )
         self.assertEqual(result.projected_outstanding_balance, 6_000.0)
         self.assertGreater(result.max_approved_draw_amount or 0.0, 0.0)
         self.assertLess(result.max_approved_draw_amount or 0.0, 5_000.0)
@@ -128,7 +151,9 @@ class CreditLifecycleEngineTests(unittest.TestCase):
         self.assertEqual(result.projected_loan.accrued_interest, 15.0)
         self.assertEqual(result.projected_loan.fees, 0.0)
         self.assertEqual(result.projected_outstanding_balance, 1_015.0)
-        self.assertEqual(apply_repayment(Loan(1_000.0, 50.0, 25.0), 1_200.0), Loan(0.0, 0.0, 0.0))
+        self.assertEqual(
+            apply_repayment(Loan(1_000.0, 50.0, 25.0), 1_200.0), Loan(0.0, 0.0, 0.0)
+        )
 
     def test_duplicate_holdings_are_aggregated_by_stable_asset_identity(self) -> None:
         duplicate_holdings = [
@@ -138,16 +163,33 @@ class CreditLifecycleEngineTests(unittest.TestCase):
         ]
 
         aggregated = aggregate_holdings(duplicate_holdings)
-        result = self.lifecycle.originate("acct_dupes", duplicate_holdings, self.policy, self.market_data)
+        identity_market_data = {
+            holding.stable_key: self.market_data["SPY"]
+            for holding in duplicate_holdings
+        }
+        result = self.lifecycle.originate(
+            "acct_dupes",
+            duplicate_holdings,
+            self.policy,
+            identity_market_data,
+        )
 
         self.assertEqual(len(aggregated), 2)
         self.assertEqual(aggregated[0], Holding("SPY", AssetType.ETF, 100.0, "USD"))
-        self.assertEqual(aggregated[1], Holding("SPY", AssetType.LISTED_EQUITY, 5.0, "USD"))
+        self.assertEqual(
+            aggregated[1], Holding("SPY", AssetType.LISTED_EQUITY, 5.0, "USD")
+        )
         self.assertEqual(len(result.asset_results), 2)
         self.assertEqual(result.asset_results[0].quantity, 100.0)
 
     def test_active_monitoring_safe(self) -> None:
-        result = self.lifecycle.monitor("acct_monitor_safe", Loan(principal=1_000.0), self.holdings, self.policy, self.market_data)
+        result = self.lifecycle.monitor(
+            "acct_monitor_safe",
+            Loan(principal=1_000.0),
+            self.holdings,
+            self.policy,
+            self.market_data,
+        )
 
         self.assertEqual(result.decision, LifecycleDecisionValue.SAFE)
         self.assertEqual(result.margin_state, MarginState.SAFE)
@@ -181,7 +223,10 @@ class CreditLifecycleEngineTests(unittest.TestCase):
         self.assertEqual(result.decision, LifecycleDecisionValue.LIQUIDATION)
         self.assertEqual(result.margin_state, MarginState.LIQUIDATION)
         self.assertGreater(result.required_cure_amount, 0.0)
-        self.assertGreater(result.minimum_stressed_liquidation_value, result.evaluation.stressed_liquidation_value)
+        self.assertGreater(
+            result.minimum_stressed_liquidation_value,
+            result.evaluation.stressed_liquidation_value,
+        )
         self.assertIsNotNone(result.liquidation_plan)
 
     def test_readme_documents_api_contract_terms(self) -> None:

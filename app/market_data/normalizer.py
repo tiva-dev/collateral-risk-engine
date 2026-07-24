@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from app.core.models import MarketData, OrderBook, OrderBookLevel
@@ -26,7 +26,7 @@ class NormalizedMarketData:
     intraday_volatility: float | None = None
     recent_return_1d: float | None = None
     order_book: OrderBook | None = None
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     source: str = "unknown"
     provider_name: str = "unknown"
     exchange: str = "UNKNOWN"
@@ -48,12 +48,18 @@ class NormalizedMarketData:
         return self.instrument.stable_key
 
     def to_market_data(self) -> MarketData:
-        missing_fx = self.local_currency != self.loan_currency and self.fx_rate_used is None
+        missing_fx = (
+            self.local_currency != self.loan_currency and self.fx_rate_used is None
+        )
         return MarketData(
             asset_id=self.instrument.asset_id,
             last_price=self.converted_price,
-            bid=None if missing_fx or self.bid is None else self._convert_value(self.bid),
-            ask=None if missing_fx or self.ask is None else self._convert_value(self.ask),
+            bid=None
+            if missing_fx or self.bid is None
+            else self._convert_value(self.bid),
+            ask=None
+            if missing_fx or self.ask is None
+            else self._convert_value(self.ask),
             average_daily_volume=self.average_daily_volume,
             average_dollar_volume=self.average_dollar_volume,
             volatility_30d=self.volatility_30d,
@@ -62,7 +68,8 @@ class NormalizedMarketData:
             recent_return_1d=self.recent_return_1d,
             timestamp=self.timestamp,
             data_quality_score=clamp_score(self.data_quality_score),
-            halted=self.market_status == MarketStatus.HALTED or "halted" in self.warnings,
+            halted=self.market_status == MarketStatus.HALTED
+            or "halted" in self.warnings,
             order_book=None if missing_fx else self._converted_order_book(),
             metadata={
                 **self.metadata,
@@ -83,7 +90,9 @@ class NormalizedMarketData:
                 "local_price": self.local_price,
                 "fx_rate_used": self.fx_rate_used,
                 "fx_source": self.fx_source,
-                "fx_timestamp": self.fx_timestamp.isoformat() if self.fx_timestamp else None,
+                "fx_timestamp": self.fx_timestamp.isoformat()
+                if self.fx_timestamp
+                else None,
                 "fx_quality_score": self.fx_quality_score,
             },
         )

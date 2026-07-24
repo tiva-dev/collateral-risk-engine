@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, replace
-from typing import Mapping
 
 from app.audit.logger import AuditLogger
 from app.core.enums import (
@@ -30,7 +30,9 @@ from app.lifecycle.models import (
 )
 from app.risk.math_utils import round_money
 from app.version import LIFECYCLE_MODEL_VERSION as APP_LIFECYCLE_MODEL_VERSION
-from app.version import PORTFOLIO_ACTION_MODEL_VERSION as APP_PORTFOLIO_ACTION_MODEL_VERSION
+from app.version import (
+    PORTFOLIO_ACTION_MODEL_VERSION as APP_PORTFOLIO_ACTION_MODEL_VERSION,
+)
 
 LIFECYCLE_MODEL_VERSION = APP_LIFECYCLE_MODEL_VERSION
 PORTFOLIO_ACTION_MODEL_VERSION = APP_PORTFOLIO_ACTION_MODEL_VERSION
@@ -593,7 +595,9 @@ class CreditLifecycleEngine:
                 -quantity,
                 projected_loan.currency,
             )
-            proceeds = self._market_amount(action.asset_id, quantity, market_data)
+            proceeds = self._market_amount(
+                action.asset_id, quantity, market_data, side="sell"
+            )
             if not action.withdraw_proceeds:
                 pledged_cash = round_money(pledged_cash + proceeds)
         elif action.action_type == PortfolioActionType.BUY:
@@ -601,7 +605,9 @@ class CreditLifecycleEngine:
             cost = (
                 self._cash_amount(action, "buy")
                 if action.amount > 0
-                else self._market_amount(action.asset_id, quantity, market_data)
+                else self._market_amount(
+                    action.asset_id, quantity, market_data, side="buy"
+                )
             )
             if cost > pledged_cash + 1e-9:
                 funding_source = (action.funding_source or "").lower()
@@ -674,7 +680,9 @@ class CreditLifecycleEngine:
                 action.asset_id,
                 action.asset_type,
                 delta,
-                self._currency_for_new_asset(action.asset_id, market_data) if delta > 0 else projected_loan.currency,
+                self._currency_for_new_asset(action.asset_id, market_data)
+                if delta > 0
+                else projected_loan.currency,
             )
         elif action.action_type in {
             PortfolioActionType.REPAY,
@@ -690,7 +698,9 @@ class CreditLifecycleEngine:
                 -sell_quantity,
                 projected_loan.currency,
             )
-            proceeds = self._market_amount(action.asset_id, sell_quantity, market_data)
+            proceeds = self._market_amount(
+                action.asset_id, sell_quantity, market_data, side="sell"
+            )
             buy_amount = action.to_amount if action.to_amount > 0 else proceeds
             if buy_amount > proceeds + pledged_cash + 1e-9:
                 raise ValueError(
@@ -708,6 +718,7 @@ class CreditLifecycleEngine:
                     buy_amount,
                     market_data,
                     "rebalance",
+                    side="buy",
                 )
             )
             self._add_holding_delta(
@@ -798,7 +809,8 @@ class CreditLifecycleEngine:
         candidates = [
             key
             for key in holdings
-            if key[0] == asset_id.upper() and (asset_type is None or key[3] == asset_type)
+            if key[0] == asset_id.upper()
+            and (asset_type is None or key[3] == asset_type)
         ]
         if len(candidates) > 1:
             raise ValueError(
@@ -826,7 +838,6 @@ class CreditLifecycleEngine:
             current, quantity=max(0.0, new_quantity)
         )
 
-
     def _validated_new_asset_currency(self, asset_id: str, currency: str | None) -> str:
         if not currency:
             raise ValueError(
@@ -840,8 +851,10 @@ class CreditLifecycleEngine:
         if not asset_id:
             return None
         market = market_data.get(asset_id)
-        instrument = (market.metadata.get("instrument", {}) if market else {})
-        currency = instrument.get("currency") or (market.metadata.get("currency") if market else None)
+        instrument = market.metadata.get("instrument", {}) if market else {}
+        currency = instrument.get("currency") or (
+            market.metadata.get("currency") if market else None
+        )
         if currency:
             return str(currency).upper()
         if market is not None and not market.metadata:
@@ -861,7 +874,11 @@ class CreditLifecycleEngine:
                 f"{action.action_type.value} action requires positive quantity or amount"
             )
         return self._quantity_from_amount(
-            action.asset_id, action.amount, market_data, action.action_type.value
+            action.asset_id,
+            action.amount,
+            market_data,
+            action.action_type.value,
+            side="buy" if action.action_type == PortfolioActionType.BUY else "sell",
         )
 
     def _quantity_from_amount(
@@ -870,24 +887,37 @@ class CreditLifecycleEngine:
         amount: float,
         market_data: Mapping[str, MarketData],
         action_label: str,
+        side: str,
     ) -> float:
         market = market_data.get(asset_id or "")
-        if market is None or market.last_price <= 0:
+        if market is None:
             raise ValueError(
-                f"{action_label} action with amount requires positive market price"
+                f"{action_label} action with amount requires executable market data"
             )
-        return amount / market.last_price
+        return amount / self._execution_price(market, side)
 
     def _market_amount(
         self,
         asset_id: str | None,
         quantity: float,
         market_data: Mapping[str, MarketData],
+        side: str,
     ) -> float:
         market = market_data.get(asset_id or "")
-        if market is None or market.last_price <= 0:
-            raise ValueError("security action requires positive market price")
-        return round_money(quantity * market.last_price)
+        if market is None:
+            raise ValueError("security action requires executable market data")
+        return round_money(quantity * self._execution_price(market, side))
+
+    @staticmethod
+    def _execution_price(market: MarketData, side: str) -> float:
+        price = (
+            market.ask or market.last_price * 1.02
+            if side == "buy"
+            else market.bid or market.last_price * 0.98
+        )
+        if price <= 0:
+            raise ValueError("security action requires a positive executable price")
+        return price
 
     def _cash_amount(self, action: PortfolioActionCheck, label: str) -> float:
         amount = action.amount if action.amount > 0 else action.quantity
@@ -1060,8 +1090,7 @@ def aggregate_holdings(holdings: list[Holding]) -> list[Holding]:
             order.append(key)
         aggregated[key] += holding.quantity
     return [
-        replace(originals[key], quantity=round(aggregated[key], 12))
-        for key in order
+        replace(originals[key], quantity=round(aggregated[key], 12)) for key in order
     ]
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from threading import RLock
 
 from app.market_data.identity import InstrumentIdentity
@@ -26,7 +26,13 @@ class MarketDataCache(ABC):
     """
 
     @abstractmethod
-    def merge(self, quotes: dict[str, RawQuote], fx_rates: dict[tuple[str, str], FXRate], source: str, received_at: datetime | None = None) -> CachedMarketData: ...
+    def merge(
+        self,
+        quotes: dict[str, RawQuote],
+        fx_rates: dict[tuple[str, str], FXRate],
+        source: str,
+        received_at: datetime | None = None,
+    ) -> CachedMarketData: ...
 
     @abstractmethod
     def is_symbol_ambiguous(self, symbol: str) -> bool: ...
@@ -41,7 +47,7 @@ class MarketDataCache(ABC):
 class CachedMarketDataProvider(BaseProvider):
     provider_name = "monitoring_market_data_cache"
 
-    def __init__(self, cache: "InMemoryMarketDataCache") -> None:
+    def __init__(self, cache: InMemoryMarketDataCache) -> None:
         self.cache = cache
 
     def get_quote(self, instrument: InstrumentIdentity) -> RawQuote | None:
@@ -52,7 +58,9 @@ class CachedMarketDataProvider(BaseProvider):
         for key in keys:
             if key in data.quotes:
                 quote = data.quotes[key]
-                return replace(quote, instrument=instrument, provider_name=self.provider_name)
+                return replace(
+                    quote, instrument=instrument, provider_name=self.provider_name
+                )
         return None
 
     def get_fx_rate(self, from_currency: str, to_currency: str) -> FXRate | None:
@@ -64,8 +72,14 @@ class CachedMarketDataProvider(BaseProvider):
         if inverse in data.fx_rates and data.fx_rates[inverse].rate > 0:
             source = data.fx_rates[inverse]
             return FXRate(
-                pair[0], pair[1], 1.0 / source.rate, source.timestamp, source.source,
-                self.provider_name, source.quality_score, [*source.warnings, "fx_rate_inverted"]
+                pair[0],
+                pair[1],
+                1.0 / source.rate,
+                source.timestamp,
+                source.source,
+                self.provider_name,
+                source.quality_score,
+                [*source.warnings, "fx_rate_inverted"],
             )
         return None
 
@@ -80,17 +94,31 @@ class InMemoryMarketDataCache(MarketDataCache):
         self._provider = CachedMarketDataProvider(self)
         self._symbol_to_stable_keys: dict[str, set[str]] = {}
 
-    def merge(self, quotes: dict[str, RawQuote], fx_rates: dict[tuple[str, str], FXRate], source: str, received_at: datetime | None = None) -> CachedMarketData:
+    def merge(
+        self,
+        quotes: dict[str, RawQuote],
+        fx_rates: dict[tuple[str, str], FXRate],
+        source: str,
+        received_at: datetime | None = None,
+    ) -> CachedMarketData:
         with self._lock:
             for key, quote in quotes.items():
                 symbol = quote.instrument.symbol.upper()
-                self._symbol_to_stable_keys.setdefault(symbol, set()).add(quote.instrument.stable_key.upper())
+                self._symbol_to_stable_keys.setdefault(symbol, set()).add(
+                    quote.instrument.stable_key.upper()
+                )
                 ambiguous = len(self._symbol_to_stable_keys[symbol]) > 1
-                keys = {quote.instrument.asset_id, quote.instrument.asset_id.upper(), quote.instrument.stable_key}
+                keys = {
+                    quote.instrument.asset_id,
+                    quote.instrument.asset_id.upper(),
+                    quote.instrument.stable_key,
+                }
                 if not ambiguous or key.upper() != symbol:
                     keys.add(key)
                 if not ambiguous:
-                    keys.update({quote.instrument.symbol, quote.instrument.symbol.upper()})
+                    keys.update(
+                        {quote.instrument.symbol, quote.instrument.symbol.upper()}
+                    )
                 else:
                     self._data.quotes.pop(quote.instrument.symbol, None)
                     self._data.quotes.pop(quote.instrument.symbol.upper(), None)
@@ -99,7 +127,7 @@ class InMemoryMarketDataCache(MarketDataCache):
             for (src, dst), rate in fx_rates.items():
                 self._data.fx_rates[(src.upper(), dst.upper())] = rate
             self._data.source = source
-            self._data.latest_update_time = received_at or datetime.now(timezone.utc)
+            self._data.latest_update_time = received_at or datetime.now(UTC)
             return self.snapshot()
 
     def is_symbol_ambiguous(self, symbol: str) -> bool:
@@ -111,4 +139,9 @@ class InMemoryMarketDataCache(MarketDataCache):
 
     def snapshot(self) -> CachedMarketData:
         with self._lock:
-            return CachedMarketData(dict(self._data.quotes), dict(self._data.fx_rates), self._data.latest_update_time, self._data.source)
+            return CachedMarketData(
+                dict(self._data.quotes),
+                dict(self._data.fx_rates),
+                self._data.latest_update_time,
+                self._data.source,
+            )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Protocol
 
@@ -30,7 +30,7 @@ class RawQuote:
     intraday_volatility: float | None = None
     recent_return_1d: float | None = None
     order_book: OrderBook | None = None
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     source: str = "provided_by_us"
     provider_name: str = "unknown"
     data_quality_score: float = 1.0
@@ -48,6 +48,8 @@ class RawQuote:
             raise ValueError("raw quote bid must be less than or equal to ask")
         if not 0 <= self.data_quality_score <= 1:
             raise ValueError("raw quote data_quality_score must be between 0 and 1")
+        if self.timestamp.tzinfo is None:
+            raise ValueError("raw quote timestamp must be timezone-aware")
 
 
 @dataclass(frozen=True)
@@ -55,7 +57,7 @@ class FXRate:
     from_currency: str
     to_currency: str
     rate: float
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     source: str = "provided_by_us"
     provider_name: str = "unknown"
     quality_score: float = 1.0
@@ -66,6 +68,8 @@ class FXRate:
             raise ValueError("FX rate must be greater than 0")
         if not 0 <= self.quality_score <= 1:
             raise ValueError("FX quality_score must be between 0 and 1")
+        if self.timestamp.tzinfo is None:
+            raise ValueError("FX timestamp must be timezone-aware")
 
 
 class MarketDataProvider(Protocol):
@@ -73,7 +77,9 @@ class MarketDataProvider(Protocol):
 
     def get_quote(self, instrument: InstrumentIdentity) -> RawQuote | None: ...
 
-    def get_quotes(self, instruments: list[InstrumentIdentity]) -> dict[str, RawQuote]: ...
+    def get_quotes(
+        self, instruments: list[InstrumentIdentity]
+    ) -> dict[str, RawQuote]: ...
 
     def get_fx_rate(self, from_currency: str, to_currency: str) -> FXRate | None: ...
 
@@ -117,9 +123,12 @@ class ClientSuppliedProvider(BaseProvider):
     ) -> None:
         self.quotes = quotes or {}
         self.fx_rates = {
-            (src.upper(), dst.upper()): rate for (src, dst), rate in (fx_rates or {}).items()
+            (src.upper(), dst.upper()): rate
+            for (src, dst), rate in (fx_rates or {}).items()
         }
-        self.market_statuses = {k.upper(): v for k, v in (market_statuses or {}).items()}
+        self.market_statuses = {
+            k.upper(): v for k, v in (market_statuses or {}).items()
+        }
 
     def _quote_keys(self, instrument: InstrumentIdentity) -> list[str]:
         return [instrument.asset_id, instrument.stable_key, instrument.symbol]
@@ -139,7 +148,9 @@ class ClientSuppliedProvider(BaseProvider):
         pair = (from_currency.upper(), to_currency.upper())
         if pair in self.fx_rates:
             rate = self.fx_rates[pair]
-            return replace(rate, source="client_supplied", provider_name=self.provider_name)
+            return replace(
+                rate, source="client_supplied", provider_name=self.provider_name
+            )
         inverse = (to_currency.upper(), from_currency.upper())
         if inverse in self.fx_rates and self.fx_rates[inverse].rate > 0:
             source_rate = self.fx_rates[inverse]
@@ -179,7 +190,12 @@ class MockEquityProvider(BaseProvider):
         }
 
     def get_quote(self, instrument: InstrumentIdentity) -> RawQuote | None:
-        for key in (instrument.stable_key, f"{instrument.exchange.upper()}:{instrument.symbol.upper()}:{instrument.currency.upper()}", instrument.asset_id, instrument.symbol):
+        for key in (
+            instrument.stable_key,
+            f"{instrument.exchange.upper()}:{instrument.symbol.upper()}:{instrument.currency.upper()}",
+            instrument.asset_id,
+            instrument.symbol,
+        ):
             if key in self.quotes:
                 return replace(
                     self.quotes[key],
@@ -197,23 +213,39 @@ class MockFXProvider(BaseProvider):
     provider_name = "mock_fx_provider"
 
     def __init__(self, rates: dict[tuple[str, str], FXRate] | None = None) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         defaults = {
-            ("NGN", "USD"): FXRate("NGN", "USD", 0.00067, now, "provided_by_us", self.provider_name, 0.95),
-            ("EUR", "USD"): FXRate("EUR", "USD", 1.08, now, "provided_by_us", self.provider_name, 0.97),
-            ("JPY", "USD"): FXRate("JPY", "USD", 0.0065, now, "provided_by_us", self.provider_name, 0.96),
-            ("GBP", "USD"): FXRate("GBP", "USD", 1.25, now, "provided_by_us", self.provider_name, 0.97),
-            ("USD", "NGN"): FXRate("USD", "NGN", 1492.0, now, "provided_by_us", self.provider_name, 0.94),
+            ("NGN", "USD"): FXRate(
+                "NGN", "USD", 0.00067, now, "provided_by_us", self.provider_name, 0.95
+            ),
+            ("EUR", "USD"): FXRate(
+                "EUR", "USD", 1.08, now, "provided_by_us", self.provider_name, 0.97
+            ),
+            ("JPY", "USD"): FXRate(
+                "JPY", "USD", 0.0065, now, "provided_by_us", self.provider_name, 0.96
+            ),
+            ("GBP", "USD"): FXRate(
+                "GBP", "USD", 1.25, now, "provided_by_us", self.provider_name, 0.97
+            ),
+            ("USD", "NGN"): FXRate(
+                "USD", "NGN", 1492.0, now, "provided_by_us", self.provider_name, 0.94
+            ),
         }
         self.rates = {**defaults, **(rates or {})}
-        self.rates = {(src.upper(), dst.upper()): rate for (src, dst), rate in self.rates.items()}
+        self.rates = {
+            (src.upper(), dst.upper()): rate for (src, dst), rate in self.rates.items()
+        }
 
     def get_fx_rate(self, from_currency: str, to_currency: str) -> FXRate | None:
         src, dst = from_currency.upper(), to_currency.upper()
         if src == dst:
             return FXRate(src, dst, 1.0, provider_name=self.provider_name)
         if (src, dst) in self.rates:
-            return replace(self.rates[(src, dst)], source="provided_by_us", provider_name=self.provider_name)
+            return replace(
+                self.rates[(src, dst)],
+                source="provided_by_us",
+                provider_name=self.provider_name,
+            )
         if (dst, src) in self.rates and self.rates[(dst, src)].rate > 0:
             rate = self.rates[(dst, src)]
             return FXRate(
@@ -230,15 +262,101 @@ class MockFXProvider(BaseProvider):
 
 
 def default_mock_quotes() -> dict[str, RawQuote]:
-    now = datetime.now(timezone.utc)
-    def inst(asset_id: str, symbol: str, exchange: str, currency: str, asset_type: AssetType = AssetType.LISTED_EQUITY) -> InstrumentIdentity:
+    now = datetime.now(UTC)
+
+    def inst(
+        asset_id: str,
+        symbol: str,
+        exchange: str,
+        currency: str,
+        asset_type: AssetType = AssetType.LISTED_EQUITY,
+    ) -> InstrumentIdentity:
         return InstrumentIdentity(asset_id, symbol, exchange, currency, asset_type)
 
     return {
-        "NASDAQ:AAPL:USD": RawQuote(inst("AAPL", "AAPL", "NASDAQ", "USD"), 190.0, 189.98, 190.02, 60_000_000, 11_400_000_000, 0.28, 0.31, recent_return_1d=-0.012, timestamp=now, provider_name="mock_equity_provider", data_quality_score=0.99),
-        "NASDAQ:NVDA:USD": RawQuote(inst("NVDA", "NVDA", "NASDAQ", "USD", AssetType.HIGH_VOLATILITY_EQUITY), 900.0, 899.5, 900.5, 45_000_000, 40_500_000_000, 0.72, 0.68, 0.85, -0.055, timestamp=now, provider_name="mock_equity_provider", data_quality_score=0.98),
-        "NYSE:SPY:USD": RawQuote(inst("SPY", "SPY", "NYSE", "USD", AssetType.ETF), 520.0, 519.99, 520.01, 75_000_000, 39_000_000_000, 0.18, 0.20, recent_return_1d=-0.004, timestamp=now, provider_name="mock_equity_provider", data_quality_score=0.99),
-        "NGX:MTNN:NGN": RawQuote(inst("MTNN", "MTNN", "NGX", "NGN"), 275.0, 274.0, 276.0, 5_000_000, 1_375_000_000, 0.34, 0.38, recent_return_1d=0.006, timestamp=now, provider_name="mock_equity_provider", data_quality_score=0.93),
-        "XPAR:AIR:EUR": RawQuote(inst("AIR", "AIR", "XPAR", "EUR"), 155.0, 154.9, 155.1, 2_300_000, 356_500_000, 0.24, 0.27, recent_return_1d=-0.003, timestamp=now, provider_name="mock_equity_provider", data_quality_score=0.94),
-        "XTKS:7203:JPY": RawQuote(inst("7203", "7203", "XTKS", "JPY"), 3300.0, 3298.0, 3302.0, 20_000_000, 66_000_000_000, 0.26, 0.30, recent_return_1d=0.002, timestamp=now, provider_name="mock_equity_provider", data_quality_score=0.94),
+        "NASDAQ:AAPL:USD": RawQuote(
+            inst("AAPL", "AAPL", "NASDAQ", "USD"),
+            190.0,
+            189.98,
+            190.02,
+            60_000_000,
+            11_400_000_000,
+            0.28,
+            0.31,
+            recent_return_1d=-0.012,
+            timestamp=now,
+            provider_name="mock_equity_provider",
+            data_quality_score=0.99,
+        ),
+        "NASDAQ:NVDA:USD": RawQuote(
+            inst("NVDA", "NVDA", "NASDAQ", "USD", AssetType.HIGH_VOLATILITY_EQUITY),
+            900.0,
+            899.5,
+            900.5,
+            45_000_000,
+            40_500_000_000,
+            0.72,
+            0.68,
+            0.85,
+            -0.055,
+            timestamp=now,
+            provider_name="mock_equity_provider",
+            data_quality_score=0.98,
+        ),
+        "NYSE:SPY:USD": RawQuote(
+            inst("SPY", "SPY", "NYSE", "USD", AssetType.ETF),
+            520.0,
+            519.99,
+            520.01,
+            75_000_000,
+            39_000_000_000,
+            0.18,
+            0.20,
+            recent_return_1d=-0.004,
+            timestamp=now,
+            provider_name="mock_equity_provider",
+            data_quality_score=0.99,
+        ),
+        "NGX:MTNN:NGN": RawQuote(
+            inst("MTNN", "MTNN", "NGX", "NGN"),
+            275.0,
+            274.0,
+            276.0,
+            5_000_000,
+            1_375_000_000,
+            0.34,
+            0.38,
+            recent_return_1d=0.006,
+            timestamp=now,
+            provider_name="mock_equity_provider",
+            data_quality_score=0.93,
+        ),
+        "XPAR:AIR:EUR": RawQuote(
+            inst("AIR", "AIR", "XPAR", "EUR"),
+            155.0,
+            154.9,
+            155.1,
+            2_300_000,
+            356_500_000,
+            0.24,
+            0.27,
+            recent_return_1d=-0.003,
+            timestamp=now,
+            provider_name="mock_equity_provider",
+            data_quality_score=0.94,
+        ),
+        "XTKS:7203:JPY": RawQuote(
+            inst("7203", "7203", "XTKS", "JPY"),
+            3300.0,
+            3298.0,
+            3302.0,
+            20_000_000,
+            66_000_000_000,
+            0.26,
+            0.30,
+            recent_return_1d=0.002,
+            timestamp=now,
+            provider_name="mock_equity_provider",
+            data_quality_score=0.94,
+        ),
     }

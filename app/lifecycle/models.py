@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.core.enums import LifecycleDecisionValue, MarginState, RiskDecision
 from app.core.models import Holding, Loan, PortfolioEvaluation
@@ -79,4 +79,4 @@ class PreTradeCheckResult:
 
 
 def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)

@@ -14,7 +14,9 @@ def main() -> None:
     provider = MockMarketDataProvider()
     holdings = [
         Holding(asset_id="AAPL", asset_type=AssetType.LISTED_EQUITY, quantity=10),
-        Holding(asset_id="NVDA", asset_type=AssetType.HIGH_VOLATILITY_EQUITY, quantity=3),
+        Holding(
+            asset_id="NVDA", asset_type=AssetType.HIGH_VOLATILITY_EQUITY, quantity=3
+        ),
         Holding(asset_id="SPY", asset_type=AssetType.ETF, quantity=4),
     ]
     market = provider.get_snapshot([h.asset_id for h in holdings])
@@ -26,7 +28,9 @@ def main() -> None:
         max_participation_rate=0.10,
     )
     loan = Loan(principal=2_100, accrued_interest=15)
-    engine = CollateralRiskEngine(audit_logger=AuditLogger("./data/audit/example_audit_log.jsonl"))
+    engine = CollateralRiskEngine(
+        audit_logger=AuditLogger("./data/audit/example_audit_log.jsonl")
+    )
     result = engine.evaluate("acct_demo_001", holdings, loan, policy, market)
     print(json.dumps(asdict(result), indent=2, default=str))
 

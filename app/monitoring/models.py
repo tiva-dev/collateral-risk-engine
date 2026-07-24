@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any
 
 from app.core.enums import DataMode, MarginState
 from app.core.models import Holding, Loan, Policy
@@ -12,7 +13,7 @@ from app.market_data.providers import FXRate, RawQuote
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class MonitoringStatus(str, Enum):
@@ -58,7 +59,9 @@ class MonitoredAccount:
     data_mode: DataMode
     market_data_policy: MarketDataPolicy
     client_supplied_quotes: dict[str, RawQuote] = field(default_factory=dict)
-    client_supplied_fx_rates: dict[tuple[str, str], FXRate] = field(default_factory=dict)
+    client_supplied_fx_rates: dict[tuple[str, str], FXRate] = field(
+        default_factory=dict
+    )
     monitoring_status: MonitoringStatus = MonitoringStatus.ACTIVE
     last_evaluation: Mapping[str, Any] | None = None
     last_margin_state: MarginState | None = None

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
-from typing import Mapping
+from datetime import UTC, datetime
 
 from app.audit.logger import AuditLogger
 from app.core.enums import (
@@ -31,7 +31,6 @@ from app.liquidation.plan import (
 from app.liquidation.recovery import estimate_stressed_recovery
 from app.risk.adjustments import all_adjustments, risk_drivers_from_breakdown
 from app.risk.math_utils import clamp, round_money
-
 from app.version import RISK_MODEL_VERSION
 
 MODEL_VERSION = RISK_MODEL_VERSION
@@ -63,13 +62,14 @@ class CollateralRiskEngine:
             raise RiskEvaluationError("requested_draw_amount cannot be negative")
 
         holdings = self._aggregate_holdings(holdings)
+        market_by_holding = self._resolve_market_data(holdings, market_data)
         outstanding_balance = loan.balance
         requested_draw_amount = max(0.0, requested_draw_amount)
         projected_loan_balance = outstanding_balance + requested_draw_amount
 
         portfolio_market_value = 0.0
         for holding in holdings:
-            market = market_data.get(holding.asset_id)
+            market = market_by_holding.get(holding.stable_identity)
             if market is None:
                 continue
             portfolio_market_value += max(0.0, holding.quantity) * max(
@@ -83,7 +83,7 @@ class CollateralRiskEngine:
 
         asset_results: list[AssetRiskResult] = []
         for holding in holdings:
-            market = market_data.get(holding.asset_id)
+            market = market_by_holding.get(holding.stable_identity)
             if market is None:
                 asset_results.append(self._missing_market_result(holding))
                 continue
@@ -210,7 +210,7 @@ class CollateralRiskEngine:
             liquidation_plan=liquidation_plan,
             audit_id=audit_id,
             model_version=MODEL_VERSION,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
     def pre_trade_check(
@@ -274,7 +274,7 @@ class CollateralRiskEngine:
                 projected_margin_state=projected_evaluation.margin_state,
                 projected_holdings=holdings,
                 projected_evaluation=projected_evaluation,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
 
         post_repayment_outstanding = max(0.0, outstanding_balance - repayment_amount)
@@ -315,7 +315,7 @@ class CollateralRiskEngine:
             projected_margin_state=projected_evaluation.margin_state,
             projected_holdings=projected_holdings,
             projected_evaluation=projected_evaluation,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
     def _project_actions(
@@ -427,8 +427,10 @@ class CollateralRiskEngine:
 
         return list(projected.values()), requested_draw_amount, repayment_amount
 
-    def _holding_identity(self, holding: Holding) -> tuple[str, AssetType, str]:
-        return (holding.asset_id, holding.asset_type, holding.currency)
+    def _holding_identity(
+        self, holding: Holding
+    ) -> tuple[str, str, str, AssetType, str]:
+        return holding.stable_identity
 
     def _action_market_amount(
         self,
@@ -439,11 +441,12 @@ class CollateralRiskEngine:
         if action.amount > 0:
             return action.amount
         market = market_data.get(action.asset_id or "")
-        if market is None or market.last_price <= 0:
+        if market is None:
             raise RiskEvaluationError(
-                f"{action.action_type.value} action requires positive market price"
+                f"{action.action_type.value} action requires executable market data"
             )
-        return quantity * market.last_price
+        price = self._execution_price(market, action.action_type)
+        return quantity * price
 
     def _asset_quantity(
         self,
@@ -458,11 +461,25 @@ class CollateralRiskEngine:
             )
 
         market = market_data.get(action.asset_id or "")
-        if market is None or market.last_price <= 0:
+        if market is None:
             raise RiskEvaluationError(
-                f"{action.action_type.value} action with amount requires positive market price"
+                f"{action.action_type.value} action with amount requires executable market data"
             )
-        return action.amount / market.last_price
+        price = self._execution_price(market, action.action_type)
+        return action.amount / price
+
+    @staticmethod
+    def _execution_price(market: MarketData, action_type: PortfolioActionType) -> float:
+        """Use an executable side, with a conservative proxy if the side is absent."""
+        if action_type == PortfolioActionType.BUY:
+            price = market.ask or market.last_price * 1.02
+        else:
+            price = market.bid or market.last_price * 0.98
+        if price <= 0:
+            raise RiskEvaluationError(
+                "security action requires a positive executable price"
+            )
+        return price
 
     def _cash_amount(self, action: PortfolioAction, label: str) -> float:
         amount = action.amount if action.amount > 0 else action.quantity
@@ -577,6 +594,14 @@ class CollateralRiskEngine:
         recovery = estimate_stressed_recovery(
             holding, market, policy, raw, market_value
         )
+        if not eligible:
+            recovery = replace(
+                recovery,
+                stressed_liquidation_value=0.0,
+                estimated_slippage_rate=1.0,
+                per_unit_stressed_recovery=0.0,
+                method="ineligible_asset_zero_recovery",
+            )
         drivers = risk_drivers_from_breakdown(breakdown)
         notes: list[str] = []
         if not eligible:
@@ -714,6 +739,31 @@ class CollateralRiskEngine:
                 else replace(prior, quantity=prior.quantity + holding.quantity)
             )
         return list(aggregated.values())
+
+    @staticmethod
+    def _resolve_market_data(
+        holdings: list[Holding], market_data: Mapping[str, MarketData]
+    ) -> dict[tuple[str, str, str, AssetType, str], MarketData]:
+        """Resolve stable-keyed data and reject ambiguous legacy asset-id maps."""
+        identities_by_asset: dict[str, set[tuple[str, str, str, AssetType, str]]] = {}
+        for holding in holdings:
+            identities_by_asset.setdefault(holding.asset_id.upper(), set()).add(
+                holding.stable_identity
+            )
+
+        resolved: dict[tuple[str, str, str, AssetType, str], MarketData] = {}
+        for holding in holdings:
+            market = market_data.get(holding.stable_key)
+            if market is None:
+                legacy = market_data.get(holding.asset_id)
+                if (
+                    legacy is not None
+                    and len(identities_by_asset[holding.asset_id.upper()]) == 1
+                ):
+                    market = legacy
+            if market is not None:
+                resolved[holding.stable_identity] = market
+        return resolved
 
     def _margin_state(
         self,

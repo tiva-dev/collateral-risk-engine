@@ -23,6 +23,17 @@ Ineligible, halted, missing-FX, or unusable market-data positions have zero borr
 | Empty/error provider data entered normalized cache | Fetches reject empty covered series before normalized writes | provider parser/cache tests |
 | Replay called a limit breach a collateral shortfall | Persisted obligation components, limit breach, recovery economics, provenance, plans, and transitions | replay and metric tests |
 | Placeholder unavailable metrics became 0/1 | Structured `available:false` values with reason and blocking status | metric recomputation/QA tests |
+| Policies shared one origination exposure | Separate common-exposure and policy-origination regimes, each explicitly labelled | `test_comparison_regimes_use_distinct_origination_paths` and evidence QA |
+| Replay repeated zero returns and treated daily volume as ADV | Update histories only on new observations; use rolling volume and carry-forward age markers | replay regression suite |
+| Synthetic depth appeared as observed execution evidence | Official replay uses historical spread/volume proxies and no synthetic order book | replay record provenance and evidence methodology |
+| NGN FX stress was directionally inconsistent | Apply devaluation after pair orientation in both direct and inverse directions | `test_ngn_devaluation_is_directionally_consistent` |
+| Evidence omitted raw records and did not fail closed | Save full replay results, checksum every artifact, independently recompute metrics, and make QA failure nonzero | `test_mocked_provider_to_evidence_qa_and_calibration` |
+| Runtime constructors defaulted to mock providers | Default provider routing uses `MissingProvider`; mocks require explicit test injection | runtime API and aggregation tests |
+| Portfolio actions used last price | Buys use ask and sells use bid, with conservative side-specific fallback | portfolio action control tests |
+
+## Local acceptance gates
+
+The non-live recovery gate requires the full unit suite, Ruff, mypy, Bandit with no medium/high findings, dependency audit, byte-code compilation, and package build. The provider integration suite remains opt-in. The mocked end-to-end test covers provider response → checksummed cache → dataset manifest → both replay regimes → complete records → metrics → evidence → QA → calibration diagnostics.
 
 ## Live provider evidence status
 

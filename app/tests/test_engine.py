@@ -300,17 +300,16 @@ class CollateralRiskEngineTests(unittest.TestCase):
             Holding("CASHX", AssetType.CASH, 100.0, "USD"),
             Holding("CASHX", AssetType.CASH, 200.0, "EUR"),
         ]
-        market = {
-            "CASHX": MarketData(
-                asset_id="CASHX",
-                last_price=1.0,
-                bid=1.0,
-                ask=1.0,
-                volatility_30d=0.0,
-                volatility_90d=0.0,
-                data_quality_score=1.0,
-            )
-        }
+        cash_market = MarketData(
+            asset_id="CASHX",
+            last_price=1.0,
+            bid=1.0,
+            ask=1.0,
+            volatility_30d=0.0,
+            volatility_90d=0.0,
+            data_quality_score=1.0,
+        )
+        market = {holding.stable_key: cash_market for holding in holdings}
         result = self.engine.pre_trade_check(
             account_ref="acct_legacy_identity",
             holdings=holdings,

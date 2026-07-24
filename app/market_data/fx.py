@@ -16,7 +16,9 @@ class FXDecision:
     missing_required_fx: bool = False
 
 
-def score_fx_rate(rate: FXRate, policy: FXPolicy, now: datetime | None = None) -> tuple[float, list[str]]:
+def score_fx_rate(
+    rate: FXRate, policy: FXPolicy, now: datetime | None = None
+) -> tuple[float, list[str]]:
     warnings = list(rate.warnings)
     quality = clamp_score(rate.quality_score)
     if age_minutes(rate.timestamp, now) > policy.max_fx_age_minutes:
@@ -28,7 +30,11 @@ def score_fx_rate(rate: FXRate, policy: FXPolicy, now: datetime | None = None) -
 
 
 class FXSelector:
-    def __init__(self, client_provider: MarketDataProvider | None, provider: MarketDataProvider | None) -> None:
+    def __init__(
+        self,
+        client_provider: MarketDataProvider | None,
+        provider: MarketDataProvider | None,
+    ) -> None:
         self.client_provider = client_provider
         self.provider = provider
 
@@ -44,19 +50,38 @@ class FXSelector:
     ) -> FXDecision:
         src, dst = from_currency.upper(), to_currency.upper()
         if src == dst:
-            return FXDecision(FXRate(src, dst, 1.0, now or utc_now(), "not_required", "not_required", 1.0), 1.0)
+            return FXDecision(
+                FXRate(
+                    src, dst, 1.0, now or utc_now(), "not_required", "not_required", 1.0
+                ),
+                1.0,
+            )
 
         candidates: list[tuple[str, FXRate, float, list[str]]] = []
         if allow_client and self.client_provider:
             client_rate = self.client_provider.get_fx_rate(src, dst)
             if client_rate:
                 quality, warnings = score_fx_rate(client_rate, policy, now)
-                candidates.append(("client", replace(client_rate, warnings=warnings), quality, warnings))
+                candidates.append(
+                    (
+                        "client",
+                        replace(client_rate, warnings=warnings),
+                        quality,
+                        warnings,
+                    )
+                )
         if allow_provider and self.provider:
             provider_rate = self.provider.get_fx_rate(src, dst)
             if provider_rate:
                 quality, warnings = score_fx_rate(provider_rate, policy, now)
-                candidates.append(("provider", replace(provider_rate, warnings=warnings), quality, warnings))
+                candidates.append(
+                    (
+                        "provider",
+                        replace(provider_rate, warnings=warnings),
+                        quality,
+                        warnings,
+                    )
+                )
 
         if not candidates:
             return FXDecision(None, 0.05, ["missing_required_fx"], True)
@@ -67,7 +92,9 @@ class FXSelector:
                 # For long-only collateral, the lower direct conversion rate produces lower collateral value.
                 selected = min(usable, key=lambda candidate: candidate[1].rate)
                 warnings = [*selected[3], "conservative_fx_rate_selected"]
-                return FXDecision(replace(selected[1], warnings=warnings), selected[2], warnings)
+                return FXDecision(
+                    replace(selected[1], warnings=warnings), selected[2], warnings
+                )
             warnings: list[str] = []
             for _, _, _, candidate_warnings in candidates:
                 warnings.extend(candidate_warnings)
@@ -77,13 +104,22 @@ class FXSelector:
 
         preferred_client = policy.preferred_source == "client"
         if preferred_client and policy.allow_fallback_provider:
-            client_stale = any(candidate[0] == "client" and "stale_fx" in candidate[3] for candidate in candidates)
+            client_stale = any(
+                candidate[0] == "client" and "stale_fx" in candidate[3]
+                for candidate in candidates
+            )
             if client_stale:
                 for candidate in usable:
                     if candidate[0] == "provider":
                         warnings = [*candidate[3], "fallback_provider_fx_used"]
-                        return FXDecision(replace(candidate[1], warnings=warnings), candidate[2], warnings)
-        ordered_sources = ["client", "provider"] if preferred_client else ["provider", "client"]
+                        return FXDecision(
+                            replace(candidate[1], warnings=warnings),
+                            candidate[2],
+                            warnings,
+                        )
+        ordered_sources = (
+            ["client", "provider"] if preferred_client else ["provider", "client"]
+        )
         for source in ordered_sources:
             for candidate in usable:
                 if candidate[0] == source:

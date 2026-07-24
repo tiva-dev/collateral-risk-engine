@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-
 from pathlib import Path
 
 from app.api.routes import check_portfolio_action
 from app.api.schemas import PortfolioActionCheckRequest
+from app.audit.logger import AuditLogger
 from app.core.enums import AssetType, MarginState, PortfolioActionType, RiskDecision
 from app.core.evaluator import CollateralRiskEngine
 from app.core.models import (
@@ -18,7 +18,6 @@ from app.core.models import (
     Policy,
     PortfolioActionCheck,
 )
-from app.audit.logger import AuditLogger
 from app.lifecycle.service import CreditLifecycleEngine, pledged_cash_asset_id
 
 
@@ -92,7 +91,7 @@ class PortfolioActionControlsTests(unittest.TestCase):
 
         self.assertEqual(result.decision, RiskDecision.APPROVE)
         self.assertEqual(result.projected_margin_state, MarginState.SAFE)
-        self.assertEqual(result.projected_account_state.pledged_cash_balance, 4_000.0)
+        self.assertEqual(result.projected_account_state.pledged_cash_balance, 3_996.0)
 
     def test_sell_asset_and_withdraw_proceeds_is_rejected_when_remaining_collateral_is_unsafe(
         self,
@@ -124,7 +123,7 @@ class PortfolioActionControlsTests(unittest.TestCase):
 
         self.assertEqual(result.decision, RiskDecision.APPROVE)
         self.assertEqual(result.projected_margin_state, MarginState.SAFE)
-        self.assertEqual(result.projected_account_state.pledged_cash_balance, 500.0)
+        self.assertEqual(result.projected_account_state.pledged_cash_balance, 499.5)
 
     def test_buy_without_enough_pledged_cash_is_rejected(self) -> None:
         with self.assertRaisesRegex(
@@ -152,7 +151,7 @@ class PortfolioActionControlsTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(result.projected_loan_balance, 1_900.0)
+        self.assertEqual(result.projected_loan_balance, 1_900.5)
         self.assertEqual(result.projected_account_state.pledged_cash_balance, 0.0)
 
     def test_buy_with_external_cash_funding_is_supported(self) -> None:
@@ -172,7 +171,7 @@ class PortfolioActionControlsTests(unittest.TestCase):
 
     def test_buy_riskier_asset_reduces_available_credit_when_safe(self) -> None:
         result = self.check(
-            self.account(loan_principal=1_000.0, pledged_cash=1_000.0),
+            self.account(loan_principal=1_000.0, pledged_cash=1_100.0),
             PortfolioActionCheck(
                 PortfolioActionType.BUY,
                 asset_id="NVDA",
@@ -279,6 +278,7 @@ class PortfolioActionControlsTests(unittest.TestCase):
                             "average_dollar_volume": 100_000_000,
                             "volatility_30d": 0.15,
                             "volatility_90d": 0.15,
+                            "timestamp": "2025-01-02T10:00:00+00:00",
                             "data_quality_score": 1.0,
                         }
                     },

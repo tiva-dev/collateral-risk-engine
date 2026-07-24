@@ -5,7 +5,12 @@ from dataclasses import dataclass
 
 from app.core.enums import AssetType, RiskAppetite
 from app.core.models import Holding, MarketData, Policy, RiskAdjustmentBreakdown
-from app.risk.math_utils import clamp, normal_expected_shortfall_loss, safe_div, sqrt_impact
+from app.risk.math_utils import (
+    clamp,
+    normal_expected_shortfall_loss,
+    safe_div,
+    sqrt_impact,
+)
 
 
 @dataclass(frozen=True)
@@ -114,7 +119,9 @@ def liquidation_horizon_days(
         adv = market.average_daily_volume * market.last_price
     if adv is None or adv <= 0:
         return max(base, 10.0)
-    daily_exit_capacity = max(1.0, adv * clamp(policy.max_participation_rate, 0.01, 0.25))
+    daily_exit_capacity = max(
+        1.0, adv * clamp(policy.max_participation_rate, 0.01, 0.25)
+    )
     required_days = market_value / daily_exit_capacity
     return clamp(max(base, required_days), base, 90.0)
 
@@ -145,7 +152,9 @@ def build_raw_inputs(
     )
 
 
-def volatility_adjustment(raw: RawRiskInputs, market: MarketData, asset_type: AssetType) -> float:
+def volatility_adjustment(
+    raw: RawRiskInputs, market: MarketData, asset_type: AssetType
+) -> float:
     es_loss = normal_expected_shortfall_loss(
         raw.annualized_volatility,
         raw.liquidation_horizon_days,
@@ -153,14 +162,20 @@ def volatility_adjustment(raw: RawRiskInputs, market: MarketData, asset_type: As
     )
     recent_move = abs(market.recent_return_1d or 0.0)
     jump_penalty = 0.0
-    if asset_type in {AssetType.HIGH_VOLATILITY_EQUITY, AssetType.CRYPTO, AssetType.OPTION}:
+    if asset_type in {
+        AssetType.HIGH_VOLATILITY_EQUITY,
+        AssetType.CRYPTO,
+        AssetType.OPTION,
+    }:
         jump_penalty += clamp(0.10 * raw.annualized_volatility, 0.03, 0.20)
     jump_penalty += clamp(max(0.0, recent_move - 0.05) * 0.45, 0.0, 0.18)
     haircut = clamp(es_loss + jump_penalty, 0.0, 0.92)
     return clamp(1.0 - haircut, 0.02, 1.0)
 
 
-def liquidity_adjustment(raw: RawRiskInputs, market_value: float, market: MarketData) -> float:
+def liquidity_adjustment(
+    raw: RawRiskInputs, market_value: float, market: MarketData
+) -> float:
     adv = market.average_dollar_volume
     if adv is None and market.average_daily_volume is not None:
         adv = market.average_daily_volume * market.last_price
@@ -182,12 +197,19 @@ def bid_ask_spread_adjustment(raw: RawRiskInputs) -> float:
 def concentration_adjustment(raw: RawRiskInputs, asset_type: AssetType) -> float:
     tolerance = CONCENTRATION_TOLERANCE.get(asset_type, 0.20)
     excess = max(0.0, raw.concentration - tolerance)
-    slope = 0.70 if asset_type not in {AssetType.HIGH_VOLATILITY_EQUITY, AssetType.CRYPTO, AssetType.OPTION} else 1.20
+    slope = (
+        0.70
+        if asset_type
+        not in {AssetType.HIGH_VOLATILITY_EQUITY, AssetType.CRYPTO, AssetType.OPTION}
+        else 1.20
+    )
     haircut = clamp(excess * slope, 0.0, 0.90)
     return clamp(1.0 - haircut, 0.05, 1.0)
 
 
-def stress_adjustment(raw: RawRiskInputs, asset_type: AssetType, policy: Policy) -> float:
+def stress_adjustment(
+    raw: RawRiskInputs, asset_type: AssetType, policy: Policy
+) -> float:
     stress_floor = STRESS_FLOOR_BY_ASSET.get(asset_type, 0.30)
     stress_es = normal_expected_shortfall_loss(
         raw.annualized_volatility,
@@ -215,7 +237,9 @@ def all_adjustments(
     market_value: float,
     portfolio_market_value: float,
 ) -> tuple[RiskAdjustmentBreakdown, RawRiskInputs]:
-    raw = build_raw_inputs(holding, market, policy, market_value, portfolio_market_value)
+    raw = build_raw_inputs(
+        holding, market, policy, market_value, portfolio_market_value
+    )
     breakdown = RiskAdjustmentBreakdown(
         volatility=volatility_adjustment(raw, market, holding.asset_type),
         liquidity=liquidity_adjustment(raw, market_value, market),
