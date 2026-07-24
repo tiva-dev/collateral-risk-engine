@@ -8,11 +8,13 @@ from .providers import HistoricalDataProvider, ProviderError, validate_provider_
 
 class AlphaVantageHistoricalProvider(HistoricalDataProvider):
     provider_name="alpha_vantage"; provider_capabilities=frozenset({"equity_daily_adjusted","fx_daily"})
-    def __init__(self, cache:HistoricalDataCache|None=None): super().__init__(); self.config=load_config(); validate_provider_url(self.config.alpha_vantage_base_url,{"www.alphavantage.co"}); self.cache=cache or HistoricalDataCache(); self.cache_paths=[]; self.raw_response_paths=[]; self.provider_coverage_summary={}
+    def __init__(self, cache:HistoricalDataCache|None=None): super().__init__(); self.config=load_config(); validate_provider_url(self.config.alpha_vantage_base_url,{"www.alphavantage.co"}); self.cache=cache or HistoricalDataCache(); self.cache_paths=[]; self.raw_response_paths=[]; self.provider_coverage_summary={}; self.last_request_call_count=0
     def _request_json(self, params):
+        self.last_request_call_count=0
         q=dict(params)
         if self.config.alpha_vantage_api_key: q["apikey"]=self.config.alpha_vantage_api_key
         for attempt in range(3):
+            self.last_request_call_count += 1
             try:
                 with urllib.request.urlopen(self.config.alpha_vantage_base_url+"?"+urllib.parse.urlencode(q), timeout=30) as r: payload=json.loads(r.read().decode())
                 if not any(payload.get(k) for k in ("Note","Information")):
@@ -57,7 +59,7 @@ class AlphaVantageHistoricalProvider(HistoricalDataProvider):
             self.provider_coverage_summary={"requested":1,"cached":1,"fetched":0}; return _equity_from_cache(c["data"]) if c["data"].get("cache_schema") == "historical_series/v1" else self.parse_daily_adjusted(instrument,c["data"],start_date,end_date)
         p=self._request_json({"function":"TIME_SERIES_DAILY_ADJUSTED","symbol":instrument,"outputsize":"full"}); self.raw_response_paths.append(str(self.cache.write("raw",p,**key))); series=self.parse_daily_adjusted(instrument,p,start_date,end_date)
         if not series.bars: raise ProviderError("Alpha Vantage adjusted equity history unavailable; this capability may require premium access",provider=self.provider_name,code="premium_capability_unavailable")
-        self.cache_paths.append(str(self.cache.write("normalized",canonical_series_payload(series),**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1,"api_call_count":1}; return series
+        self.cache_paths.append(str(self.cache.write("normalized",canonical_series_payload(series),**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1,"api_call_count":max(1,self.last_request_call_count)}; return series
     def fetch_fx_history(self,from_currency,to_currency,start_date,end_date,force_refresh=False):
         key=dict(provider=self.provider_name,pair=f"{from_currency}{to_currency}",start=str(start_date),end=str(end_date))
         if not force_refresh and (c:=self.cache.read("normalized",**key)):
@@ -66,7 +68,7 @@ class AlphaVantageHistoricalProvider(HistoricalDataProvider):
             self.provider_coverage_summary={"requested":1,"cached":1,"fetched":0}; return _fx_from_cache(c["data"]) if c["data"].get("cache_schema") == "historical_fx_series/v1" else self.parse_fx_daily(from_currency,to_currency,c["data"],start_date,end_date)
         p=self._request_json({"function":"FX_DAILY","from_symbol":from_currency,"to_symbol":to_currency,"outputsize":"full"}); self.raw_response_paths.append(str(self.cache.write("raw",p,**key))); series=self.parse_fx_daily(from_currency,to_currency,p,start_date,end_date)
         if not series.rates: raise ProviderError(f"Alpha Vantage returned no FX coverage for {from_currency}/{to_currency}",provider=self.provider_name,code="empty_coverage")
-        self.cache_paths.append(str(self.cache.write("normalized",canonical_series_payload(series),**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1,"api_call_count":1}; return series
+        self.cache_paths.append(str(self.cache.write("normalized",canonical_series_payload(series),**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1,"api_call_count":max(1,self.last_request_call_count)}; return series
 
 def _equity_from_cache(d):
     bars=[HistoricalBar(**{**r,"timestamp":date.fromisoformat(str(r["timestamp"])[:10]),"instrument_identity":None}) for r in d.get("bars",[])]

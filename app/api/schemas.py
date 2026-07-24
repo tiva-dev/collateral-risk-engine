@@ -33,6 +33,8 @@ class HoldingIn(BaseModel):
     asset_type: AssetType
     quantity: float = Field(ge=0)
     currency: str = "USD"
+    exchange: str = "UNKNOWN"
+    provider_id: str | None = None
 
     def to_domain(self) -> Holding:
         return Holding(
@@ -40,6 +42,8 @@ class HoldingIn(BaseModel):
             asset_type=self.asset_type,
             quantity=self.quantity,
             currency=self.currency,
+            exchange=self.exchange,
+            provider_id=self.provider_id,
         )
 
 
