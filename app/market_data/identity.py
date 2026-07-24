@@ -24,7 +24,7 @@ class InstrumentIdentity:
         return f"{self.exchange.upper()}:{self.symbol.upper()}:{self.currency.upper()}:{self.asset_type.value.upper()}"
 
     @staticmethod
-    def from_holding(holding: Holding) -> "InstrumentIdentity":
+    def from_holding(holding: Holding) -> InstrumentIdentity:
         parts = holding.asset_id.split(":")
         if len(parts) == 3:
             exchange, symbol, currency = parts

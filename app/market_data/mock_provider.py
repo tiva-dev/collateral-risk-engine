@@ -6,11 +6,16 @@ from app.market_data.base import LegacySnapshotProvider
 
 class MockMarketDataProvider(LegacySnapshotProvider):
     """Deprecated legacy snapshot mock; use MockEquityProvider for RawQuote tests."""
+
     def __init__(self, snapshots: dict[str, MarketData] | None = None) -> None:
         self.snapshots = snapshots or default_snapshots()
 
     def get_snapshot(self, asset_ids: list[str]) -> dict[str, MarketData]:
-        return {asset_id: self.snapshots[asset_id] for asset_id in asset_ids if asset_id in self.snapshots}
+        return {
+            asset_id: self.snapshots[asset_id]
+            for asset_id in asset_ids
+            if asset_id in self.snapshots
+        }
 
 
 def default_snapshots() -> dict[str, MarketData]:

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Mapping
 
 from app.core.enums import DataMode
 from app.core.models import Holding, MarketData
@@ -15,8 +15,7 @@ from app.market_data.providers import (
     FXRate,
     MarketDataProvider,
     MarketStatus,
-    MockEquityProvider,
-    MockFXProvider,
+    MissingProvider,
     RawQuote,
 )
 from app.market_data.quality import age_minutes, clamp_score
@@ -48,7 +47,9 @@ class StableKeyedMarketDataDict(dict[str, NormalizedMarketData]):
         return super().get(self._aliases.get(key, key), default)
 
     def __contains__(self, key: object) -> bool:
-        return super().__contains__(key) or (isinstance(key, str) and key in self._aliases)
+        return super().__contains__(key) or (
+            isinstance(key, str) and key in self._aliases
+        )
 
 
 @dataclass(frozen=True)
@@ -78,8 +79,8 @@ class ProviderRouter:
         fx_provider: MarketDataProvider | None = None,
     ) -> None:
         self.client_provider = client_provider
-        self.equity_provider = equity_provider or MockEquityProvider()
-        self.fx_provider = fx_provider or MockFXProvider()
+        self.equity_provider = equity_provider or MissingProvider()
+        self.fx_provider = fx_provider or MissingProvider()
 
     def choose_quote_provider(
         self,
@@ -89,25 +90,46 @@ class ProviderRouter:
         now: datetime | None = None,
     ) -> tuple[RawQuote | None, MarketStatus, list[str]]:
         warnings: list[str] = []
-        client_quote = self.client_provider.get_quote(instrument) if self.client_provider else None
-        provider_quote = self.equity_provider.get_quote(instrument) if self.equity_provider else None
+        client_quote = (
+            self.client_provider.get_quote(instrument) if self.client_provider else None
+        )
+        provider_quote = (
+            self.equity_provider.get_quote(instrument) if self.equity_provider else None
+        )
 
         if data_mode == DataMode.CLIENT_SUPPLIED:
             status = self._market_status(instrument.exchange)
-            return client_quote, status, [] if client_quote else ["missing_client_supplied_quote"]
+            return (
+                client_quote,
+                status,
+                [] if client_quote else ["missing_client_supplied_quote"],
+            )
         if data_mode == DataMode.PROVIDED_BY_US:
             status = self._provider_market_status(instrument.exchange)
-            return provider_quote, status, [] if provider_quote else ["missing_provider_quote"]
+            return (
+                provider_quote,
+                status,
+                [] if provider_quote else ["missing_provider_quote"],
+            )
 
         if client_quote is not None:
-            quality, quote_warnings = score_quote(client_quote, self._client_market_status(instrument.exchange), policy, now)
+            quality, quote_warnings = score_quote(
+                client_quote,
+                self._client_market_status(instrument.exchange),
+                policy,
+                now,
+            )
             if quality >= policy.minimum_quote_quality_score:
                 status = self._client_market_status(instrument.exchange)
                 return client_quote, status, quote_warnings
             warnings.extend(quote_warnings or ["client_quote_below_quality_threshold"])
         if policy.allow_fallback_provider and provider_quote is not None:
             status = self._provider_market_status(instrument.exchange)
-            return provider_quote, status, [*warnings, "fallback_provider_quote_used"] if warnings else []
+            return (
+                provider_quote,
+                status,
+                [*warnings, "fallback_provider_quote_used"] if warnings else [],
+            )
         status = self._market_status(instrument.exchange)
         return client_quote, status, warnings or ["missing_quote"]
 
@@ -119,7 +141,11 @@ class ProviderRouter:
         return self._provider_market_status(exchange)
 
     def _provider_market_status(self, exchange: str) -> MarketStatus:
-        return self.equity_provider.get_market_status(exchange) if self.equity_provider else MarketStatus.UNKNOWN
+        return (
+            self.equity_provider.get_market_status(exchange)
+            if self.equity_provider
+            else MarketStatus.UNKNOWN
+        )
 
     def _market_status(self, exchange: str) -> MarketStatus:
         status = self._client_market_status(exchange)
@@ -166,7 +192,9 @@ class MarketDataAggregator:
         equity_provider: MarketDataProvider | None = None,
         fx_provider: MarketDataProvider | None = None,
     ) -> None:
-        self.router = provider_router or ProviderRouter(client_provider, equity_provider, fx_provider)
+        self.router = provider_router or ProviderRouter(
+            client_provider, equity_provider, fx_provider
+        )
 
     def normalize(
         self,
@@ -182,7 +210,9 @@ class MarketDataAggregator:
         now: datetime | None = None,
     ) -> MarketDataAggregationResult:
         policy = market_data_policy or MarketDataPolicy()
-        identities = instruments or [InstrumentIdentity.from_holding(holding) for holding in (holdings or [])]
+        identities = instruments or [
+            InstrumentIdentity.from_holding(holding) for holding in (holdings or [])
+        ]
         holdings = holdings or []
         provider_registry = provider_registry or {}
         if client_supplied_quotes or client_supplied_fx_rates:
@@ -191,7 +221,9 @@ class MarketDataAggregator:
                 dict(client_supplied_fx_rates or {}),
             )
         else:
-            client_provider = provider_registry.get("client") or self.router.client_provider
+            client_provider = (
+                provider_registry.get("client") or self.router.client_provider
+            )
         equity_provider = provider_registry.get("equity") or self.router.equity_provider
         fx_provider = provider_registry.get("fx") or self.router.fx_provider
         router = ProviderRouter(client_provider, equity_provider, fx_provider)
@@ -203,7 +235,9 @@ class MarketDataAggregator:
         missing_data: list[str] = []
 
         for instrument in identities:
-            quote, status, router_warnings = router.choose_quote_provider(data_mode, instrument, policy, now)
+            quote, status, router_warnings = router.choose_quote_provider(
+                data_mode, instrument, policy, now
+            )
             key = instrument.stable_key
             normalized.set_alias(instrument.asset_id, key)
             normalized.set_alias(instrument.symbol, key)
@@ -222,7 +256,10 @@ class MarketDataAggregator:
             fx_rate = None
             fx_quality = None
             if instrument.currency.upper() != loan_currency.upper():
-                allow_client_fx = data_mode in {DataMode.CLIENT_SUPPLIED, DataMode.HYBRID}
+                allow_client_fx = data_mode in {
+                    DataMode.CLIENT_SUPPLIED,
+                    DataMode.HYBRID,
+                }
                 allow_provider_fx = data_mode == DataMode.PROVIDED_BY_US or (
                     data_mode == DataMode.HYBRID and policy.fx.allow_fallback_provider
                 )
@@ -242,7 +279,9 @@ class MarketDataAggregator:
                 else:
                     quote_quality = clamp_score(quote_quality * fx_quality)
                     if fx_quality < policy.fx.minimum_fx_quality_score:
-                        quote_quality = clamp_score(quote_quality * (1.0 - policy.fx.stale_fx_haircut))
+                        quote_quality = clamp_score(
+                            quote_quality * (1.0 - policy.fx.stale_fx_haircut)
+                        )
             normalized_result = normalize_quote(
                 quote,
                 loan_currency,
@@ -254,15 +293,20 @@ class MarketDataAggregator:
             )
             normalized[key] = normalized_result
             quality_report[key] = normalized_result.data_quality_score
-            quality_report.setdefault(instrument.asset_id, normalized_result.data_quality_score)
+            quality_report.setdefault(
+                instrument.asset_id, normalized_result.data_quality_score
+            )
             warnings_by_instrument[key] = normalized_result.warnings
-            warnings_by_instrument.setdefault(instrument.asset_id, normalized_result.warnings)
-
+            warnings_by_instrument.setdefault(
+                instrument.asset_id, normalized_result.warnings
+            )
 
         evaluator_market_data: dict[str, MarketData] = {}
         evaluator_key_to_stable_key: dict[str, str] = {}
         if holdings:
-            identity_by_asset_id = {identity.asset_id: identity for identity in identities}
+            identity_by_asset_id = {
+                identity.asset_id: identity for identity in identities
+            }
             for index, holding in enumerate(holdings):
                 identity = identity_by_asset_id.get(holding.asset_id)
                 if identity is None and index < len(identities):
@@ -273,12 +317,18 @@ class MarketDataAggregator:
                 normalized_result = normalized.get(stable_key)
                 if normalized_result is None:
                     missing_data.append(holding.asset_id)
-                    warnings_by_instrument.setdefault(holding.asset_id, ["missing_quote_for_holding"])
+                    warnings_by_instrument.setdefault(
+                        holding.asset_id, ["missing_quote_for_holding"]
+                    )
                     quality_report.setdefault(holding.asset_id, 0.0)
                     continue
                 if holding.asset_id in evaluator_market_data:
-                    warnings_by_instrument.setdefault(holding.asset_id, []).append("duplicate_evaluator_key")
-                    raise ValueError(f"duplicate evaluator market data key: {holding.asset_id}")
+                    warnings_by_instrument.setdefault(holding.asset_id, []).append(
+                        "duplicate_evaluator_key"
+                    )
+                    raise ValueError(
+                        f"duplicate evaluator market data key: {holding.asset_id}"
+                    )
                 evaluator_market_data[holding.asset_id] = replace(
                     normalized_result.to_market_data(), asset_id=holding.asset_id
                 )

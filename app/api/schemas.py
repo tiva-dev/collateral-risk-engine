@@ -7,22 +7,22 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from app.core.enums import (
     AssetType,
+    DataMode,
     LifecycleDecisionValue,
     MarginState,
     PortfolioActionType,
     RiskAppetite,
     RiskDecision,
     TransferDirection,
-    DataMode,
 )
 from app.core.models import (
+    AccountState,
     Holding,
     Loan,
     MarketData,
     OrderBook,
     OrderBookLevel,
     Policy,
-    AccountState,
     PortfolioAction,
     PortfolioActionCheck,
 )
@@ -177,6 +177,7 @@ class MarketDataIn(BaseModel):
     volatility_90d: float | None = None
     intraday_volatility: float | None = None
     recent_return_1d: float | None = None
+    timestamp: datetime
     data_quality_score: float = Field(default=1.0, ge=0, le=1)
     halted: bool = False
     order_book: OrderBookIn | None = None
@@ -200,6 +201,7 @@ class MarketDataIn(BaseModel):
             volatility_90d=self.volatility_90d,
             intraday_volatility=self.intraday_volatility,
             recent_return_1d=self.recent_return_1d,
+            timestamp=self.timestamp,
             data_quality_score=self.data_quality_score,
             halted=self.halted,
             order_book=self.order_book.to_domain() if self.order_book else None,
@@ -272,7 +274,7 @@ class ClientQuoteIn(BaseModel):
     intraday_volatility: float | None = None
     recent_return_1d: float | None = None
     order_book: OrderBookIn | None = None
-    timestamp: datetime | None = None
+    timestamp: datetime
     data_quality_score: float = Field(default=1.0, ge=0, le=1)
     warnings: list[str] = Field(default_factory=list)
     provider_name: str = "client_supplied"
@@ -307,7 +309,7 @@ class ClientQuoteIn(BaseModel):
             intraday_volatility=self.intraday_volatility,
             recent_return_1d=self.recent_return_1d,
             order_book=self.order_book.to_domain() if self.order_book else None,
-            timestamp=self.timestamp or datetime.now().astimezone(),
+            timestamp=self.timestamp,
             source="client_supplied",
             provider_name=self.provider_name,
             data_quality_score=self.data_quality_score,
@@ -320,7 +322,7 @@ class ClientFXRateIn(BaseModel):
     from_currency: str
     to_currency: str
     rate: float = Field(gt=0)
-    timestamp: datetime | None = None
+    timestamp: datetime
     quality_score: float = Field(default=1.0, ge=0, le=1)
     warnings: list[str] = Field(default_factory=list)
     provider_name: str = "client_supplied"
@@ -332,7 +334,7 @@ class ClientFXRateIn(BaseModel):
             from_currency=self.from_currency,
             to_currency=self.to_currency,
             rate=self.rate,
-            timestamp=self.timestamp or datetime.now().astimezone(),
+            timestamp=self.timestamp,
             source="client_supplied",
             provider_name=self.provider_name,
             quality_score=self.quality_score,
@@ -356,7 +358,9 @@ class FXPolicyIn(BaseModel):
 
 class MarketDataPolicyIn(BaseModel):
     fx: FXPolicyIn = Field(default_factory=FXPolicyIn)
-    max_quote_age_minutes_by_asset_type: dict[AssetType, int] = Field(default_factory=dict)
+    max_quote_age_minutes_by_asset_type: dict[AssetType, int] = Field(
+        default_factory=dict
+    )
     max_quote_age_minutes_by_exchange: dict[str, int] = Field(default_factory=dict)
     stale_quote_haircut: float = Field(default=0.35, ge=0, le=1)
     minimum_quote_quality_score: float = Field(default=0.50, ge=0, le=1)
@@ -601,8 +605,13 @@ class PreTradeResult(BaseModel):
 class PreTradeResponse(BaseModel):
     result: PreTradeResult
 
+
 # v0.4 monitoring API schemas
-from app.monitoring.models import MonitoringStatus, MonitoringEventType, MonitoringSeverity
+from app.monitoring.models import (
+    MonitoringEventType,
+    MonitoringSeverity,
+    MonitoringStatus,
+)
 
 
 class MonitoredAccountCreateRequest(BaseModel):

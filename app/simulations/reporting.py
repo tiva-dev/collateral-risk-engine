@@ -1,31 +1,137 @@
 from __future__ import annotations
-import csv, json
-from datetime import datetime, timezone
+
+import csv
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
 from app.historical_data.cache import content_hash
 from app.historical_data.config import load_config
+from app.version import (
+    LIFECYCLE_MODEL_VERSION,
+    PROJECT_VERSION,
+    RISK_MODEL_VERSION,
+)
 
-SIMULATION_CONFIG_VERSION = "v0.5C"
+SIMULATION_CONFIG_VERSION = PROJECT_VERSION
 
-def generate_evidence_package(results:list[dict[str,Any]], metrics:list[dict[str,Any]], output_dir:str|None=None, config:dict[str,Any]|None=None) -> dict[str,str]:
-    out=Path(output_dir or load_config().simulation_output_dir); out.mkdir(parents=True, exist_ok=True)
-    manifest={"artifact":"official_validation_manifest","simulation_config_version":SIMULATION_CONFIG_VERSION,"run_timestamp":datetime.now(timezone.utc).isoformat(),"config":config or {},"result_count":len(results),"metrics_checksum":content_hash(metrics)}
-    files={}
-    def w(name, text):
-        p=out/name; p.write_text(text); files[name]=str(p)
-    w("official_validation_manifest.json", json.dumps(manifest,indent=2,sort_keys=True))
-    w("official_validation_metrics.json", json.dumps(metrics,indent=2,sort_keys=True,default=str))
-    csvp=out/"official_validation_metrics.csv"
-    keys=sorted({k for m in metrics for k in m})
-    with csvp.open('w',newline='') as f:
-        writer=csv.DictWriter(f,fieldnames=keys); writer.writeheader(); writer.writerows(metrics)
-    files[csvp.name]=str(csvp)
 
-    scenario_rows="\n".join(f"| {m.get('scenario')} | {m.get('stress_name', 'baseline')} | {m.get('worst_shortfall')} | {m.get('fx_missing_events')} | {m.get('total_interest_accrued')} |" for m in metrics)
-    w("official_validation_report.md", "# Official Validation Report\n\n## Executive Summary\nCache-first validation compares dynamic, flat LTV, and static haircut replay outputs before real provider-backed evidence is used.\n\n## Dataset Summary\nDataset inputs are read from normalized replay cache manifests.\n\n## Provider Coverage Summary\nSee provider_coverage_report.md.\n\n## Scenario Summary Table\n| Scenario | Stress Overlay | Worst Shortfall | FX Missing Events | Interest |\n|---|---|---:|---:|---:|\n"+scenario_rows+"\n\n## Baseline Comparison Table\nDynamic, flat LTV, and static haircut outputs are computed from replay time series.\n\n## Risk Outcome Table\nShortfall rates, warning dates, and liquidation frequencies are in the metrics CSV.\n\n## Credit Usability Table\nCredit capacity preserved metrics are reported per scenario.\n\n## Interest Impact Table\nInterest accrued and interest-driven shortfalls are reported per scenario.\n\n## Data Quality Issues\nMissing/stale data counters are surfaced in metrics.\n\n## FX Issues\nMissing and stale FX counters are surfaced in metrics.\n\n## Liquidation Plan Completeness\nCompleteness is tracked per run.\n\n## Key Limitations\nNo broker execution, live websocket monitoring, production database, or normal-CI provider calls.\n\n## Methodology Reference\nSee data_methodology.md and simulation_assumptions.md.\n")
-    w("provider_coverage_report.md", "# Provider Coverage Report\n\n## Provider by Provider Coverage\nCoverage is sourced from dataset manifests.\n\n## Requested/Available/Missing\nRequested, available, and missing symbols are reported from manifest metadata.\n\n## Missing Symbols and Reasons\nSee manifest missing_symbol_reasons.\n\n## Earliest Available Date\nSee earliest_available_date_by_symbol.\n\n## Cache Status\nCache paths are checksum-validated and replay is cache-first.\n\n## API Quota Metadata\nQuota metadata is included when providers expose it; secrets are redacted.\n")
-    w("data_methodology.md", "# Data Methodology\n\n## Providers\nAlpaca, Alpha Vantage, NGNMarket, and synthetic THIN where marked.\n\n## Cache-first Process\nNormal validation reads canonical normalized HistoricalSeries/HistoricalFXSeries cache files and does not call providers.\n\n## Historical Period\nConfigured by the dataset manifest and CLI date filters.\n\n## Data Transformations\nProvider bars are normalized to instrument, timestamp, OHLCV, currency, quality, and warnings.\n\n## FX Handling\nFX is date-indexed, nearest-prior, inverse-pair aware, and missing required FX zeroes loan-currency prices.\n\n## Missing Data Handling\nMissing FX/data is flagged and conservative data quality is applied.\n\n## Synthetic Data Assumptions\nTHIN is synthetic-only, deterministic by seed, and excluded from provider dataset requirements.\n")
-    w("interest_accrual_methodology.md", "# Interest Accrual Methodology\n\nEngine-calculated scheduled accrual preserves principal, interest, and fees.\n")
-    w("simulation_assumptions.md", "# Simulation Assumptions\n\n## Stress Overlay Definitions\nPrice gap, FX devaluation, volume collapse, spread widening, order-book thinning, trading halt, stale market data, missing FX, single-name crash, correlated selloff, and combined severe stress.\n\n## Baseline Definitions\nFlat LTV uses fixed collateral value times LTV. Static haircut applies fixed asset-class haircuts. Dynamic engine uses lifecycle safe credit limit and stressed liquidation value.\n\n## Interest Assumptions\nScenario loan terms drive scheduled accrual.\n\n## Liquidity/Order Book Assumptions\nSynthetic spreads and order books are deterministic from bars and stress settings.\n\n## Limitations\nNo broker execution, live websocket monitoring, production database, or normal-CI provider calls.\n")
+def generate_evidence_package(
+    results: list[dict[str, Any]],
+    metrics: list[dict[str, Any]],
+    output_dir: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    out = Path(output_dir or load_config().simulation_output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    files: dict[str, str] = {}
+
+    def write(name: str, text: str) -> Path:
+        path = out / name
+        path.write_text(text)
+        files[name] = str(path)
+        return path
+
+    write(
+        "official_validation_records.json",
+        json.dumps(results, indent=2, sort_keys=True, default=str),
+    )
+    write(
+        "official_validation_metrics.json",
+        json.dumps(metrics, indent=2, sort_keys=True, default=str),
+    )
+    csv_path = out / "official_validation_metrics.csv"
+    keys = sorted({key for metric in metrics for key in metric})
+    with csv_path.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(metrics)
+    files[csv_path.name] = str(csv_path)
+
+    scenario_rows = "\n".join(
+        "| {scenario} | {regime} | {stress} | {breach} | {loss} |".format(
+            scenario=metric.get("base_scenario"),
+            regime=metric.get("comparison_regime"),
+            stress=metric.get("stress_name", "baseline"),
+            breach=metric.get("worst_credit_limit_breach"),
+            loss=metric.get("worst_economic_recovery_shortfall"),
+        )
+        for metric in metrics
+    )
+    write(
+        "official_validation_report.md",
+        "# Official Validation Report\n\n"
+        "## Scenario outcomes\n\n"
+        "| Scenario | Comparison regime | Stress | Worst credit-limit breach | "
+        "Worst economic recovery shortfall |\n"
+        "|---|---|---|---:|---:|\n"
+        f"{scenario_rows}\n\n"
+        "Common-exposure surveillance and policy-origination outcomes are "
+        "reported separately. Completion alone is not evidence of superiority "
+        "or calibration.\n",
+    )
+    write(
+        "provider_coverage_report.md",
+        "# Provider Coverage Report\n\n"
+        "Requested and actual coverage, missing observations, adjustment "
+        "methodology, provider call counts, and cache identities are embedded "
+        "in the dataset manifest referenced by the evidence manifest.\n",
+    )
+    write(
+        "data_methodology.md",
+        "# Data Methodology\n\n"
+        "Replay consumes checksum-verified canonical provider caches. Adjusted "
+        "prices are used when available. Carry-forward is valuation-only and "
+        "records observation age. Volatility and average volume use rolling "
+        "histories. Synthetic order-book depth is excluded from official "
+        "execution evidence.\n",
+    )
+    write(
+        "interest_accrual_methodology.md",
+        "# Interest Accrual Methodology\n\n"
+        "Each comparison policy accrues its own principal, interest, and fee "
+        "path under the scenario interest policy.\n",
+    )
+    write(
+        "simulation_assumptions.md",
+        "# Simulation Assumptions\n\n"
+        "Credit-limit breach and economic recovery shortfall are distinct. "
+        "Stress overlays are recorded per result. Synthetic THIN observations, "
+        "when explicitly allowed, are a separately labelled sensitivity and "
+        "cannot qualify a run as provider-backed.\n",
+    )
+
+    artifact_checksums = {
+        name: content_hash(json.loads(Path(path).read_text()))
+        if name.endswith(".json")
+        else content_hash(Path(path).read_text())
+        for name, path in files.items()
+    }
+    evidence_manifest = {
+        "artifact": "official_validation_manifest",
+        "simulation_config_version": SIMULATION_CONFIG_VERSION,
+        "project_version": PROJECT_VERSION,
+        "model_versions": {
+            "risk": RISK_MODEL_VERSION,
+            "lifecycle": LIFECYCLE_MODEL_VERSION,
+        },
+        "run_timestamp": datetime.now(UTC).isoformat(),
+        "config": config or {},
+        "dataset_manifest_identity": (config or {}).get("dataset_manifest_identity"),
+        "dataset_manifest": (config or {}).get("dataset_manifest"),
+        "result_count": len(results),
+        "metric_count": len(metrics),
+        "results_checksum": content_hash(results),
+        "metrics_checksum": content_hash(metrics),
+        "artifact_checksums": artifact_checksums,
+        "synthetic_data_declared": any(
+            result.get("synthetic_data_used") for result in results
+        ),
+    }
+    manifest_path = out / "official_validation_manifest.json"
+    manifest_path.write_text(
+        json.dumps(evidence_manifest, indent=2, sort_keys=True, default=str)
+    )
+    files[manifest_path.name] = str(manifest_path)
     return files

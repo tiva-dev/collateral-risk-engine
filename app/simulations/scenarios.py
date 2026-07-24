@@ -30,7 +30,13 @@ def apply_market_shock(
         shocked_order_book = OrderBook(
             bids=[
                 OrderBookLevel(
-                    price=max(1e-12, level.price * (1.0 + price_shock) - max(0.0, (spread_multiplier - 1.0)) * (market.last_price - level.price) * 0.5),
+                    price=max(
+                        1e-12,
+                        level.price * (1.0 + price_shock)
+                        - max(0.0, (spread_multiplier - 1.0))
+                        * (market.last_price - level.price)
+                        * 0.5,
+                    ),
                     quantity=max(0.0, level.quantity * depth_multiplier),
                 )
                 for level in market.order_book.bids
@@ -38,7 +44,13 @@ def apply_market_shock(
             ],
             asks=[
                 OrderBookLevel(
-                    price=max(1e-12, level.price * (1.0 + price_shock) + max(0.0, (spread_multiplier - 1.0)) * (level.price - market.last_price) * 0.5),
+                    price=max(
+                        1e-12,
+                        level.price * (1.0 + price_shock)
+                        + max(0.0, (spread_multiplier - 1.0))
+                        * (level.price - market.last_price)
+                        * 0.5,
+                    ),
                     quantity=max(0.0, level.quantity * depth_multiplier),
                 )
                 for level in market.order_book.asks
@@ -51,13 +63,27 @@ def apply_market_shock(
         bid=bid,
         ask=ask,
         order_book=shocked_order_book,
-        average_daily_volume=None if market.average_daily_volume is None else market.average_daily_volume * volume_multiplier,
-        average_dollar_volume=None if market.average_dollar_volume is None else market.average_dollar_volume * volume_multiplier * max(0.0, 1.0 + price_shock),
-        volatility_30d=None if market.volatility_30d is None else market.volatility_30d * volatility_multiplier,
-        volatility_90d=None if market.volatility_90d is None else market.volatility_90d * volatility_multiplier,
-        intraday_volatility=None if market.intraday_volatility is None else market.intraday_volatility * volatility_multiplier,
+        average_daily_volume=None
+        if market.average_daily_volume is None
+        else market.average_daily_volume * volume_multiplier,
+        average_dollar_volume=None
+        if market.average_dollar_volume is None
+        else market.average_dollar_volume
+        * volume_multiplier
+        * max(0.0, 1.0 + price_shock),
+        volatility_30d=None
+        if market.volatility_30d is None
+        else market.volatility_30d * volatility_multiplier,
+        volatility_90d=None
+        if market.volatility_90d is None
+        else market.volatility_90d * volatility_multiplier,
+        intraday_volatility=None
+        if market.intraday_volatility is None
+        else market.intraday_volatility * volatility_multiplier,
         recent_return_1d=price_shock,
-        data_quality_score=clamp(market.data_quality_score + data_quality_delta, 0.0, 1.0),
+        data_quality_score=clamp(
+            market.data_quality_score + data_quality_delta, 0.0, 1.0
+        ),
     )
 
 

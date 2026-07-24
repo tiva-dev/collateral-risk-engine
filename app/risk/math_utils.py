@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from statistics import NormalDist
 
-
 TRADING_DAYS_PER_YEAR = 252.0
 
 

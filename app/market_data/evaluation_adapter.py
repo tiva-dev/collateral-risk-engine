@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Mapping
+from collections.abc import Mapping
 
 from app.core.enums import DataMode
 from app.core.models import Holding, MarketData
-from app.market_data.aggregator import MarketDataAggregator, MarketDataAggregationResult
+from app.market_data.aggregator import MarketDataAggregationResult, MarketDataAggregator
 from app.market_data.identity import InstrumentIdentity
 from app.market_data.policy import MarketDataPolicy
 from app.market_data.providers import FXRate, RawQuote

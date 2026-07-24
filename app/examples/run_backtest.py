@@ -11,8 +11,12 @@ from app.simulations.backtester import compare_flat_ltv_to_dynamic_engine
 
 def main() -> None:
     holdings = [
-        Holding(asset_id="NVDA", asset_type=AssetType.HIGH_VOLATILITY_EQUITY, quantity=6),
-        Holding(asset_id="THIN", asset_type=AssetType.HIGH_VOLATILITY_EQUITY, quantity=800),
+        Holding(
+            asset_id="NVDA", asset_type=AssetType.HIGH_VOLATILITY_EQUITY, quantity=6
+        ),
+        Holding(
+            asset_id="THIN", asset_type=AssetType.HIGH_VOLATILITY_EQUITY, quantity=800
+        ),
     ]
     market = MockMarketDataProvider().get_snapshot([h.asset_id for h in holdings])
     loan = Loan(principal=5_000, accrued_interest=40)

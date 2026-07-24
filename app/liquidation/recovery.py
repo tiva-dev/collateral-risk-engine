@@ -54,9 +54,13 @@ def estimate_stressed_recovery(
         if order_book_estimate.residual_quantity > 0:
             residual_ratio = order_book_estimate.residual_quantity / max(quantity, 1e-9)
             residual_penalty = clamp(0.15 + residual_ratio * 0.45, 0.0, 0.75)
-        stress_overlay = clamp(0.45 * stress_loss + 0.50 * spread + residual_penalty, 0.0, 0.90)
+        stress_overlay = clamp(
+            0.45 * stress_loss + 0.50 * spread + residual_penalty, 0.0, 0.90
+        )
         stressed_value = order_book_estimate.proceeds * (1.0 - stress_overlay)
-        slippage = clamp(order_book_estimate.order_book_slippage_rate + stress_overlay, 0.0, 1.0)
+        slippage = clamp(
+            order_book_estimate.order_book_slippage_rate + stress_overlay, 0.0, 1.0
+        )
         return RecoveryEstimate(
             stressed_liquidation_value=max(0.0, stressed_value),
             estimated_slippage_rate=slippage,
@@ -67,7 +71,9 @@ def estimate_stressed_recovery(
     half_spread_cost = spread / 2.0
     market_impact = sqrt_impact(market_value, market.average_dollar_volume)
     data_penalty = clamp((1.0 - market.data_quality_score) * 0.25, 0.0, 0.25)
-    total_slippage = clamp(half_spread_cost + market_impact + stress_loss + data_penalty, 0.0, 0.95)
+    total_slippage = clamp(
+        half_spread_cost + market_impact + stress_loss + data_penalty, 0.0, 0.95
+    )
     per_unit = last_price * (1.0 - total_slippage)
     return RecoveryEstimate(
         stressed_liquidation_value=max(0.0, quantity * per_unit),
