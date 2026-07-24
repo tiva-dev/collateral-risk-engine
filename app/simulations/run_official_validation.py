@@ -226,7 +226,15 @@ def main():
     p.add_argument("--write-artifacts", choices=["true", "false"], default="true")
     a = p.parse_args()
     scenarios = official_portfolio_scenarios()
-    selected = list(scenarios) if a.scenario == "all" else [a.scenario]
+    selected = (
+        [
+            name
+            for name in scenarios
+            if a.allow_synthetic or name != "thin_liquidity_portfolio"
+        ]
+        if a.scenario == "all"
+        else [a.scenario]
+    )
     missing = [s for s in selected if s not in scenarios]
     if missing:
         raise SystemExit(f"Unknown scenario(s): {', '.join(missing)}")
@@ -245,6 +253,8 @@ def main():
         "flat_ltv": a.flat_ltv,
         "static_haircut_profile": a.static_haircut_profile,
         "scenario": a.scenario,
+        "selected_scenarios": selected,
+        "synthetic_sensitivity_included": "thin_liquidity_portfolio" in selected,
         "start_date": str(a.start_date) if a.start_date else None,
         "end_date": str(a.end_date) if a.end_date else None,
         "manifest_checksum": content_hash(manifest) if manifest else None,

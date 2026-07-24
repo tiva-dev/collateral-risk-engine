@@ -15,6 +15,7 @@ from app.historical_data.models import (
     HistoricalSeries,
 )
 from app.historical_data.ngnmarket import NGNMarketHistoricalProvider
+from app.historical_data.providers import ProviderError
 from app.simulations.config.official_validation_universe import (
     FX_PAIRS,
     NGX_UNIVERSE,
@@ -156,6 +157,7 @@ class OfficialDatasetBuilder:
         if "alpaca" in self.provider_names:
             notes.append(f"Alpaca market-data feed: {self.alpaca_feed}.")
         providers = {}
+        ngnmarket_preflight_error: str | None = None
         if not dry_run:
             providers = {
                 "alpaca": AlpacaTradingHistoricalProvider(),
@@ -181,10 +183,17 @@ class OfficialDatasetBuilder:
                             reasons[sym] = "NGNMarket company list mapping missing"
                             warnings.append(f"NGNMarket mapping missing for {sym}")
                 except Exception as exc:  # noqa: BLE001 - provider boundary
+                    ngnmarket_preflight_error = str(exc)
                     warnings.append(f"NGNMarket company list validation failed: {exc}")
 
             def record(name: str, symbol: str, fn):
                 try:
+                    if name == "ngnmarket" and ngnmarket_preflight_error:
+                        raise ProviderError(
+                            ngnmarket_preflight_error,
+                            provider="ngnmarket",
+                            code="provider_preflight_failed",
+                        )
                     series = fn()
                     count = (
                         len(series.bars)

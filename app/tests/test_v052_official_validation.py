@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import UTC, date, datetime
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from app.core.enums import AssetType
 from app.historical_data.alpaca import AlpacaTradingHistoricalProvider
@@ -127,6 +127,86 @@ class V052ProviderFoundationTests(unittest.TestCase):
         self.assertEqual(len(s.bars), 1)
         self.assertTrue(s.warnings)
         self.assertEqual(p.quota_metadata["remaining"], 1)
+
+    def test_ngnmarket_normalizes_bearer_secret(self):
+        with patch.dict(
+            "os.environ", {"NGNMARKET_API_KEY": " Bearer ngm_live_fixture "}
+        ):
+            provider = NGNMarketHistoricalProvider()
+        self.assertEqual(
+            provider.auth_headers()["Authorization"], "Bearer ngm_live_fixture"
+        )
+
+    def test_ngnmarket_http_error_exposes_safe_status_and_code(self):
+        import io
+        import json
+        import urllib.error
+
+        body = json.dumps(
+            {
+                "success": False,
+                "error": {
+                    "code": "INVALID_API_KEY",
+                    "message": "API key not found or revoked.",
+                },
+            }
+        ).encode()
+        error = urllib.error.HTTPError(
+            "https://api.ngnmarket.com/v1/companies",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(body),
+        )
+        with patch.dict("os.environ", {"NGNMARKET_API_KEY": "ngm_live_fixture"}):
+            provider = NGNMarketHistoricalProvider()
+        with (
+            patch("urllib.request.urlopen", side_effect=error),
+            self.assertRaises(ProviderError) as caught,
+        ):
+            provider._request_json("/companies")
+        self.assertEqual(caught.exception.code, "INVALID_API_KEY")
+        self.assertIn("HTTP 401", str(caught.exception))
+        self.assertNotIn("ngm_live_fixture", str(caught.exception))
+
+    def test_ngnmarket_uses_documented_chart_parameters_and_nested_company_list(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            provider = NGNMarketHistoricalProvider(HistoricalDataCache(directory))
+            company_payload = {
+                "success": True,
+                "data": {"data": [{"symbol": "DANGCEM"}], "pagination": {}},
+            }
+            provider._request_json = Mock(return_value=company_payload)
+            self.assertEqual(provider.fetch_company_list(), [{"symbol": "DANGCEM"}])
+
+            chart_payload = {
+                "success": True,
+                "data": {
+                    "data": [
+                        {
+                            "date": "2024-01-02",
+                            "open": 100,
+                            "high": 101,
+                            "low": 99,
+                            "close": 100,
+                            "volume": 1_000,
+                        }
+                    ]
+                },
+            }
+            provider._request_json = Mock(return_value=chart_payload)
+            series = provider.fetch_equity_history(
+                "DANGCEM",
+                date(2024, 1, 1),
+                date(2024, 1, 3),
+                force_refresh=True,
+            )
+            self.assertEqual(len(series.bars), 1)
+            _, params = provider._request_json.call_args.args
+            self.assertEqual(params["format"], "detailed")
+            self.assertNotIn("period", params)
 
     def test_ngnmarket_success_false_raises(self):
         with self.assertRaises(ProviderError):

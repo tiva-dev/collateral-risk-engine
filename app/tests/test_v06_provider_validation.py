@@ -15,6 +15,7 @@ from app.historical_data.models import (
     HistoricalFXSeries,
     HistoricalSeries,
 )
+from app.historical_data.providers import ProviderError
 from app.simulations.calibration import generate_calibration_diagnostics
 from app.simulations.data_builder import OfficialDatasetBuilder
 from app.simulations.evidence_quality import (
@@ -83,6 +84,49 @@ class V06ProviderValidationTests(unittest.TestCase):
             self.assertRaisesRegex(ValueError, "ALPACA_DATA_FEED"),
         ):
             OfficialDatasetBuilder(["alpaca"])
+
+    def test_ngnmarket_auth_preflight_stops_repeated_provider_calls(self):
+        from app.simulations import data_builder
+
+        with patch.object(
+            data_builder, "NGNMarketHistoricalProvider"
+        ) as provider_class:
+            provider = provider_class.return_value
+            provider.fetch_company_list.side_effect = ProviderError(
+                "NGNMarket HTTP 401: INVALID_API_KEY",
+                provider="ngnmarket",
+                code="INVALID_API_KEY",
+            )
+            provider.total_api_call_count = 1
+            provider.cache_paths = []
+            provider.raw_response_paths = []
+            provider.quota_metadata = {}
+            manifest = OfficialDatasetBuilder(["ngnmarket"]).build(dry_run=False)
+        provider.fetch_company_list.assert_called_once()
+        provider.fetch_equity_history.assert_not_called()
+        provider.fetch_fx_history.assert_not_called()
+        self.assertEqual(
+            manifest.provider_coverage_summary["ngnmarket"]["requested"], 21
+        )
+        self.assertEqual(manifest.provider_coverage_summary["ngnmarket"]["missing"], 21)
+
+    def test_real_data_all_excludes_synthetic_thin_scenario(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "app.simulations.run_official_validation",
+                "--dry-run",
+                "--scenario",
+                "all",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertNotIn("thin_liquidity_portfolio", payload["scenarios"])
+        self.assertFalse(payload["config"]["synthetic_sensitivity_included"])
 
     def test_planned_call_count_and_budget(self):
         b = OfficialDatasetBuilder(["ngnmarket"])
