@@ -6,11 +6,11 @@ from app.market_data.identity import InstrumentIdentity
 from .cache import HistoricalDataCache
 from .config import load_config
 from .models import HistoricalBar, HistoricalFXRate, HistoricalFXSeries, HistoricalSeries, canonical_series_payload
-from .providers import HistoricalDataProvider, ProviderError
+from .providers import HistoricalDataProvider, ProviderError, validate_provider_url
 
 class NGNMarketHistoricalProvider(HistoricalDataProvider):
     provider_name="ngnmarket"; provider_capabilities=frozenset({"ngx_companies","ngx_bars","ngx_fx","ngx_indices"})
-    def __init__(self, cache:HistoricalDataCache|None=None): super().__init__(); self.config=load_config(); self.cache=cache or HistoricalDataCache(); self.missing_symbols=[]; self.missing_symbol_reasons={}; self.cache_paths=[]; self.raw_response_paths=[]; self.provider_coverage_summary={}
+    def __init__(self, cache:HistoricalDataCache|None=None): super().__init__(); self.config=load_config(); validate_provider_url(self.config.ngnmarket_base_url,{"api.ngnmarket.com"}); self.cache=cache or HistoricalDataCache(); self.missing_symbols=[]; self.missing_symbol_reasons={}; self.cache_paths=[]; self.raw_response_paths=[]; self.provider_coverage_summary={}
     def auth_headers(self): return {"Authorization": f"Bearer {self.config.ngnmarket_api_key}"} if self.config.ngnmarket_api_key else {}
     def parse_envelope(self,payload):
         if isinstance(payload,dict) and "meta" in payload: self.quota_metadata.update(payload.get("meta") or {})
@@ -27,7 +27,7 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
     def _identity(self,symbol, asset_type=AssetType.LISTED_EQUITY): return InstrumentIdentity(f"NGX:{symbol}:NGN",symbol,"NGX","NGN",asset_type,provider_symbol=symbol)
     def _rows(self,data):
         if isinstance(data, list): return data
-        if isinstance(data, dict): return data.get("prices") or data.get("chart") or data.get("history") or []
+        if isinstance(data, dict): return data.get("data") or data.get("prices") or data.get("chart") or data.get("history") or []
         return []
     def parse_company_chart(self,symbol,payload,start_date,end_date,asset_type=AssetType.LISTED_EQUITY):
         data=self.parse_envelope(payload); rows=self._rows(data); warnings=list(self.warnings); bars=[]; identity=self._identity(symbol,asset_type)
@@ -67,14 +67,18 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
             self.cache_paths.append(str(self.cache.read_path("normalized",**key))); rp=self.cache.read_path("raw",**key)
             if rp.exists(): self.raw_response_paths.append(str(rp))
             self.provider_coverage_summary={"requested":1,"cached":1,"fetched":0}; return _equity_from_cache(c["data"]) if c["data"].get("cache_schema") == "historical_series/v1" else self.parse_company_chart(instrument,c["data"],start_date,end_date)
-        p=self._request_json(f"/companies/{instrument}/chart",{"start_date":start_date.isoformat(),"end_date":end_date.isoformat()}); self.raw_response_paths.append(str(self.cache.write("raw",p,**key))); series=self.parse_company_chart(instrument,p,start_date,end_date); self.cache_paths.append(str(self.cache.write("normalized",canonical_series_payload(series),**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1}; return series
+        p=self._request_json(f"/companies/{instrument}/chart",{"from":start_date.isoformat(),"to":end_date.isoformat(),"period":"1d","format":"json"}); self.raw_response_paths.append(str(self.cache.write("raw",p,**key))); series=self.parse_company_chart(instrument,p,start_date,end_date)
+        if not series.bars: raise ProviderError(f"NGNMarket returned no covered chart rows for {instrument}",provider=self.provider_name,code="empty_coverage")
+        self.cache_paths.append(str(self.cache.write("normalized",canonical_series_payload(series),**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1,"api_call_count":1,"actual_start":str(series.bars[0].timestamp),"actual_end":str(series.bars[-1].timestamp)}; return series
     def fetch_fx_history(self,from_currency,to_currency,start_date,end_date,force_refresh=False):
         key=dict(provider=self.provider_name,pair=f"{from_currency}{to_currency}",start=str(start_date),end=str(end_date))
         if not force_refresh and (c:=self.cache.read("normalized",**key)):
             self.cache_paths.append(str(self.cache.read_path("normalized",**key))); rp=self.cache.read_path("raw",**key)
             if rp.exists(): self.raw_response_paths.append(str(rp))
             self.provider_coverage_summary={"requested":1,"cached":1,"fetched":0}; return _fx_from_cache(c["data"]) if c["data"].get("cache_schema") == "historical_fx_series/v1" else self.parse_fx_history(from_currency,to_currency,c["data"],start_date,end_date)
-        p=self._request_json("/forex/history",{"from":from_currency,"to":to_currency,"start_date":start_date.isoformat(),"end_date":end_date.isoformat()}); self.raw_response_paths.append(str(self.cache.write("raw",p,**key))); series=self.parse_fx_history(from_currency,to_currency,p,start_date,end_date); self.cache_paths.append(str(self.cache.write("normalized",canonical_series_payload(series),**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1}; return series
+        p=self._request_json("/forex/history",{"source":from_currency,"target":to_currency,"from":start_date.isoformat(),"to":end_date.isoformat()}); self.raw_response_paths.append(str(self.cache.write("raw",p,**key))); series=self.parse_fx_history(from_currency,to_currency,p,start_date,end_date)
+        if not series.rates: raise ProviderError(f"NGNMarket returned no covered FX rows for {from_currency}/{to_currency}",provider=self.provider_name,code="empty_coverage")
+        self.cache_paths.append(str(self.cache.write("normalized",canonical_series_payload(series),**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1,"api_call_count":1,"actual_start":str(series.rates[0].timestamp),"actual_end":str(series.rates[-1].timestamp)}; return series
     def fetch_index_history(self,index_symbol,start_date,end_date,force_refresh=False):
         key=dict(provider=self.provider_name,index=index_symbol,start=str(start_date),end=str(end_date))
         if not force_refresh and (c:=self.cache.read("normalized",**key)):

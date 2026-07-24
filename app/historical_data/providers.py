@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import date
 from typing import Any, ClassVar
+from urllib.parse import urlparse
 
 from .models import HistoricalFXSeries, HistoricalSeries
 
@@ -15,6 +16,12 @@ class ProviderError(RuntimeError):
         self.provider = provider
         self.code = code
         self.metadata = metadata or {}
+
+
+def validate_provider_url(url: str, allowed_hosts: set[str]) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in allowed_hosts:
+        raise ProviderError("provider URL must use HTTPS and an allowlisted host", code="unsafe_provider_url")
 
 
 class HistoricalDataProvider(ABC):

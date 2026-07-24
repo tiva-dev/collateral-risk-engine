@@ -21,7 +21,7 @@ from app.market_data.policy import MarketDataPolicy
 from app.market_data.providers import FXRate, RawQuote
 from app.monitoring.events import serialize_sse_event
 from app.monitoring.market_updates import InMemoryMarketDataCache
-from app.monitoring.models import MonitoringEvent, MonitoringEventType, MonitoringSeverity, MonitoringStatus, MonitoringThresholds
+from app.monitoring.models import MonitoringEvent, MonitoringEventType, MonitoringSeverity, MonitoringStatus
 from app.monitoring.repositories import InMemoryMonitoredAccountRepository, InMemoryMonitoringEventRepository
 from app.monitoring.scheduler import SimpleMonitoringScheduler
 from app.monitoring.service import MonitoringService

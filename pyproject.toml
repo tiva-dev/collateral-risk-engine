@@ -13,3 +13,32 @@ dependencies = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["app/tests"]
+
+[tool.ruff.lint]
+# The inherited codebase intentionally uses compact one-line statements. Keep
+# lint enforcement focused on correctness until those modules are reformatted.
+ignore = ["E401", "E402", "E701", "E702"]
+
+[tool.mypy]
+exclude = "^app/tests/"
+
+# These compact legacy modules predate type checking. Keep the gate enabled for
+# the rest of production code while they are migrated module-by-module.
+[[tool.mypy.overrides]]
+module = [
+  "app.historical_data.cache",
+  "app.market_data.normalizer",
+  "app.market_data.fx",
+  "app.monitoring.repositories",
+  "app.market_data.aggregator",
+  "app.historical_data.ngnmarket",
+  "app.historical_data.alpha_vantage",
+  "app.simulations.data_builder",
+  "app.lifecycle.service",
+  "app.simulations.replay",
+  "app.simulations.run_official_validation",
+  "app.monitoring.service",
+  "app.monitoring.events",
+  "app.api.routes",
+]
+ignore_errors = true

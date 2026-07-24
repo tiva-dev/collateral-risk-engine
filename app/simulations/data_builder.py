@@ -4,7 +4,6 @@ from datetime import date, datetime, timezone
 from typing import Iterable
 import os
 from app.historical_data.alpaca import AlpacaTradingHistoricalProvider
-from app.historical_data.providers import ProviderError
 from app.historical_data.alpha_vantage import AlphaVantageHistoricalProvider
 from app.historical_data.config import load_config
 from app.historical_data.manifest import write_manifest

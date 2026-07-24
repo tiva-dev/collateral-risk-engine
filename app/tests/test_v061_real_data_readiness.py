@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 

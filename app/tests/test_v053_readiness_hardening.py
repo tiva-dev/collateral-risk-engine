@@ -9,7 +9,7 @@ from app.core.models import Holding
 from app.credit.interest import InterestPolicy
 from app.historical_data.models import HistoricalBar, HistoricalFXRate
 from app.simulations.metrics import compute_simulation_metrics
-from app.simulations.replay import HistoricalReplayEngine, StressOverlay, convert_market_data_currency, historical_bar_to_market_data
+from app.simulations.replay import HistoricalReplayEngine, convert_market_data_currency, historical_bar_to_market_data
 from app.simulations.run_official_validation import _load_replay_inputs, _synthetic_thin_bars
 from app.simulations.scenarios.official_portfolios import OfficialPortfolioScenario
 
@@ -29,7 +29,7 @@ class V053ReadinessHardeningTests(unittest.TestCase):
         scenario = OfficialPortfolioScenario("fx_gap", [Holding("MTNN", AssetType.LISTED_EQUITY, 10, "NGN")], "USD")
         result = HistoricalReplayEngine(seed=1).replay(scenario, {"MTNN": [bar]}, fx_rates={})
         self.assertGreater(result["records"][0]["fx_missing"], 0)
-        self.assertGreater(result["records"][0]["shortfall"], 0)
+        self.assertGreater(result["records"][0]["credit_limit_breach"], 0)
         self.assertEqual(compute_simulation_metrics(result)["fx_missing_events"], 1)
 
     def test_time_indexed_fx_inverse_and_stale_flags(self):

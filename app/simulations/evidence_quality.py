@@ -2,7 +2,6 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
 from app.simulations.config.official_validation_universe import FX_PAIRS, NGX_UNIVERSE, US_UNIVERSE
 from app.simulations.scenarios.official_portfolios import official_portfolio_scenarios
 

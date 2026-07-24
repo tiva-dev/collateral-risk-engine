@@ -2,22 +2,28 @@ from __future__ import annotations
 
 from app.core.enums import MarginState
 from app.core.models import AssetRiskResult, LiquidationOrder, LiquidationPlan
-from app.risk.math_utils import clamp
+from app.risk.math_utils import round_money
 
 
-def cure_amount_to_restore_coverage(
+def repayment_only_cure(
     stressed_liquidation_value: float,
     loan_balance: float,
     target_coverage: float,
 ) -> float:
-    if loan_balance <= 0:
-        return 0.0
-    if target_coverage <= 1.0:
-        return max(0.0, loan_balance - stressed_liquidation_value)
-    numerator = target_coverage * loan_balance - stressed_liquidation_value
-    if numerator <= 0:
-        return 0.0
-    return clamp(numerator / (target_coverage - 1.0), 0.0, loan_balance)
+    if target_coverage <= 0:
+        raise ValueError("target_coverage must be greater than zero")
+    return round_money(max(0.0, loan_balance - stressed_liquidation_value / target_coverage))
+
+
+def collateral_injection_only_cure(
+    stressed_liquidation_value: float,
+    loan_balance: float,
+    target_coverage: float,
+) -> float:
+    """Additional stressed collateral value required with obligation unchanged."""
+    if target_coverage <= 0:
+        raise ValueError("target_coverage must be greater than zero")
+    return round_money(max(0.0, target_coverage * loan_balance - stressed_liquidation_value))
 
 
 def build_liquidation_plan(

@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 from app.core.enums import AssetType, MarginState
 from app.core.evaluator import CollateralRiskEngine
-from app.core.models import Holding, Loan, MarketData, OrderBook, OrderBookLevel, Policy
-from app.credit.interest import InterestPolicy, accrue_scheduled_periods
+from app.core.models import Loan, MarketData, OrderBook, OrderBookLevel, Policy
+from app.credit.interest import accrue_scheduled_periods
 from app.historical_data.models import HistoricalBar, HistoricalDatasetManifest, HistoricalFXRate, HistoricalFXSeries
 from app.lifecycle.service import CreditLifecycleEngine
 from app.simulations.scenarios.official_portfolios import OfficialPortfolioScenario
@@ -167,7 +167,7 @@ def _static_haircut(asset_type: AssetType) -> float:
     return {AssetType.CASH:0.02, AssetType.BOND:0.20, AssetType.BOND_FUND:0.22, AssetType.ETF:0.30, AssetType.LISTED_EQUITY:0.35, AssetType.HIGH_VOLATILITY_EQUITY:0.60, AssetType.CRYPTO:0.80}.get(asset_type, 1.0)
 
 def _baseline_record(d: date, collateral_value: float, loan_balance: float, credit_limit: float, status: str) -> dict[str, Any]:
-    return {"date": d.isoformat(), "collateral_value": collateral_value, "loan_balance": loan_balance, "credit_limit": credit_limit, "available_credit": max(0.0, credit_limit - loan_balance), "shortfall": max(0.0, loan_balance - credit_limit), "margin_state": status}
+    return {"date": d.isoformat(), "market_value": collateral_value, "collateral_value": collateral_value, "total_obligation": loan_balance, "loan_balance": loan_balance, "policy_credit_limit": credit_limit, "credit_limit": credit_limit, "available_credit": max(0.0, credit_limit - loan_balance), "credit_limit_breach": max(0.0, loan_balance - credit_limit), "margin_state": status}
 
 class HistoricalReplayEngine:
     def __init__(self, manifest: HistoricalDatasetManifest|dict[str,Any]|None=None, seed:int=42):
@@ -179,7 +179,7 @@ class HistoricalReplayEngine:
         fx_rates=fx_rates or {}; stress=stress or StressOverlay(); configured_flat_ltv=scenario.base_ltv_policy if flat_ltv is None else flat_ltv; all_dates=sorted({(b.timestamp.date() if isinstance(b.timestamp,datetime) else b.timestamp) for bars in bars_by_symbol.values() for b in bars})
         if start_date: all_dates=[d for d in all_dates if d>=start_date]
         if end_date: all_dates=[d for d in all_dates if d<=end_date]
-        loan=Loan(0.0,currency=scenario.loan_currency); policy=Policy.default(); policy=replace(policy, base_ltv={k: min(v, scenario.base_ltv_policy) for k,v in policy.base_ltv.items()}, risk_appetite=scenario.risk_appetite); records=[]; flat_records=[]; static_records=[]; dynamic_records=[]; events=[]; prev_dt=datetime.combine(all_dates[0], datetime.min.time(), tzinfo=timezone.utc) if all_dates else datetime.now(timezone.utc)
+        loan=Loan(0.0,currency=scenario.loan_currency); policy=Policy.default(); policy=replace(policy, base_ltv={k: min(v, scenario.base_ltv_policy) for k,v in policy.base_ltv.items()}, risk_appetite=scenario.risk_appetite); records=[]; flat_records=[]; static_records=[]; dynamic_records=[]; events=[]; previous_state=None; prev_dt=datetime.combine(all_dates[0], datetime.min.time(), tzinfo=timezone.utc) if all_dates else datetime.now(timezone.utc)
         returns={s:[] for s in bars_by_symbol}; prev_price={}; positions={s:0 for s in bars_by_symbol}; latest={}; missing_fx_dates=[]
         dated_bars={s: sorted(bars, key=lambda b: b.timestamp) for s,bars in bars_by_symbol.items()}
         for d in all_dates:
@@ -209,15 +209,22 @@ class HistoricalReplayEngine:
                 ev=self.risk_engine.evaluate(scenario.name, scenario.holdings, loan, policy, md)
                 safe=min(ev.approved_credit_limit, ev.stressed_liquidation_value/max(ev.trigger_levels.dynamic_warning_coverage,1e-9))
                 state=ev.margin_state.value if hasattr(ev.margin_state,'value') else str(ev.margin_state)
-            except Exception as exc:
+            except Exception:
                 if not fx_missing: raise
                 safe=0.0; state=MarginState.LIQUIDATION.value
-            if state != MarginState.SAFE.value: events.append({"date":d.isoformat(),"state":state,"severity":"warning"})
+            if state != previous_state:
+                severity={MarginState.SAFE.value:"info", MarginState.WATCH.value:"warning", MarginState.RESTRICT_NEW_BORROWING.value:"warning", MarginState.MARGIN_CALL.value:"critical", MarginState.LIQUIDATION.value:"critical"}.get(state,"warning")
+                events.append({"timestamp":now.isoformat(),"date":d.isoformat(),"from_state":previous_state,"state":state,"severity":severity,"event_type":"margin_state_transition"})
+                previous_state=state
             collateral_value=sum((md[h.asset_id].last_price*h.quantity if h.asset_id in md else 0) for h in scenario.holdings)
             flat_limit=collateral_value*configured_flat_ltv
             static_limit=sum((md[h.asset_id].last_price*h.quantity*(1-_static_haircut(h.asset_type)) if h.asset_id in md else 0) for h in scenario.holdings)
             flat_records.append(_baseline_record(d, collateral_value, loan.balance, flat_limit, "flat_ltv"))
             static_records.append(_baseline_record(d, collateral_value, loan.balance, static_limit, "static_haircut"))
             dynamic_records.append(_baseline_record(d, collateral_value, loan.balance, safe, state))
-            records.append({"date":d.isoformat(),"collateral_value":collateral_value,"credit_limit":safe,"available_credit":max(0,safe-loan.balance),"loan_balance":loan.balance,"principal":loan.principal,"accrued_interest":loan.accrued_interest,"interest_accrued":acc.interest_accrued,"approved_credit_limit":ev.approved_credit_limit if ev is not None else 0.0,"lifecycle_safe_credit_limit":safe,"margin_state":state,"shortfall":max(0,loan.balance-safe),"with_interest_balance":loan.balance,"without_interest_balance":loan.principal,"fx_missing":fx_missing,"fx_stale":any(x.metadata.get("fx_stale") for x in md.values()),"missing_data":fx_missing,"simulated_transition_events":include_monitoring,"model_versions":{"core":RISK_MODEL_VERSION,"lifecycle":LIFECYCLE_MODEL_VERSION}})
-        return {"scenario":scenario.name,"seed":self.seed,"records":records,"baseline_results":{"flat_ltv":flat_records,"static_haircut":static_records,"dynamic_engine":dynamic_records},"events":events,"missing_fx_dates":missing_fx_dates,"stress_assumptions":asdict(stress),"interest_policy":asdict(scenario.loan_terms)}
+            proceeds=ev.stressed_liquidation_value if ev is not None else 0.0
+            costs=max(0.0, collateral_value-proceeds)
+            obligation=loan.balance
+            fx_stale=any(x.metadata.get("fx_stale") for x in md.values())
+            records.append({"date":d.isoformat(),"comparison_regime":"common_exposure_surveillance","market_value":collateral_value,"collateral_value":collateral_value,"policy_credit_limit":safe,"credit_limit":safe,"available_credit":max(0,safe-obligation),"principal":loan.principal,"interest":loan.accrued_interest,"fees":loan.fees,"total_obligation":obligation,"loan_balance":obligation,"interest_accrued":acc.interest_accrued,"approved_credit_limit":ev.approved_credit_limit if ev is not None else 0.0,"lifecycle_safe_credit_limit":safe,"stressed_liquidation_proceeds":proceeds,"liquidation_costs":costs,"credit_limit_breach":max(0,obligation-safe),"economic_recovery_shortfall":max(0,obligation+costs-proceeds),"recovery_coverage_ratio":proceeds/max(obligation+costs,1e-9),"margin_state":state,"liquidation_plan":asdict(ev.liquidation_plan) if ev is not None and ev.liquidation_plan else None,"with_interest_balance":obligation,"without_interest_balance":loan.principal,"data_quality":{"fx_missing":fx_missing,"fx_stale":fx_stale,"providers":sorted({str(x.metadata.get("provider","unknown")) for x in md.values()})},"fx_missing":fx_missing,"fx_stale":fx_stale,"missing_data":fx_missing,"model_versions":{"core":RISK_MODEL_VERSION,"lifecycle":LIFECYCLE_MODEL_VERSION}})
+        return {"scenario":scenario.name,"comparison_regime":"common_exposure_surveillance","seed":self.seed,"records":records,"baseline_results":{"flat_ltv":flat_records,"static_haircut":static_records,"dynamic_engine":dynamic_records},"events":events,"missing_fx_dates":missing_fx_dates,"stress_assumptions":asdict(stress),"interest_policy":asdict(scenario.loan_terms)}

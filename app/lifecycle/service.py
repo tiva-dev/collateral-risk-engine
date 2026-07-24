@@ -12,7 +12,7 @@ from app.core.enums import (
     RiskDecision,
     TransferDirection,
 )
-from app.core.evaluator import CollateralRiskEngine
+from app.core.evaluator import CollateralRiskEngine, RiskEvaluationError
 from app.core.models import (
     AccountState,
     Holding,
@@ -78,6 +78,10 @@ class CreditLifecycleEngine:
         )
         safe_credit_limit = self._safe_credit_limit(evaluation)
         safe_available_credit = round_money(max(0.0, safe_credit_limit))
+        if safe_available_credit <= 0:
+            raise RiskEvaluationError(
+                "origination rejected: approved available credit is zero"
+            )
         audit_id = self._write_lifecycle_audit(
             event_type="origination",
             account_ref=account_ref,
