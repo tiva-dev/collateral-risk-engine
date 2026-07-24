@@ -23,7 +23,11 @@ from app.core.models import (
     PreTradeRiskCheckResult,
     TriggerLevels,
 )
-from app.liquidation.plan import build_liquidation_plan, cure_amount_to_restore_coverage
+from app.liquidation.plan import (
+    build_liquidation_plan,
+    collateral_injection_only_cure,
+    repayment_only_cure,
+)
 from app.liquidation.recovery import estimate_stressed_recovery
 from app.risk.adjustments import all_adjustments, risk_drivers_from_breakdown
 from app.risk.math_utils import clamp, round_money, safe_div
@@ -58,6 +62,7 @@ class CollateralRiskEngine:
         if requested_draw_amount < 0:
             raise RiskEvaluationError("requested_draw_amount cannot be negative")
 
+        holdings = self._aggregate_holdings(holdings)
         outstanding_balance = loan.balance
         requested_draw_amount = max(0.0, requested_draw_amount)
         projected_loan_balance = outstanding_balance + requested_draw_amount
@@ -677,18 +682,38 @@ class CollateralRiskEngine:
             1.12,
             2.20,
         )
-        cure_amount = cure_amount_to_restore_coverage(
+        repayment_cure = repayment_only_cure(
             stressed_liquidation_value=stressed_liquidation_value,
             loan_balance=loan_balance,
             target_coverage=dynamic_margin_call_coverage,
+        )
+        injection_cure = collateral_injection_only_cure(
+            stressed_liquidation_value, loan_balance, dynamic_margin_call_coverage
         )
         return TriggerLevels(
             dynamic_liquidation_coverage=round(dynamic_liquidation_coverage, 4),
             dynamic_margin_call_coverage=round(dynamic_margin_call_coverage, 4),
             dynamic_restriction_coverage=round(dynamic_restriction_coverage, 4),
             dynamic_warning_coverage=round(dynamic_warning_coverage, 4),
-            required_cure_amount=round_money(cure_amount),
+            # Margin notices and draw/action controls quote repayment cash.  The
+            # economically distinct collateral cure is exposed alongside it.
+            required_cure_amount=repayment_cure,
+            repayment_only_cure=repayment_cure,
+            collateral_injection_only_cure=injection_cure,
         )
+
+    @staticmethod
+    def _aggregate_holdings(holdings: list[Holding]) -> list[Holding]:
+        aggregated: dict[tuple[str, str, str, AssetType, str], Holding] = {}
+        for holding in holdings:
+            key = holding.stable_identity
+            prior = aggregated.get(key)
+            aggregated[key] = (
+                holding
+                if prior is None
+                else replace(prior, quantity=prior.quantity + holding.quantity)
+            )
+        return list(aggregated.values())
 
     def _margin_state(
         self,

@@ -257,8 +257,21 @@ class MarketDataAggregationTests(unittest.TestCase):
         self.assertIn("quality_scores", payload)
         self.assertIn("fx_decisions", payload)
         self.assertIn("missing_data", payload)
-        self.assertEqual(payload["normalized_market_data"]["MTNN"]["loan_currency"], "USD")
-        self.assertEqual(payload["fx_decisions"]["MTNN"]["fx_rate_used"], 0.00067)
+        self.assertNotIn("MTNN", payload["normalized_market_data"])
+        self.assertIn("MTNN", payload["missing_data"])
+        self.assertNotIn("MTNN", payload["fx_decisions"])
+
+    def test_runtime_provided_by_us_never_uses_hardcoded_mock_values(self) -> None:
+        for symbol, exchange, currency in (("AAPL", "NASDAQ", "USD"), ("MTNN", "NGX", "NGN")):
+            request = MarketDataNormalizeRequest.model_validate({
+                "instruments": [{"asset_id": symbol, "symbol": symbol,
+                    "exchange": exchange, "currency": currency,
+                    "asset_type": "listed_equity"}],
+                "loan_currency": "USD", "data_mode": "provided_by_us",
+            })
+            payload = normalize_market_data(request).model_dump(mode="json")
+            self.assertNotIn(symbol, payload["normalized_market_data"])
+            self.assertIn(symbol, payload["missing_data"])
 
 
 if __name__ == "__main__":

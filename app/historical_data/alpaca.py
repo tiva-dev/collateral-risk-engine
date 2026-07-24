@@ -10,7 +10,7 @@ from app.market_data.identity import InstrumentIdentity
 from .cache import HistoricalDataCache
 from .config import load_config
 from .models import HistoricalBar, HistoricalSeries, canonical_series_payload
-from .providers import HistoricalDataProvider, ProviderError
+from .providers import HistoricalDataProvider, ProviderError, validate_provider_url
 
 
 class AlpacaTradingHistoricalProvider(HistoricalDataProvider):
@@ -18,7 +18,7 @@ class AlpacaTradingHistoricalProvider(HistoricalDataProvider):
     provider_capabilities = frozenset({"us_equity_bars", "etf_bars", "daily_bars"})
 
     def __init__(self, cache: HistoricalDataCache | None = None):
-        super().__init__(); self.config = load_config(); self.cache = cache or HistoricalDataCache()
+        super().__init__(); self.config = load_config(); validate_provider_url(self.config.alpaca_base_url,{"data.alpaca.markets"}); self.cache = cache or HistoricalDataCache()
         self.cache_paths: list[str] = []; self.raw_response_paths: list[str] = []; self.provider_coverage_summary: dict[str, Any] = {}
 
     def auth_headers(self) -> dict[str, str]:
@@ -101,9 +101,10 @@ class AlpacaTradingHistoricalProvider(HistoricalDataProvider):
         merged=self._merge_payload(pages)
         if "__single__" in merged["bars"]: merged["bars"]={instrument: merged["bars"].pop("__single__")}
         merged["metadata"]={"page_count":page_count,"adjustment":adjustment,"feed":feed,"currency":currency,"quota_metadata":self.quota_metadata}
-        self.provider_coverage_summary.update({"requested":1,"available":1 if self._extract_symbol_bars(instrument, merged) else 0,"missing":0 if self._extract_symbol_bars(instrument, merged) else 1,"cached":0,"fetched":1,"page_count":page_count})
+        self.provider_coverage_summary.update({"requested":1,"available":1 if self._extract_symbol_bars(instrument, merged) else 0,"missing":0 if self._extract_symbol_bars(instrument, merged) else 1,"cached":0,"fetched":1,"page_count":page_count,"api_call_count":page_count,"adjustment":adjustment})
         self.raw_response_paths.append(str(self.cache.write("raw", merged, **key)))
         series=self.parse_bars(instrument, merged, start_date, end_date, interval)
+        if not series.bars: raise ProviderError(f"Alpaca returned no covered bars for {instrument}",provider=self.provider_name,code="empty_coverage")
         self.cache_paths.append(str(self.cache.write("normalized", canonical_series_payload(series), **key)))
         return series
 

@@ -100,6 +100,12 @@ class BaseProvider:
         return MarketStatus.UNKNOWN
 
 
+class MissingProvider(BaseProvider):
+    """Fail-closed runtime provider used when no live client was injected."""
+
+    provider_name = "missing_provider"
+
+
 class ClientSuppliedProvider(BaseProvider):
     provider_name = "client_supplied"
 

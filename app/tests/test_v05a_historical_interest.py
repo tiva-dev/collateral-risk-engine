@@ -11,6 +11,7 @@ from app.historical_data.alpaca import AlpacaTradingHistoricalProvider
 from app.historical_data.alpha_vantage import AlphaVantageHistoricalProvider
 from app.historical_data.cache import HistoricalDataCache
 from app.historical_data.ngnmarket import NGNMarketHistoricalProvider
+from app.historical_data.providers import ProviderError
 from app.simulations.data_builder import OfficialDatasetBuilder
 
 class TestV05A(unittest.TestCase):
@@ -45,7 +46,9 @@ class TestV05A(unittest.TestCase):
             c=HistoricalDataCache(d); p=AlphaVantageHistoricalProvider(c); key=dict(provider=p.provider_name,symbol='IBM',start='2020-01-01',end='2020-01-03',interval='1d')
             c.write('normalized', {'Time Series (Daily)': {}}, **key)
             with patch.object(p,'_request_json', side_effect=AssertionError('called')): p.fetch_equity_history('IBM',date(2020,1,1),date(2020,1,3))
-            with patch.object(p,'_request_json', return_value={'Time Series (Daily)': {}}) as m: p.fetch_equity_history('IBM',date(2020,1,1),date(2020,1,3),force_refresh=True); self.assertTrue(m.called)
+            with patch.object(p,'_request_json', return_value={'Time Series (Daily)': {}}) as m:
+                with self.assertRaises(ProviderError): p.fetch_equity_history('IBM',date(2020,1,1),date(2020,1,3),force_refresh=True)
+                self.assertTrue(m.called)
     def test_interest(self):
         s=datetime(2020,1,1,tzinfo=timezone.utc); e=datetime(2020,1,2,tzinfo=timezone.utc)
         self.assertAlmostEqual(calculate_day_count_fraction(s,e,'actual_365'),1/365)

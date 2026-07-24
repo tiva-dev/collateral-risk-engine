@@ -99,7 +99,8 @@ class V031FunctionalHardeningTests(unittest.TestCase):
         response = client.post("/market-data/normalize", json=payload)
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertIn("NGX:MTNN:NGN:LISTED_EQUITY", body["normalized_market_data"])
+        self.assertEqual(body["normalized_market_data"], {})
+        self.assertIn("MTNN", body["missing_data"])
         self.assertEqual(body["market_data_model_version"], "market-data-v0.3.1")
 
     def test_numeric_validation_rejects_invalid_inputs(self) -> None:

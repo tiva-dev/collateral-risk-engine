@@ -29,7 +29,7 @@ class V053ReadinessHardeningTests(unittest.TestCase):
         scenario = OfficialPortfolioScenario("fx_gap", [Holding("MTNN", AssetType.LISTED_EQUITY, 10, "NGN")], "USD")
         result = HistoricalReplayEngine(seed=1).replay(scenario, {"MTNN": [bar]}, fx_rates={})
         self.assertGreater(result["records"][0]["fx_missing"], 0)
-        self.assertGreater(result["records"][0]["shortfall"], 0)
+        self.assertGreater(result["records"][0]["credit_limit_breach"], 0)
         self.assertEqual(compute_simulation_metrics(result)["fx_missing_events"], 1)
 
     def test_time_indexed_fx_inverse_and_stale_flags(self):
