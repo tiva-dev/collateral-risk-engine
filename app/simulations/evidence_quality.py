@@ -79,11 +79,29 @@ def validate_evidence_package(files):
     if metrics_path.exists():
         metrics=json.loads(metrics_path.read_text())
         if not metrics: r['blocking_errors'].append('no scenario metrics present')
+        scenarios={}
         for m in metrics:
             for k in ['scenario','stress_name','fx_missing_events','total_interest_accrued','provider_coverage_by_symbol','dynamic_engine_versus_static_ltv_outcome_table']:
                 if k not in m or m[k] in (None,''):
                     r['blocking_errors'].append(f"placeholder/empty metric {k} in {m.get('scenario')}")
+                elif isinstance(m[k],dict) and m[k].get('status')=='not_applicable' and not m[k].get('reason'):
+                    r['blocking_errors'].append(f"N/A metric {k} requires a reason in {m.get('scenario')}")
+            table=m.get('dynamic_engine_versus_static_ltv_outcome_table')
+            if table == []: r['blocking_errors'].append(f"empty dynamic/static/flat comparison table in {m.get('scenario')}")
+            elif isinstance(table,list) and not all(all(x in row for x in ('dynamic_shortfall','flat_ltv_shortfall','static_haircut_shortfall')) for row in table): r['blocking_errors'].append(f"baseline comparison rows missing in {m.get('scenario')}")
+            base=m.get('base_scenario') or str(m.get('scenario','')).split('::')[0]
+            scenarios.setdefault(base,0); scenarios[base] += len(table) if isinstance(table,list) else 0
+            if m.get('provider_coverage_by_symbol')=={} and _provider_backed(mapping): r['blocking_errors'].append(f"provider coverage empty in provider-backed run for {m.get('scenario')}")
+        for scenario,count in scenarios.items():
+            if not count: r['blocking_errors'].append(f"QA cannot prove scenario produced a result: {scenario}")
     r['passed']=not r['blocking_errors']; r['coverage_score']=0.0 if r['blocking_errors'] else 1.0; return r
+
+def _provider_backed(mapping):
+    p=Path(mapping.get('official_validation_manifest.json','official_validation_manifest.json'))
+    try:
+        m=json.loads(p.read_text()); provider=str(m.get('provider') or m.get('dataset_manifest',{}).get('provider') or '')
+        return bool(provider and provider not in {'synthetic','dry_run'})
+    except (OSError, ValueError, AttributeError): return False
 
 def scenario_eligibility(manifest, scenario_names=None, allow_synthetic=False, stress='all'):
     m=_manifest(manifest); earliest=m.get('earliest_available_date_by_symbol') or {}; missing=set(m.get('missing_symbols') or [])
@@ -92,14 +110,15 @@ def scenario_eligibility(manifest, scenario_names=None, allow_synthetic=False, s
     for name in names:
         sc=scenarios[name]; reasons=[]
         if sc.loan_currency not in SUPPORTED_LOAN_CURRENCIES: reasons.append('unsupported loan currency')
-        if getattr(sc.loan_terms,'annual_rate',0) < 0: reasons.append('invalid interest terms')
+        if getattr(sc.loan_terms,'annual_interest_rate',-1) < 0: reasons.append('invalid interest terms')
         for h in sc.holdings:
             if h.asset_id=='THIN' and allow_synthetic: continue
             if h.asset_id in missing or h.asset_id not in earliest: reasons.append(f"missing bars for {h.asset_id}")
-        if sc.loan_currency!='USD' or any(h.currency!=sc.loan_currency for h in sc.holdings):
-            if stress!='missing_fx' and not allow_synthetic:
-                needed=[p for p in FX_PAIRS if sc.loan_currency in p]
-                if not any(p in earliest for p in needed): reasons.append('required FX coverage missing')
+        if stress!='missing_fx' and not allow_synthetic:
+            available=set(m.get('fx_pairs') or []) | {k for k in earliest if '/' in k}
+            for currency in sorted({h.currency for h in sc.holdings if h.currency != sc.loan_currency}):
+                direct=f"{currency}/{sc.loan_currency}"; inverse=f"{sc.loan_currency}/{currency}"
+                if direct not in available and inverse not in available: reasons.append(f"required FX coverage missing: {direct} or {inverse}")
         item={"scenario":name,"reasons":reasons,"recommended_action":"run validation" if not reasons else "refresh provider dataset or allow documented synthetic gap"}
         (eligible if not reasons else ineligible).append(item)
     return {"eligible_scenarios":eligible,"ineligible_scenarios":ineligible}

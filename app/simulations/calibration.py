@@ -4,6 +4,11 @@ from collections import defaultdict
 from pathlib import Path
 
 def _avg(xs): return sum(xs)/len(xs) if xs else 0.0
+def _diagnostic(rows, keys):
+    for key in keys:
+        values=[r[key] for r in rows if isinstance(r.get(key),(int,float))]
+        if values: return {'status':'available','metric':key,'value':_avg(values)}
+    return {'status':'unavailable','reason':f"none of {', '.join(keys)} are present"}
 
 def generate_calibration_diagnostics(metrics, output_dir=None):
     by=defaultdict(list)
@@ -11,9 +16,9 @@ def generate_calibration_diagnostics(metrics, output_dir=None):
     scenarios={}; over=[]; under=[]
     for name, rows in by.items():
         d={
-            'average_approved_credit_by_scenario': _avg([r.get('average_loan_balance',0) for r in rows]),
-            'average_lifecycle_safe_credit_limit_by_scenario': _avg([r.get('average_credit_capacity_preserved',0) for r in rows]),
-            'credit_capacity_preserved_by_scenario': _avg([r.get('credit_capacity_preserved_at_target_shortfall_risk',0) for r in rows]),
+            'average_approved_credit_by_scenario': _diagnostic(rows,['average_approved_credit']),
+            'average_lifecycle_safe_credit_limit_by_scenario': _diagnostic(rows,['average_lifecycle_safe_credit_limit']),
+            'credit_capacity_preserved_by_scenario': _diagnostic(rows,['average_credit_capacity_preserved','credit_capacity_preserved_at_target_shortfall_risk']),
             'shortfall_rate_by_scenario': _avg([r.get('collateral_shortfall_rate',0) for r in rows]),
             'worst_shortfall_by_scenario': max([r.get('worst_shortfall',0) for r in rows] or [0]),
             'margin_call_frequency_by_scenario': _avg([r.get('margin_call_frequency',0) for r in rows]),

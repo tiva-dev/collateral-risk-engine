@@ -404,3 +404,6 @@ python -m app.simulations.run_official_validation --dry-run --qa --calibration -
 The manual workflow `.github/workflows/official-validation-provider-run.yml` is `workflow_dispatch` only. It reads provider credentials from GitHub Actions Secrets, defaults to dry-run, enforces provider call budgets, and uploads evidence artifacts.
 
 See `docs/OFFICIAL_PROVIDER_VALIDATION_RUNBOOK.md`, `docs/EVIDENCE_QA_CHECKLIST.md`, and `docs/CALIBRATION_REVIEW_GUIDE.md`. Broker execution, live WebSocket market data, and production database connections are not part of v0.6.
+
+### v0.6.1 real-data readiness
+Official replay accepts only canonical `HistoricalSeries`/`HistoricalFXSeries` normalized caches; provider-native payloads are warned and excluded from evidence. Eligibility requires the exact direct or inverse FX pair between every holding currency and the loan currency. Evidence QA requires non-empty dynamic/flat/static comparisons, result proof, and provider coverage for provider-backed runs. Calibration reports approved credit, lifecycle-safe limits, and preserved capacity without substituting loan balances. The manual workflow blocks validation after a dry-run build, while smoke output redacts credentials and isolates provider failures.

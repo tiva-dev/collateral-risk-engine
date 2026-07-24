@@ -3,7 +3,7 @@ import csv, io, json, urllib.parse, urllib.request
 from datetime import date, datetime, timezone
 from .cache import HistoricalDataCache
 from .config import load_config
-from .models import HistoricalBar, HistoricalFXRate, HistoricalFXSeries, HistoricalSeries
+from .models import HistoricalBar, HistoricalFXRate, HistoricalFXSeries, HistoricalSeries, canonical_series_payload
 from .providers import HistoricalDataProvider, ProviderError
 
 class AlphaVantageHistoricalProvider(HistoricalDataProvider):
@@ -48,12 +48,19 @@ class AlphaVantageHistoricalProvider(HistoricalDataProvider):
         if not force_refresh and (c:=self.cache.read("normalized",**key)):
             self.cache_paths.append(str(self.cache.read_path("normalized",**key))); rp=self.cache.read_path("raw",**key)
             if rp.exists(): self.raw_response_paths.append(str(rp))
-            self.provider_coverage_summary={"requested":1,"cached":1,"fetched":0}; return self.parse_daily_adjusted(instrument,c["data"],start_date,end_date)
-        p=self._request_json({"function":"TIME_SERIES_DAILY_ADJUSTED","symbol":instrument,"outputsize":"full"}); self.raw_response_paths.append(str(self.cache.write("raw",p,**key))); self.cache_paths.append(str(self.cache.write("normalized",p,**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1}; return self.parse_daily_adjusted(instrument,p,start_date,end_date)
+            self.provider_coverage_summary={"requested":1,"cached":1,"fetched":0}; return _equity_from_cache(c["data"]) if c["data"].get("cache_schema") == "historical_series/v1" else self.parse_daily_adjusted(instrument,c["data"],start_date,end_date)
+        p=self._request_json({"function":"TIME_SERIES_DAILY_ADJUSTED","symbol":instrument,"outputsize":"full"}); self.raw_response_paths.append(str(self.cache.write("raw",p,**key))); series=self.parse_daily_adjusted(instrument,p,start_date,end_date); self.cache_paths.append(str(self.cache.write("normalized",canonical_series_payload(series),**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1}; return series
     def fetch_fx_history(self,from_currency,to_currency,start_date,end_date,force_refresh=False):
         key=dict(provider=self.provider_name,pair=f"{from_currency}{to_currency}",start=str(start_date),end=str(end_date))
         if not force_refresh and (c:=self.cache.read("normalized",**key)):
             self.cache_paths.append(str(self.cache.read_path("normalized",**key))); rp=self.cache.read_path("raw",**key)
             if rp.exists(): self.raw_response_paths.append(str(rp))
-            self.provider_coverage_summary={"requested":1,"cached":1,"fetched":0}; return self.parse_fx_daily(from_currency,to_currency,c["data"],start_date,end_date)
-        p=self._request_json({"function":"FX_DAILY","from_symbol":from_currency,"to_symbol":to_currency,"outputsize":"full"}); self.raw_response_paths.append(str(self.cache.write("raw",p,**key))); self.cache_paths.append(str(self.cache.write("normalized",p,**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1}; return self.parse_fx_daily(from_currency,to_currency,p,start_date,end_date)
+            self.provider_coverage_summary={"requested":1,"cached":1,"fetched":0}; return _fx_from_cache(c["data"]) if c["data"].get("cache_schema") == "historical_fx_series/v1" else self.parse_fx_daily(from_currency,to_currency,c["data"],start_date,end_date)
+        p=self._request_json({"function":"FX_DAILY","from_symbol":from_currency,"to_symbol":to_currency,"outputsize":"full"}); self.raw_response_paths.append(str(self.cache.write("raw",p,**key))); series=self.parse_fx_daily(from_currency,to_currency,p,start_date,end_date); self.cache_paths.append(str(self.cache.write("normalized",canonical_series_payload(series),**key))); self.provider_coverage_summary={"requested":1,"cached":0,"fetched":1}; return series
+
+def _equity_from_cache(d):
+    bars=[HistoricalBar(**{**r,"timestamp":date.fromisoformat(str(r["timestamp"])[:10]),"instrument_identity":None}) for r in d.get("bars",[])]
+    return HistoricalSeries(d["instrument"],bars,d["provider_name"],datetime.fromisoformat(d["retrieved_at"].replace("Z","+00:00")),date.fromisoformat(d["start_date"]),date.fromisoformat(d["end_date"]),d.get("interval","1d"),d.get("warnings",[]),d.get("data_quality_summary",{}))
+def _fx_from_cache(d):
+    rates=[HistoricalFXRate(**{**r,"timestamp":date.fromisoformat(str(r["timestamp"])[:10])}) for r in d.get("rates",[])]
+    return HistoricalFXSeries(d["from_currency"],d["to_currency"],rates,d["provider_name"],datetime.fromisoformat(d["retrieved_at"].replace("Z","+00:00")),date.fromisoformat(d["start_date"]),date.fromisoformat(d["end_date"]),d.get("warnings",[]),d.get("data_quality_summary",{}))

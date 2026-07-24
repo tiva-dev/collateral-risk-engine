@@ -7,6 +7,15 @@ from typing import Any
 from app.market_data.identity import InstrumentIdentity
 
 
+def canonical_series_payload(series: "HistoricalSeries | HistoricalFXSeries") -> dict[str, Any]:
+    """Return the provider-independent representation accepted by official replay."""
+    from dataclasses import asdict
+
+    payload = asdict(series)
+    payload["cache_schema"] = "historical_fx_series/v1" if isinstance(series, HistoricalFXSeries) else "historical_series/v1"
+    return payload
+
+
 @dataclass(frozen=True)
 class HistoricalBar:
     instrument: str

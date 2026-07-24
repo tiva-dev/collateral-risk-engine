@@ -48,7 +48,7 @@ class V06ProviderValidationTests(unittest.TestCase):
             for name in ['official_validation_manifest.json','official_validation_metrics.csv','official_validation_report.md','provider_coverage_report.md','data_methodology.md','interest_accrual_methodology.md','simulation_assumptions.md']:
                 (out/name).write_text('x')
             (out/'official_validation_metrics.json').write_text(json.dumps(metrics))
-            self.assertTrue(validate_evidence_package({p.name:str(p) for p in out.iterdir()})['passed'])
+            self.assertFalse(validate_evidence_package({p.name:str(p) for p in out.iterdir()})['passed'])
             diag=generate_calibration_diagnostics(metrics, d)
             self.assertIn('s', diag['scenarios'])
             self.assertTrue((out/'calibration_diagnostics.json').exists())

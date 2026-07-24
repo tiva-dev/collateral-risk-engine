@@ -46,3 +46,6 @@ Use `--strict-coverage` to fail if required symbols or FX are missing. Use `--st
 ## Provider coverage interpretation
 
 Coverage reports classify gaps as blocking, non-blocking, synthetic allowed, or excluded. Missing THIN data is synthetic-only when explicitly allowed. Missing real holdings are blocking under strict coverage.
+
+## Workflow and smoke safety
+The manual workflow rejects `dry_run=true` together with post-build validation because a dry run creates no cache evidence. The provider smoke command refuses calls without explicit confirmation, sanitizes errors/warnings/quota metadata, and reports each provider independently even after another provider fails.
