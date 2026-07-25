@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from datetime import UTC, date, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.historical_data.models import (
     HistoricalBar,
@@ -49,6 +49,68 @@ class V06ProviderValidationTests(unittest.TestCase):
         self.assertIn('--stress "$STRESS"', text)
         self.assertIn("data/simulation_results/**/checkpoints/*.json", text)
         self.assertIn("data/historical_cache/normalized/**", text)
+        self.assertIn("uses: actions/cache@v4", text)
+        self.assertIn("path: data/historical_cache", text)
+
+    def test_fx_plan_requests_only_independent_currency_curves(self):
+        builder = OfficialDatasetBuilder(["alpha_vantage"])
+        calls = builder.plan_calls()
+        self.assertEqual(
+            [call["pair"] for call in calls],
+            ["USD/NGN", "EUR/USD"],
+        )
+        self.assertEqual(builder.estimate_call_counts()["alpha_vantage"], 2)
+
+    def test_builder_derives_inverse_and_cross_fx_from_two_provider_calls(self):
+        from app.historical_data.alpha_vantage import (
+            AlphaVantageHistoricalProvider,
+        )
+        from app.historical_data.cache import HistoricalDataCache
+        from app.simulations import data_builder
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = AlphaVantageHistoricalProvider(
+                HistoricalDataCache(directory)
+            )
+            provider._request_json = Mock(
+                side_effect=[
+                    {
+                        "Time Series FX (Daily)": {
+                            "2025-01-02": {"4. close": "1500"}
+                        }
+                    },
+                    {
+                        "Time Series FX (Daily)": {
+                            "2025-01-02": {"4. close": "1.10"}
+                        }
+                    },
+                ]
+            )
+            with patch.object(
+                data_builder,
+                "AlphaVantageHistoricalProvider",
+                return_value=provider,
+            ):
+                manifest = OfficialDatasetBuilder(["alpha_vantage"]).build(
+                    start_date=date(2025, 1, 1),
+                    end_date=date(2025, 1, 3),
+                    dry_run=False,
+                )
+
+        self.assertEqual(provider._request_json.call_count, 2)
+        self.assertEqual(set(manifest.earliest_available_date_by_symbol), {
+            "USD/NGN",
+            "NGN/USD",
+            "EUR/USD",
+            "USD/EUR",
+            "EUR/NGN",
+            "NGN/EUR",
+        })
+        coverage = manifest.provider_coverage_summary["alpha_vantage"]
+        self.assertEqual(coverage["requested"], 6)
+        self.assertEqual(coverage["available"], 6)
+        self.assertEqual(coverage["api_call_count"], 2)
+        self.assertEqual(len(manifest.cache_paths), 6)
 
     def test_official_ngx_universe_uses_current_firstholdco_symbol(self):
         self.assertIn("FIRSTHOLDCO", NGX_UNIVERSE)

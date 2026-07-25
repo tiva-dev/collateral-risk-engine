@@ -7,12 +7,15 @@ from datetime import UTC, date, datetime
 
 from app.historical_data.alpaca import AlpacaTradingHistoricalProvider
 from app.historical_data.alpha_vantage import AlphaVantageHistoricalProvider
+from app.historical_data.cache import HistoricalDataCache
 from app.historical_data.config import load_config
 from app.historical_data.manifest import write_manifest
 from app.historical_data.models import (
     HistoricalDatasetManifest,
+    HistoricalFXRate,
     HistoricalFXSeries,
     HistoricalSeries,
+    canonical_series_payload,
 )
 from app.historical_data.ngnmarket import NGNMarketHistoricalProvider
 from app.historical_data.providers import ProviderError
@@ -29,6 +32,126 @@ DEFAULT_CALL_BUDGETS = {
     "alpha_vantage": {"monthly": None, "max_per_run": 100},
     "alpaca": {"monthly": None, "max_per_run": 500},
 }
+INDEPENDENT_FX_PAIRS = ("USD/NGN", "EUR/USD")
+
+
+def _inverse_fx_series(
+    source: HistoricalFXSeries,
+    from_currency: str,
+    to_currency: str,
+) -> HistoricalFXSeries:
+    source_pair = f"{source.from_currency}/{source.to_currency}"
+    rates = [
+        HistoricalFXRate(
+            from_currency,
+            to_currency,
+            1.0 / row.rate,
+            row.timestamp,
+            source="derived_historical_provider",
+            provider_name=source.provider_name,
+            quality_score=row.quality_score,
+            warnings=[f"derived_inverse:{source_pair}"],
+            raw_metadata={
+                "derivation": "inverse",
+                "source_pair": source_pair,
+                "source_rate": row.rate,
+            },
+        )
+        for row in source.rates
+        if row.rate > 0
+    ]
+    return HistoricalFXSeries(
+        from_currency,
+        to_currency,
+        rates,
+        source.provider_name,
+        datetime.now(UTC),
+        source.start_date,
+        source.end_date,
+        [f"Derived {from_currency}/{to_currency} as inverse of {source_pair}"],
+        {
+            "rate_count": len(rates),
+            "derivation": "inverse",
+            "source_pairs": [source_pair],
+        },
+    )
+
+
+def _cross_fx_series(
+    first: HistoricalFXSeries,
+    second: HistoricalFXSeries,
+    from_currency: str,
+    to_currency: str,
+) -> HistoricalFXSeries:
+    first_pair = f"{first.from_currency}/{first.to_currency}"
+    second_pair = f"{second.from_currency}/{second.to_currency}"
+    second_by_date = {row.timestamp: row for row in second.rates}
+    rates = []
+    for row in first.rates:
+        other = second_by_date.get(row.timestamp)
+        if other is None or row.rate <= 0 or other.rate <= 0:
+            continue
+        rates.append(
+            HistoricalFXRate(
+                from_currency,
+                to_currency,
+                row.rate * other.rate,
+                row.timestamp,
+                source="derived_historical_provider",
+                provider_name=first.provider_name,
+                quality_score=min(row.quality_score, other.quality_score),
+                warnings=[f"derived_cross:{first_pair}*{second_pair}"],
+                raw_metadata={
+                    "derivation": "cross",
+                    "source_pairs": [first_pair, second_pair],
+                    "source_rates": [row.rate, other.rate],
+                },
+            )
+        )
+    return HistoricalFXSeries(
+        from_currency,
+        to_currency,
+        rates,
+        first.provider_name,
+        datetime.now(UTC),
+        max(first.start_date, second.start_date),
+        min(first.end_date, second.end_date),
+        [
+            (
+                f"Derived {from_currency}/{to_currency} as "
+                f"{first_pair} multiplied by {second_pair}"
+            )
+        ],
+        {
+            "rate_count": len(rates),
+            "derivation": "cross",
+            "source_pairs": [first_pair, second_pair],
+        },
+    )
+
+
+def _cache_derived_fx(
+    cache: HistoricalDataCache,
+    series: HistoricalFXSeries,
+) -> str:
+    return str(
+        cache.write(
+            "normalized",
+            canonical_series_payload(series),
+            provider=series.provider_name,
+            pair=f"{series.from_currency}{series.to_currency}",
+            start=str(series.start_date),
+            end=str(series.end_date),
+        )
+    )
+
+
+def _raise_missing_derived_fx(pair: str, provider_name: str) -> None:
+    raise ProviderError(
+        f"Cannot derive {pair}: independent FX source series unavailable",
+        provider=provider_name,
+        code="source_fx_unavailable",
+    )
 
 
 def _provider_budget(provider: str) -> dict:
@@ -69,7 +192,7 @@ class OfficialDatasetBuilder:
                 }
                 for s in NGX_UNIVERSE
             ]
-        for pair in FX_PAIRS:
+        for pair in INDEPENDENT_FX_PAIRS:
             if "ngnmarket" in self.provider_names:
                 calls.append(
                     {
@@ -186,7 +309,7 @@ class OfficialDatasetBuilder:
                     ngnmarket_preflight_error = str(exc)
                     warnings.append(f"NGNMarket company list validation failed: {exc}")
 
-            def record(name: str, symbol: str, fn):
+            def record(name: str, symbol: str, fn, *, derived: bool = False):
                 try:
                     if name == "ngnmarket" and ngnmarket_preflight_error:
                         raise ProviderError(
@@ -219,12 +342,13 @@ class OfficialDatasetBuilder:
                         getattr(providers.get(name), "provider_coverage_summary", {})
                         or {}
                     )
-                    coverage[name]["cached"] += int(pcs.get("cached", 0))
-                    coverage[name]["fetched"] += int(pcs.get("fetched", 0))
-                    coverage[name]["page_count"] += int(pcs.get("page_count", 0))
-                    coverage[name]["api_call_count"] += int(
-                        pcs.get("api_call_count", 0)
-                    )
+                    if not derived:
+                        coverage[name]["cached"] += int(pcs.get("cached", 0))
+                        coverage[name]["fetched"] += int(pcs.get("fetched", 0))
+                        coverage[name]["page_count"] += int(pcs.get("page_count", 0))
+                        coverage[name]["api_call_count"] += int(
+                            pcs.get("api_call_count", 0)
+                        )
                     if count:
                         coverage[name]["available"] += 1
                     else:
@@ -238,6 +362,7 @@ class OfficialDatasetBuilder:
                         earliest[symbol] = min(b.timestamp for b in series.bars)
                     if isinstance(series, HistoricalFXSeries) and series.rates:
                         earliest[symbol] = min(r.timestamp for r in series.rates)
+                    return series
                 except Exception as exc:  # noqa: BLE001 - provider boundary
                     coverage.setdefault(
                         name,
@@ -256,6 +381,7 @@ class OfficialDatasetBuilder:
                     missing.append(symbol)
                     reasons[symbol] = str(exc)
                     warnings.append(f"{name} failed for {symbol}: {exc}")
+                    return None
 
             for s in US_UNIVERSE if "alpaca" in self.provider_names else []:
                 record(
@@ -277,18 +403,21 @@ class OfficialDatasetBuilder:
                         s, start_date, end, force_refresh=force_refresh
                     ),
                 )
-            for pair in FX_PAIRS:
+            provider_fx: dict[tuple[str, str], HistoricalFXSeries] = {}
+            for pair in INDEPENDENT_FX_PAIRS:
                 fc, tc = pair.split("/")
                 if "ngnmarket" in self.provider_names:
-                    record(
+                    series = record(
                         "ngnmarket",
                         pair,
                         lambda fc=fc, tc=tc: providers["ngnmarket"].fetch_fx_history(
                             fc, tc, start_date, end, force_refresh=force_refresh
                         ),
                     )
+                    if isinstance(series, HistoricalFXSeries):
+                        provider_fx[("ngnmarket", pair)] = series
                 if "alpha_vantage" in self.provider_names:
-                    record(
+                    series = record(
                         "alpha_vantage",
                         pair,
                         lambda fc=fc, tc=tc: providers[
@@ -296,6 +425,64 @@ class OfficialDatasetBuilder:
                         ].fetch_fx_history(
                             fc, tc, start_date, end, force_refresh=force_refresh
                         ),
+                    )
+                    if isinstance(series, HistoricalFXSeries):
+                        provider_fx[("alpha_vantage", pair)] = series
+
+            for provider_name in ("ngnmarket", "alpha_vantage"):
+                if provider_name not in self.provider_names:
+                    continue
+                usd_ngn = provider_fx.get((provider_name, "USD/NGN"))
+                eur_usd = provider_fx.get((provider_name, "EUR/USD"))
+                derived_series: list[HistoricalFXSeries] = []
+                if usd_ngn:
+                    derived_series.append(
+                        _inverse_fx_series(usd_ngn, "NGN", "USD")
+                    )
+                if eur_usd:
+                    derived_series.append(
+                        _inverse_fx_series(eur_usd, "USD", "EUR")
+                    )
+                if usd_ngn and eur_usd:
+                    eur_ngn = _cross_fx_series(
+                        eur_usd, usd_ngn, "EUR", "NGN"
+                    )
+                    derived_series.extend(
+                        [
+                            eur_ngn,
+                            _inverse_fx_series(eur_ngn, "NGN", "EUR"),
+                        ]
+                    )
+                derived_by_pair = {
+                    f"{series.from_currency}/{series.to_currency}": series
+                    for series in derived_series
+                }
+                for pair in (
+                    "NGN/USD",
+                    "USD/EUR",
+                    "EUR/NGN",
+                    "NGN/EUR",
+                ):
+                    series = derived_by_pair.get(pair)
+                    if series is None:
+                        record(
+                            provider_name,
+                            pair,
+                            lambda pair=pair, provider_name=provider_name: (
+                                _raise_missing_derived_fx(pair, provider_name)
+                            ),
+                            derived=True,
+                        )
+                        continue
+                    provider = providers[provider_name]
+                    provider.cache_paths.append(
+                        _cache_derived_fx(provider.cache, series)
+                    )
+                    record(
+                        provider_name,
+                        pair,
+                        lambda series=series: series,
+                        derived=True,
                     )
             for k, v in providers.items():
                 if k in self.provider_names:

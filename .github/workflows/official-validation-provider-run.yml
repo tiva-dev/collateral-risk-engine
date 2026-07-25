@@ -80,6 +80,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Restore same-window provider cache
+        uses: actions/cache@v4
+        with:
+          path: data/historical_cache
+          key: official-provider-cache-v1-${{ inputs.start_date }}-${{ inputs.end_date }}
       - name: Build or plan official provider dataset
         shell: bash
         env:
