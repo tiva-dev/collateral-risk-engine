@@ -197,6 +197,7 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
         warnings = list(self.warnings)
         bars = []
         identity = self._identity(symbol, asset_type)
+        null_ohlc_fallbacks = 0
         if not rows:
             warnings.append(f"No NGNMarket chart data for {symbol}")
             self.missing_symbols.append(symbol)
@@ -223,13 +224,20 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                 dt = date.fromisoformat(str(d)[:10])
                 if start_date <= dt <= end_date:
                     c = float(close)
+                    open_value = b.get("open", b.get("o"))
+                    high_value = b.get("high", b.get("h"))
+                    low_value = b.get("low", b.get("l"))
+                    null_ohlc_fallbacks += sum(
+                        value in (None, "")
+                        for value in (open_value, high_value, low_value)
+                    )
                     bars.append(
                         HistoricalBar(
                             symbol,
                             dt,
-                            float(b.get("open", b.get("o", c))),
-                            float(b.get("high", b.get("h", c))),
-                            float(b.get("low", b.get("l", c))),
+                            float(c if open_value in (None, "") else open_value),
+                            float(c if high_value in (None, "") else high_value),
+                            float(c if low_value in (None, "") else low_value),
                             c,
                             b.get("adjusted_close"),
                             float(b.get("volume", b.get("v", 0)) or 0),
@@ -244,6 +252,11 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                 warnings.append(
                     f"Malformed NGNMarket chart row skipped for {symbol}: {exc}"
                 )
+        if null_ohlc_fallbacks:
+            warnings.append(
+                f"NGNMarket filled {null_ohlc_fallbacks} missing OHLC field(s) "
+                f"from close for {symbol}"
+            )
         return HistoricalSeries(
             symbol,
             bars,

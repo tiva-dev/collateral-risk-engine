@@ -279,6 +279,25 @@ class RecoveryEndToEndTests(unittest.TestCase):
         self.assertAlmostEqual(usd_ngn, 1_000 / 0.75)
         self.assertAlmostEqual(ngn_usd, 0.001 * 0.75)
 
+    def test_fx_lookup_selects_latest_historical_rate(self) -> None:
+        from datetime import date
+
+        from app.simulations.replay import build_fx_curves, lookup_fx_rate
+
+        curves = build_fx_curves(
+            {
+                ("USD", "NGN"): [
+                    {"date": "2025-01-01", "rate": 1_500},
+                    {"date": "2025-01-03", "rate": 1_600},
+                ]
+            }
+        )
+        rate, metadata = lookup_fx_rate(
+            "USD", "NGN", curves, date(2025, 1, 2), stale_after_days=5
+        )
+        self.assertEqual(rate, 1_500)
+        self.assertEqual(metadata["fx_rate_date"], "2025-01-01")
+
     def test_comparison_regimes_use_distinct_origination_paths(self) -> None:
         from datetime import date
 

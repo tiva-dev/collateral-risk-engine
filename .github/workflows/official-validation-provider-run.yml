@@ -33,6 +33,12 @@ on:
         description: "Scenario name or all"
         required: true
         default: "all"
+      stress:
+        description: "Replay scope (run baseline before the full suite)"
+        required: true
+        default: "baseline"
+        type: choice
+        options: ["baseline", "severe", "all"]
       run_validation_after_build:
         description: "Run official validation after dataset build"
         required: true
@@ -97,10 +103,12 @@ jobs:
         shell: bash
         env:
           SCENARIO: ${{ inputs.scenario }}
+          STRESS: ${{ inputs.stress }}
+          PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
           manifest=$(find data/simulation_results -name '*.manifest.json' | sort | tail -n 1)
-          python -m app.simulations.run_official_validation --dataset-manifest "$manifest" --scenario "$SCENARIO" --qa --calibration --output-dir data/simulation_results
+          python -m app.simulations.run_official_validation --dataset-manifest "$manifest" --scenario "$SCENARIO" --stress "$STRESS" --qa --calibration --output-dir data/simulation_results
       - name: Upload evidence artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -117,4 +125,7 @@ jobs:
             data/simulation_results/**/simulation_assumptions.md
             data/simulation_results/**/calibration_diagnostics.*
             data/simulation_results/**/dataset_build.log
+            data/simulation_results/**/checkpoints/*.json
+            data/historical_cache/normalized/**
+            data/historical_cache/raw/**
           if-no-files-found: warn

@@ -17,6 +17,7 @@ from app.historical_data.models import (
 )
 from app.historical_data.providers import ProviderError
 from app.simulations.calibration import generate_calibration_diagnostics
+from app.simulations.config.official_validation_universe import NGX_UNIVERSE
 from app.simulations.data_builder import OfficialDatasetBuilder
 from app.simulations.evidence_quality import (
     scenario_eligibility,
@@ -44,6 +45,14 @@ class V06ProviderValidationTests(unittest.TestCase):
         self.assertLess(mkdir_index, tee_index)
         self.assertIn('ALPACA_DATA_FEED: "iex"', text)
         self.assertIn("if: ${{ always() }}", text)
+        self.assertIn('default: "baseline"', text)
+        self.assertIn('--stress "$STRESS"', text)
+        self.assertIn("data/simulation_results/**/checkpoints/*.json", text)
+        self.assertIn("data/historical_cache/normalized/**", text)
+
+    def test_official_ngx_universe_uses_current_firstholdco_symbol(self):
+        self.assertIn("FIRSTHOLDCO", NGX_UNIVERSE)
+        self.assertNotIn("FBNH", NGX_UNIVERSE)
 
     def test_official_builder_requests_and_records_iex_feed(self):
         from app.simulations import data_builder

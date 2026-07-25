@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from bisect import bisect_right
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -245,10 +246,13 @@ def lookup_fx_rate(
         rows = fx_curves.get((target, source))
         inverse = rows is not None
     chosen: tuple[date, float] | None = None
-    for row_date, rate in rows or []:
-        effective_date = observation_date if row_date == date.max else row_date
-        if effective_date <= observation_date:
-            chosen = (effective_date, rate)
+    if rows:
+        if len(rows) == 1 and rows[0][0] == date.max:
+            chosen = (observation_date, rows[0][1])
+        else:
+            index = bisect_right(rows, observation_date, key=lambda row: row[0])
+            if index:
+                chosen = rows[index - 1]
     if chosen is None:
         return None, {"fx_missing": True, "missing_required_fx": True}
 
@@ -280,8 +284,10 @@ def apply_fx(
     fx_rates: dict[tuple[str, str], Any],
     stress: StressOverlay | None = None,
     as_of: date | None = None,
+    *,
+    fx_curves: dict[tuple[str, str], list[tuple[date, float]]] | None = None,
 ) -> tuple[float, bool, dict[str, Any]]:
-    curves = build_fx_curves(fx_rates)
+    curves = fx_curves if fx_curves is not None else build_fx_curves(fx_rates)
     rate, metadata = lookup_fx_rate(
         from_currency, to_currency, curves, as_of, stress=stress
     )
@@ -296,6 +302,8 @@ def convert_market_data_currency(
     fx_rates: dict[tuple[str, str], Any],
     stress: StressOverlay | None = None,
     as_of: date | None = None,
+    *,
+    fx_curves: dict[tuple[str, str], list[tuple[date, float]]] | None = None,
 ) -> tuple[MarketData, bool]:
     from_currency = str(market_data.metadata.get("currency", to_currency)).upper()
 
@@ -303,7 +311,13 @@ def convert_market_data_currency(
         if value is None:
             return None, False, {}
         converted, missing, metadata = apply_fx(
-            value, from_currency, to_currency, fx_rates, stress, as_of
+            value,
+            from_currency,
+            to_currency,
+            fx_rates,
+            stress,
+            as_of,
+            fx_curves=fx_curves,
         )
         return converted, missing, metadata
 
@@ -406,6 +420,7 @@ class HistoricalReplayEngine:
         if comparison_regime not in {COMMON_EXPOSURE, POLICY_ORIGINATION}:
             raise ValueError(f"unknown comparison regime: {comparison_regime}")
         fx_rates = fx_rates or {}
+        fx_curves = build_fx_curves(fx_rates)
         stress = stress or StressOverlay()
         configured_flat_ltv = scenario.base_ltv_policy if flat_ltv is None else flat_ltv
         all_dates = sorted(
@@ -498,6 +513,7 @@ class HistoricalReplayEngine:
                     fx_rates,
                     stress,
                     observation_date,
+                    fx_curves=fx_curves,
                 )
                 age = max(0, (observation_date - bar_date).days)
                 converted = replace(

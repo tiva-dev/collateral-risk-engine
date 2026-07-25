@@ -128,6 +128,35 @@ class V052ProviderFoundationTests(unittest.TestCase):
         self.assertTrue(s.warnings)
         self.assertEqual(p.quota_metadata["remaining"], 1)
 
+    def test_ngnmarket_null_ohlc_fields_fall_back_to_close(self):
+        provider = NGNMarketHistoricalProvider()
+        series = provider.parse_company_chart(
+            "DANGSUGAR",
+            {
+                "success": True,
+                "data": {
+                    "data": [
+                        {
+                            "date": "2024-01-02",
+                            "open": None,
+                            "high": None,
+                            "low": None,
+                            "close": 42.5,
+                            "volume": None,
+                        }
+                    ]
+                },
+            },
+            date(2024, 1, 1),
+            date(2024, 1, 3),
+        )
+        self.assertEqual(len(series.bars), 1)
+        bar = series.bars[0]
+        self.assertEqual((bar.open, bar.high, bar.low, bar.close), (42.5,) * 4)
+        self.assertEqual(bar.volume, 0)
+        self.assertEqual(len(series.warnings), 1)
+        self.assertIn("filled 3 missing OHLC", series.warnings[0])
+
     def test_ngnmarket_normalizes_bearer_secret(self):
         with patch.dict(
             "os.environ", {"NGNMARKET_API_KEY": " Bearer ngm_live_fixture "}

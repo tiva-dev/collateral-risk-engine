@@ -206,6 +206,23 @@ def _synthetic_thin_bars(
     return rows
 
 
+def _write_checkpoint(
+    output_dir: Path,
+    result: dict,
+    *,
+    scenario: str,
+    stress: str,
+    regime: str,
+) -> Path:
+    checkpoint_dir = output_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    path = checkpoint_dir / f"{scenario}--{stress}--{regime}.json"
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(result, indent=2, sort_keys=True, default=str))
+    temporary.replace(path)
+    return path
+
+
 def main():
     p = argparse.ArgumentParser(description="Run v0.5B official validation replay")
     p.add_argument("--dataset-manifest")
@@ -255,6 +272,7 @@ def main():
         "scenario": a.scenario,
         "selected_scenarios": selected,
         "synthetic_sensitivity_included": "thin_liquidity_portfolio" in selected,
+        "stress": a.stress,
         "start_date": str(a.start_date) if a.start_date else None,
         "end_date": str(a.end_date) if a.end_date else None,
         "manifest_checksum": content_hash(manifest) if manifest else None,
@@ -344,6 +362,8 @@ def main():
             for k, v in stress_overlays.items()
             if k in {"combined_severe", "price_gap", "fx_devaluation"}
         }
+    total_replays = len(selected) * len(stress_overlays) * 2
+    completed_replays = 0
     for s in selected:
         scenario = scenarios[s]
         scenario_bars = {
@@ -368,6 +388,11 @@ def main():
 
         for stress_name, overlay in stress_overlays.items():
             for regime in (COMMON_EXPOSURE, POLICY_ORIGINATION):
+                print(
+                    f"Starting replay {completed_replays + 1}/{total_replays}: "
+                    f"{s}/{stress_name}/{regime}",
+                    flush=True,
+                )
                 r = engine.replay(
                     scenario,
                     scenario_bars,
@@ -388,6 +413,23 @@ def main():
                 )
                 r["synthetic_data_used"] = synthetic_used
                 results.append(r)
+                completed_replays += 1
+                if a.write_artifacts == "true":
+                    checkpoint = _write_checkpoint(
+                        out,
+                        r,
+                        scenario=s,
+                        stress=stress_name,
+                        regime=regime,
+                    )
+                    progress_suffix = f"; checkpoint={checkpoint}"
+                else:
+                    progress_suffix = ""
+                print(
+                    f"Completed replay {completed_replays}/{total_replays}"
+                    f"{progress_suffix}",
+                    flush=True,
+                )
     metrics = [
         compute_simulation_metrics(r, a.flat_ltv, manifest=manifest) for r in results
     ]

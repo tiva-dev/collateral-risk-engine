@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from app.core.enums import AssetType, RiskAppetite
 from app.core.models import Holding
@@ -12,17 +13,65 @@ from app.historical_data.models import HistoricalBar, HistoricalFXRate
 from app.simulations.metrics import compute_simulation_metrics
 from app.simulations.replay import (
     HistoricalReplayEngine,
+    build_fx_curves,
     convert_market_data_currency,
     historical_bar_to_market_data,
 )
 from app.simulations.run_official_validation import (
     _load_replay_inputs,
     _synthetic_thin_bars,
+    _write_checkpoint,
 )
 from app.simulations.scenarios.official_portfolios import OfficialPortfolioScenario
 
 
 class V053ReadinessHardeningTests(unittest.TestCase):
+    def test_replay_checkpoint_is_immediately_valid_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = _write_checkpoint(
+                Path(directory),
+                {"scenario": "sample", "records": [{"date": date(2025, 1, 2)}]},
+                scenario="sample",
+                stress="baseline",
+                regime="common_exposure_surveillance",
+            )
+            self.assertTrue(path.exists())
+            self.assertFalse(path.with_suffix(".json.tmp").exists())
+            self.assertEqual(json.loads(path.read_text())["scenario"], "sample")
+
+    def test_replay_builds_fx_curves_once_per_run(self):
+        scenario = OfficialPortfolioScenario(
+            "fx_runtime",
+            [Holding("MTNN", AssetType.LISTED_EQUITY, 10, "NGN")],
+            "USD",
+        )
+        bars = {
+            "MTNN": [
+                HistoricalBar(
+                    "MTNN",
+                    date(2025, 1, day),
+                    100,
+                    100,
+                    100,
+                    100,
+                    volume=1_000,
+                    currency="NGN",
+                )
+                for day in (2, 3)
+            ]
+        }
+        rates = {
+            ("NGN", "USD"): [
+                HistoricalFXRate("NGN", "USD", 0.001, date(2025, 1, day))
+                for day in (2, 3)
+            ]
+        }
+        with patch(
+            "app.simulations.replay.build_fx_curves", wraps=build_fx_curves
+        ) as builder:
+            HistoricalReplayEngine(seed=1).replay(scenario, bars, fx_rates=rates)
+        self.assertEqual(builder.call_count, 1)
+
     def test_missing_fx_zeroes_market_data_and_creates_shortfall_metric(self):
         bar = HistoricalBar(
             "MTNN", date(2024, 1, 1), 100, 100, 100, 100, volume=1000, currency="NGN"
