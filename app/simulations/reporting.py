@@ -49,11 +49,39 @@ def generate_evidence_package(
         writer.writerows(metrics)
     files[csv_path.name] = str(csv_path)
 
+    result_windows = {
+        (
+            result.get("base_scenario") or result.get("scenario"),
+            result.get("comparison_regime"),
+            result.get("stress_name", "baseline"),
+        ): (
+            result.get("actual_common_start_date"),
+            result.get("actual_common_end_date"),
+        )
+        for result in results
+    }
     scenario_rows = "\n".join(
-        "| {scenario} | {regime} | {stress} | {breach} | {loss} |".format(
+        "| {scenario} | {regime} | {stress} | {start} | {end} | {breach} | "
+        "{loss} |".format(
             scenario=metric.get("base_scenario"),
             regime=metric.get("comparison_regime"),
             stress=metric.get("stress_name", "baseline"),
+            start=result_windows.get(
+                (
+                    metric.get("base_scenario"),
+                    metric.get("comparison_regime"),
+                    metric.get("stress_name", "baseline"),
+                ),
+                (None, None),
+            )[0],
+            end=result_windows.get(
+                (
+                    metric.get("base_scenario"),
+                    metric.get("comparison_regime"),
+                    metric.get("stress_name", "baseline"),
+                ),
+                (None, None),
+            )[1],
             breach=metric.get("worst_credit_limit_breach"),
             loss=metric.get("worst_economic_recovery_shortfall"),
         )
@@ -63,9 +91,9 @@ def generate_evidence_package(
         "official_validation_report.md",
         "# Official Validation Report\n\n"
         "## Scenario outcomes\n\n"
-        "| Scenario | Comparison regime | Stress | Worst credit-limit breach | "
-        "Worst economic recovery shortfall |\n"
-        "|---|---|---|---:|---:|\n"
+        "| Scenario | Comparison regime | Stress | Common start | Common end | "
+        "Worst credit-limit breach | Worst economic recovery shortfall |\n"
+        "|---|---|---|---|---|---:|---:|\n"
         f"{scenario_rows}\n\n"
         "Common-exposure surveillance and policy-origination outcomes are "
         "reported separately. Completion alone is not evidence of superiority "

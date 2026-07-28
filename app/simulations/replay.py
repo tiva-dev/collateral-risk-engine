@@ -224,6 +224,20 @@ def build_fx_curves(
     return curves
 
 
+def _fx_curve_start(
+    from_currency: str,
+    to_currency: str,
+    fx_curves: dict[tuple[str, str], list[tuple[date, float]]],
+) -> date | None:
+    source = from_currency.upper()
+    target = to_currency.upper()
+    rows = fx_curves.get((source, target)) or fx_curves.get((target, source))
+    if not rows:
+        return None
+    dated_rows = [row_date for row_date, _ in rows if row_date != date.max]
+    return min(dated_rows) if dated_rows else None
+
+
 def lookup_fx_rate(
     from_currency: str,
     to_currency: str,
@@ -430,6 +444,28 @@ class HistoricalReplayEngine:
                 for bar in bars
             }
         )
+        common_start_candidates = [
+            min(_as_date(bar.timestamp) for bar in bars_by_symbol[holding.asset_id])
+            for holding in scenario.holdings
+            if bars_by_symbol.get(holding.asset_id)
+        ]
+        for holding_currency in {
+            holding.currency.upper()
+            for holding in scenario.holdings
+            if holding.currency.upper() != scenario.loan_currency.upper()
+        }:
+            fx_start = _fx_curve_start(
+                holding_currency,
+                scenario.loan_currency,
+                fx_curves,
+            )
+            if fx_start is not None:
+                common_start_candidates.append(fx_start)
+        common_start = (
+            max(common_start_candidates) if common_start_candidates else None
+        )
+        if common_start:
+            all_dates = [item for item in all_dates if item >= common_start]
         if start_date:
             all_dates = [item for item in all_dates if item >= start_date]
         if end_date:
@@ -772,6 +808,22 @@ class HistoricalReplayEngine:
             "scenario": scenario.name,
             "comparison_regime": comparison_regime,
             "seed": self.seed,
+            "required_instruments": [
+                holding.asset_id for holding in scenario.holdings
+            ],
+            "required_fx_pairs": sorted(
+                {
+                    f"{holding.currency.upper()}/{scenario.loan_currency.upper()}"
+                    for holding in scenario.holdings
+                    if holding.currency.upper() != scenario.loan_currency.upper()
+                }
+            ),
+            "requested_start_date": start_date.isoformat() if start_date else None,
+            "requested_end_date": end_date.isoformat() if end_date else None,
+            "actual_common_start_date": (
+                records[0]["date"] if records else None
+            ),
+            "actual_common_end_date": records[-1]["date"] if records else None,
             "records": records,
             "baseline_results": {
                 "flat_ltv": flat_records,

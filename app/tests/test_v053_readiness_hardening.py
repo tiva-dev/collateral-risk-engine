@@ -138,6 +138,70 @@ class V053ReadinessHardeningTests(unittest.TestCase):
         )
         self.assertTrue(stale["records"][0]["fx_stale"])
 
+    def test_replay_uses_true_common_holding_and_fx_window(self):
+        scenario = OfficialPortfolioScenario(
+            "common_window",
+            [
+                Holding("EARLY", AssetType.LISTED_EQUITY, 1, "USD"),
+                Holding("LATE", AssetType.LISTED_EQUITY, 1, "NGN"),
+            ],
+            "USD",
+        )
+        bars = {
+            "EARLY": [
+                HistoricalBar(
+                    "EARLY",
+                    date(2024, 1, day),
+                    10,
+                    10,
+                    10,
+                    10,
+                    volume=1000,
+                    currency="USD",
+                )
+                for day in (1, 2, 3, 4)
+            ],
+            "LATE": [
+                HistoricalBar(
+                    "LATE",
+                    date(2024, 1, day),
+                    100,
+                    100,
+                    100,
+                    100,
+                    volume=1000,
+                    currency="NGN",
+                )
+                for day in (2, 3, 4)
+            ],
+        }
+        rates = {
+            ("NGN", "USD"): [
+                HistoricalFXRate("NGN", "USD", 0.001, date(2024, 1, day))
+                for day in (3, 4)
+            ]
+        }
+
+        result = HistoricalReplayEngine(seed=1).replay(
+            scenario, bars, fx_rates=rates
+        )
+
+        self.assertEqual(result["actual_common_start_date"], "2024-01-03")
+        self.assertEqual(result["actual_common_end_date"], "2024-01-04")
+        self.assertEqual(result["required_instruments"], ["EARLY", "LATE"])
+        self.assertEqual(result["required_fx_pairs"], ["NGN/USD"])
+        self.assertEqual(
+            [record["date"] for record in result["records"]],
+            ["2024-01-03", "2024-01-04"],
+        )
+        self.assertFalse(result["missing_fx_dates"])
+        self.assertTrue(
+            all(
+                set(record["data_quality"]["observations"]) == {"EARLY", "LATE"}
+                for record in result["records"]
+            )
+        )
+
     def test_normalized_cache_loader_and_provider_native_warning_tolerance(self):
         with tempfile.TemporaryDirectory() as td:
 

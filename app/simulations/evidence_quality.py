@@ -195,6 +195,46 @@ def validate_evidence_package(files: Any) -> dict[str, Any]:
         result["blocking_errors"].append("no scenario metrics present")
         metrics = []
 
+    if _provider_backed(evidence_manifest):
+        for replay in records:
+            if replay.get("stress_name", "baseline") != "baseline":
+                continue
+            replay_records = replay.get("records") or []
+            label = (
+                f"{replay.get('base_scenario') or replay.get('scenario')}/"
+                f"{replay.get('comparison_regime')}"
+            )
+            if not replay_records:
+                result["blocking_errors"].append(
+                    f"provider-backed baseline has no replay records in {label}"
+                )
+                continue
+            required_instruments = set(replay.get("required_instruments") or [])
+            for record in replay_records:
+                observed = set(
+                    (record.get("data_quality") or {}).get("observations") or {}
+                )
+                missing_instruments = required_instruments - observed
+                if missing_instruments:
+                    result["blocking_errors"].append(
+                        f"provider-backed baseline contains a partial portfolio "
+                        f"on {record.get('date')} in {label}: missing "
+                        f"{', '.join(sorted(missing_instruments))}"
+                    )
+                    break
+            missing_fx_dates = replay.get("missing_fx_dates") or []
+            if missing_fx_dates:
+                result["blocking_errors"].append(
+                    f"provider-backed baseline has missing FX observations in "
+                    f"{label}: "
+                    f"{', '.join(map(str, missing_fx_dates[:5]))}"
+                )
+            if any(record.get("fx_missing") for record in replay_records):
+                result["blocking_errors"].append(
+                    f"provider-backed baseline contains FX-missing replay records in "
+                    f"{label}"
+                )
+
     artifact_checksums = evidence_manifest.get("artifact_checksums", {})
     for name, expected in artifact_checksums.items():
         path = Path(mapping.get(name, name))

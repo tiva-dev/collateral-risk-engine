@@ -480,6 +480,47 @@ class RecoveryEndToEndTests(unittest.TestCase):
             self.assertEqual(content_hash(recomputed), content_hash(metrics))
             calibration = generate_calibration_diagnostics(metrics, temporary_directory)
             self.assertTrue(calibration["scenarios"])
+            saved_records[0]["missing_fx_dates"] = ["2025-01-02"]
+            Path(files["official_validation_records.json"]).write_text(
+                json.dumps(saved_records), encoding="utf-8"
+            )
+            manifest_file = Path(files["official_validation_manifest.json"])
+            evidence_manifest = json.loads(manifest_file.read_text())
+            evidence_manifest["results_checksum"] = content_hash(saved_records)
+            evidence_manifest["artifact_checksums"][
+                "official_validation_records.json"
+            ] = content_hash(saved_records)
+            manifest_file.write_text(
+                json.dumps(evidence_manifest), encoding="utf-8"
+            )
+            missing_fx_qa = validate_evidence_package(files)
+            self.assertFalse(missing_fx_qa["passed"])
+            self.assertTrue(
+                any(
+                    "provider-backed baseline has missing FX observations" in error
+                    for error in missing_fx_qa["blocking_errors"]
+                )
+            )
+            saved_records[0]["missing_fx_dates"] = []
+            saved_records[0]["required_instruments"] = ["AAPL", "MISSING"]
+            Path(files["official_validation_records.json"]).write_text(
+                json.dumps(saved_records), encoding="utf-8"
+            )
+            evidence_manifest["results_checksum"] = content_hash(saved_records)
+            evidence_manifest["artifact_checksums"][
+                "official_validation_records.json"
+            ] = content_hash(saved_records)
+            manifest_file.write_text(
+                json.dumps(evidence_manifest), encoding="utf-8"
+            )
+            partial_portfolio_qa = validate_evidence_package(files)
+            self.assertFalse(partial_portfolio_qa["passed"])
+            self.assertTrue(
+                any(
+                    "provider-backed baseline contains a partial portfolio" in error
+                    for error in partial_portfolio_qa["blocking_errors"]
+                )
+            )
             Path(files["official_validation_metrics.json"]).write_text(
                 "[]", encoding="utf-8"
             )
