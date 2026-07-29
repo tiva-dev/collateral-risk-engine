@@ -1,9 +1,6 @@
 name: Official Provider Validation Run
 
 on:
-  push:
-    branches:
-      - codex/complete-recovery-and-backtests
   workflow_dispatch:
     inputs:
       dry_run:
@@ -107,7 +104,7 @@ jobs:
           if [ "$QUOTA_OVERRIDE" = "true" ]; then args+=(--quota-override); fi
           python -m app.simulations.build_official_dataset "${args[@]}" | tee data/simulation_results/dataset_build.log
       - name: Run official validation
-        if: ${{ github.event_name == 'push' || inputs.run_validation_after_build == 'true' }}
+        if: ${{ inputs.run_validation_after_build == 'true' }}
         shell: bash
         env:
           SCENARIO: ${{ inputs.scenario || 'all' }}
