@@ -206,6 +206,23 @@ def _synthetic_thin_bars(
     return rows
 
 
+def _write_checkpoint(
+    output_dir: Path,
+    result: dict,
+    *,
+    scenario: str,
+    stress: str,
+    regime: str,
+) -> Path:
+    checkpoint_dir = output_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    path = checkpoint_dir / f"{scenario}--{stress}--{regime}.json"
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(result, indent=2, sort_keys=True, default=str))
+    temporary.replace(path)
+    return path
+
+
 def main():
     p = argparse.ArgumentParser(description="Run v0.5B official validation replay")
     p.add_argument("--dataset-manifest")
@@ -214,7 +231,12 @@ def main():
     p.add_argument("--scenario", default="all")
     p.add_argument("--output-dir")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--flat-ltv", type=float, default=0.70)
+    p.add_argument(
+        "--flat-ltv",
+        type=float,
+        default=None,
+        help="Optional common-exposure override; defaults to 30% for NGN and 50% otherwise.",
+    )
     p.add_argument("--static-haircut-profile", default="standard")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--qa", action="store_true")
@@ -226,7 +248,15 @@ def main():
     p.add_argument("--write-artifacts", choices=["true", "false"], default="true")
     a = p.parse_args()
     scenarios = official_portfolio_scenarios()
-    selected = list(scenarios) if a.scenario == "all" else [a.scenario]
+    selected = (
+        [
+            name
+            for name in scenarios
+            if a.allow_synthetic or name != "thin_liquidity_portfolio"
+        ]
+        if a.scenario == "all"
+        else [a.scenario]
+    )
     missing = [s for s in selected if s not in scenarios]
     if missing:
         raise SystemExit(f"Unknown scenario(s): {', '.join(missing)}")
@@ -243,8 +273,13 @@ def main():
     config = {
         "seed": a.seed,
         "flat_ltv": a.flat_ltv,
+        "flat_ltv_benchmarks": [0.30, 0.50],
+        "policy_origination_limit_utilization": 1.0,
         "static_haircut_profile": a.static_haircut_profile,
         "scenario": a.scenario,
+        "selected_scenarios": selected,
+        "synthetic_sensitivity_included": "thin_liquidity_portfolio" in selected,
+        "stress": a.stress,
         "start_date": str(a.start_date) if a.start_date else None,
         "end_date": str(a.end_date) if a.end_date else None,
         "manifest_checksum": content_hash(manifest) if manifest else None,
@@ -275,6 +310,11 @@ def main():
             volume_collapse=0.8,
             spread_widening=4.0,
             order_book_thinning=0.8,
+        ),
+        "forced_liquidation_recovery": StressOverlay(
+            volume_collapse=0.50,
+            spread_widening=2.0,
+            force_liquidation_boundary=True,
         ),
     }
     eligibility = scenario_eligibility(
@@ -332,8 +372,16 @@ def main():
         stress_overlays = {
             k: v
             for k, v in stress_overlays.items()
-            if k in {"combined_severe", "price_gap", "fx_devaluation"}
+            if k
+            in {
+                "combined_severe",
+                "price_gap",
+                "fx_devaluation",
+                "forced_liquidation_recovery",
+            }
         }
+    total_replays = len(selected) * len(stress_overlays) * 2
+    completed_replays = 0
     for s in selected:
         scenario = scenarios[s]
         scenario_bars = {
@@ -358,6 +406,11 @@ def main():
 
         for stress_name, overlay in stress_overlays.items():
             for regime in (COMMON_EXPOSURE, POLICY_ORIGINATION):
+                print(
+                    f"Starting replay {completed_replays + 1}/{total_replays}: "
+                    f"{s}/{stress_name}/{regime}",
+                    flush=True,
+                )
                 r = engine.replay(
                     scenario,
                     scenario_bars,
@@ -378,6 +431,23 @@ def main():
                 )
                 r["synthetic_data_used"] = synthetic_used
                 results.append(r)
+                completed_replays += 1
+                if a.write_artifacts == "true":
+                    checkpoint = _write_checkpoint(
+                        out,
+                        r,
+                        scenario=s,
+                        stress=stress_name,
+                        regime=regime,
+                    )
+                    progress_suffix = f"; checkpoint={checkpoint}"
+                else:
+                    progress_suffix = ""
+                print(
+                    f"Completed replay {completed_replays}/{total_replays}"
+                    f"{progress_suffix}",
+                    flush=True,
+                )
     metrics = [
         compute_simulation_metrics(r, a.flat_ltv, manifest=manifest) for r in results
     ]

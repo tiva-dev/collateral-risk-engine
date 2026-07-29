@@ -6,7 +6,7 @@ v0.6 prepares safe, reproducible, auditable provider-backed validation evidence.
 
 ```bash
 python -m app.simulations.build_official_dataset --dry-run --providers all --start-date 2018-01-01
-python -m app.simulations.run_official_validation --dry-run --scenario all --qa --calibration --allow-synthetic
+python -m app.simulations.run_official_validation --dry-run --scenario all --qa --calibration
 ```
 
 Dry-run mode prints planned provider calls and scenario eligibility without calling providers.
@@ -38,14 +38,23 @@ Quota gates estimate planned calls and compare them with defaults: NGNMarket mon
 ## Official validation
 
 ```bash
-python -m app.simulations.run_official_validation --dataset-manifest data/simulation_results/<manifest>.json --scenario all --qa --calibration --allow-synthetic --output-dir data/simulation_results
+python -m app.simulations.run_official_validation --dataset-manifest data/simulation_results/<manifest>.json --scenario all --stress baseline --strict-coverage --qa --calibration --output-dir data/simulation_results
 ```
 
-Use `--strict-coverage` to fail if required symbols or FX are missing. Use `--stress baseline`, `--stress severe`, or `--stress all` to select overlays.
+Run baseline first, inspect its QA result, then repeat with `--stress severe` and
+finally `--stress all`. Strict coverage is mandatory for an official run. Do not
+use `--allow-synthetic`; that option is reserved for a separately labelled THIN
+liquidity sensitivity and cannot support an official provider-backed claim.
 
 ## Provider coverage interpretation
 
 Coverage reports classify gaps as blocking, non-blocking, synthetic allowed, or excluded. Missing THIN data is synthetic-only when explicitly allowed. Missing real holdings are blocking under strict coverage.
 
 ## Workflow and smoke safety
-The manual workflow rejects `dry_run=true` together with post-build validation because a dry run creates no cache evidence. The provider smoke command refuses calls without explicit confirmation, sanitizes errors/warnings/quota metadata, and reports each provider independently even after another provider fails.
+
+The GitHub workflow is manual-only. Choose `dry_run=false`,
+`run_validation_after_build=true`, and `stress=baseline`, `severe`, or `all`.
+It rejects `dry_run=true` together with post-build validation because a dry run
+creates no cache evidence. The provider smoke command refuses calls without
+explicit confirmation, sanitizes errors/warnings/quota metadata, and reports
+each provider independently even after another provider fails.

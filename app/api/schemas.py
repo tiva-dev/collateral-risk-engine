@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
@@ -26,6 +26,8 @@ from app.core.models import (
     PortfolioAction,
     PortfolioActionCheck,
 )
+from app.credit.interest import InterestPolicy
+from app.liquidation.policy import LiquidationExecutionPolicy
 
 
 class HoldingIn(BaseModel):
@@ -213,6 +215,7 @@ class PolicyIn(BaseModel):
     base_ltv: dict[AssetType, float]
     risk_appetite: RiskAppetite = RiskAppetite.BALANCED
     asset_ltv_caps: dict[AssetType, float] = Field(default_factory=dict)
+    portfolio_ltv_cap: float = Field(default=1.0, ge=0, le=1)
     max_participation_rate: float = Field(default=0.10, ge=0, le=1)
     min_data_quality_score: float = Field(default=0.35, ge=0, le=1)
     allow_lending_on_stale_or_halted_assets: bool = False
@@ -225,10 +228,47 @@ class PolicyIn(BaseModel):
             base_ltv=base_ltv,
             risk_appetite=self.risk_appetite,
             asset_ltv_caps=caps,
+            portfolio_ltv_cap=self.portfolio_ltv_cap,
             max_participation_rate=self.max_participation_rate,
             min_data_quality_score=self.min_data_quality_score,
             allow_lending_on_stale_or_halted_assets=self.allow_lending_on_stale_or_halted_assets,
         )
+
+
+class InterestPolicyIn(BaseModel):
+    annual_interest_rate: float = Field(ge=0)
+    accrual_frequency: Literal["daily", "monthly", "quarterly", "yearly"] = "daily"
+    compounding: Literal["simple", "compound"] = "simple"
+    day_count_convention: Literal[
+        "actual_365", "actual_360", "thirty_360"
+    ] = "actual_365"
+    interest_accrual_mode: Literal[
+        "engine_calculated", "client_supplied"
+    ] = "engine_calculated"
+
+    def to_domain(self) -> InterestPolicy:
+        return InterestPolicy(
+            annual_interest_rate=self.annual_interest_rate,
+            accrual_frequency=self.accrual_frequency,
+            compounding=self.compounding,
+            day_count_convention=self.day_count_convention,
+            interest_accrual_mode=self.interest_accrual_mode,
+        )
+
+
+class LiquidationExecutionPolicyIn(BaseModel):
+    margin_call_grace_observations: int = Field(default=1, ge=0)
+    liquidation_delay_observations: int = Field(default=0, ge=0)
+    settlement_delay_observations: int = Field(default=1, ge=0)
+    max_execution_observations: int = Field(default=5, ge=0)
+    max_participation_rate: float = Field(default=0.10, ge=0, le=1)
+    execution_cost_rate: float = Field(default=0.0025, ge=0, le=1)
+    maximum_price_slippage: float = Field(default=0.10, ge=0, le=1)
+    maximum_quote_age_days: int = Field(default=3, ge=0)
+    full_liquidation_on_forced_trigger: bool = True
+
+    def to_domain(self) -> LiquidationExecutionPolicy:
+        return LiquidationExecutionPolicy(**self.model_dump())
 
 
 class InstrumentIdentityIn(BaseModel):
@@ -621,6 +661,12 @@ class MonitoredAccountCreateRequest(BaseModel):
     loan: LoanIn
     loan_currency: str = "USD"
     policy: PolicyIn
+    interest_policy: InterestPolicyIn = Field(
+        default_factory=lambda: InterestPolicyIn(annual_interest_rate=0.0)
+    )
+    liquidation_execution_policy: LiquidationExecutionPolicyIn = Field(
+        default_factory=LiquidationExecutionPolicyIn
+    )
     data_mode: DataMode = DataMode.HYBRID
     market_data_policy: MarketDataPolicyIn = Field(default_factory=MarketDataPolicyIn)
     client_supplied_quotes: dict[str, ClientQuoteIn] = Field(default_factory=dict)
@@ -655,6 +701,9 @@ class MonitoredAccountOut(BaseModel):
     pledged_cash_balance: float
     loan: LoanOut
     loan_currency: str
+    policy: PolicyIn
+    interest_policy: InterestPolicyIn
+    liquidation_execution_policy: LiquidationExecutionPolicyIn
     data_mode: DataMode
     monitoring_status: MonitoringStatus
     last_evaluation: dict[str, Any] | None = None
@@ -679,6 +728,27 @@ class MonitoringAccountsListResponse(BaseModel):
 
 class MonitoringStatusUpdateRequest(BaseModel):
     monitoring_status: MonitoringStatus
+
+
+class MonitoringLoanUpdateRequest(BaseModel):
+    event_reference: str = Field(min_length=1)
+    draw_amount: float = Field(default=0.0, ge=0)
+    repayment_amount: float = Field(default=0.0, ge=0)
+    accrued_interest_delta: float = Field(default=0.0, ge=0)
+    fee_delta: float = Field(default=0.0, ge=0)
+    trigger_tick: bool = True
+
+    @model_validator(mode="after")
+    def require_a_financial_change(self):
+        if (
+            self.draw_amount
+            + self.repayment_amount
+            + self.accrued_interest_delta
+            + self.fee_delta
+            <= 0
+        ):
+            raise ValueError("at least one loan change must be greater than zero")
+        return self
 
 
 class MonitoringErrorResponse(BaseModel):

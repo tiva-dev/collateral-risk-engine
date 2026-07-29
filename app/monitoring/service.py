@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from typing import Any
 from uuid import uuid4
 
 from fastapi.encoders import jsonable_encoder
 
 from app.audit.logger import AuditLogger
-from app.core.enums import DataMode, MarginState
+from app.core.enums import DataMode, LifecycleDecisionValue, MarginState
 from app.core.evaluator import RiskEvaluationError
 from app.core.models import Holding, Loan, Policy
+from app.credit.interest import InterestPolicy, accrue_interest, apply_repayment
 from app.lifecycle.service import CreditLifecycleEngine
+from app.liquidation.policy import LiquidationExecutionPolicy
 from app.market_data.aggregator import MarketDataAggregator
 from app.market_data.identity import InstrumentIdentity
 from app.market_data.policy import MarketDataPolicy
@@ -69,6 +71,8 @@ class MonitoringService:
         loan: Loan,
         loan_currency: str,
         policy: Policy,
+        interest_policy: InterestPolicy | None = None,
+        liquidation_execution_policy: LiquidationExecutionPolicy | None = None,
         data_mode: DataMode,
         market_data_policy: MarketDataPolicy,
         client_supplied_quotes: dict[str, RawQuote] | None = None,
@@ -84,11 +88,16 @@ class MonitoringService:
             loan=loan,
             loan_currency=loan_currency,
             policy=policy,
+            interest_policy=interest_policy or InterestPolicy(0.0),
+            liquidation_execution_policy=(
+                liquidation_execution_policy or LiquidationExecutionPolicy()
+            ),
             data_mode=data_mode,
             market_data_policy=market_data_policy,
             client_supplied_quotes=dict(client_supplied_quotes or {}),
             client_supplied_fx_rates=dict(client_supplied_fx_rates or {}),
             monitoring_status=monitoring_status,
+            last_interest_accrual_at=now,
             created_at=now,
             updated_at=now,
         )
@@ -148,6 +157,108 @@ class MonitoringService:
         )
         return updated
 
+    def apply_loan_update(
+        self,
+        account_ref: str,
+        *,
+        event_reference: str,
+        draw_amount: float = 0.0,
+        repayment_amount: float = 0.0,
+        accrued_interest_delta: float = 0.0,
+        fee_delta: float = 0.0,
+        trigger_tick: bool = True,
+    ) -> tuple[MonitoredAccount, list[MonitoringEvent]]:
+        account = self.account_repo.get(account_ref)
+        if account is None:
+            raise KeyError(account_ref)
+        if event_reference in account.processed_loan_event_references:
+            return account, []
+
+        previous_loan = account.loan
+        loan_with_client_updates = Loan(
+            principal=previous_loan.principal,
+            accrued_interest=previous_loan.accrued_interest
+            + max(0.0, accrued_interest_delta),
+            fees=previous_loan.fees + max(0.0, fee_delta),
+            currency=previous_loan.currency,
+        )
+        loan_after_repayment, repayment_allocation = apply_repayment(
+            loan_with_client_updates, max(0.0, repayment_amount)
+        )
+        draw_decision = None
+        if draw_amount > 0:
+            aggregation = self._normalize_market_data(account)
+            market_data = self.lifecycle_engine._market_data_with_pledged_cash(
+                aggregation.to_core_market_data(), account.loan_currency
+            )
+            holdings = self.lifecycle_engine._holdings_with_pledged_cash(
+                account.holdings,
+                account.pledged_cash_balance,
+                account.loan_currency,
+            )
+            draw_decision = self.lifecycle_engine.check_draw(
+                account_ref=account.account_ref,
+                current_loan=loan_after_repayment,
+                requested_draw_amount=draw_amount,
+                requested_repayment_amount=0.0,
+                holdings=holdings,
+                policy=account.policy,
+                market_data=market_data,
+            )
+            if draw_decision.decision != LifecycleDecisionValue.APPROVED:
+                raise ValueError(
+                    f"draw not approved: {draw_decision.reason}; "
+                    f"maximum approved draw is "
+                    f"{draw_decision.max_approved_draw_amount or 0.0}"
+                )
+            updated_loan = draw_decision.projected_loan or loan_after_repayment
+        else:
+            updated_loan = loan_after_repayment
+
+        account.loan = updated_loan
+        account.processed_loan_event_references = [
+            *account.processed_loan_event_references[-999:],
+            event_reference,
+        ]
+        account.updated_at = utc_now()
+        account = self.account_repo.update(account)
+        snapshot = {
+            "event_reference": event_reference,
+            "previous_loan": _json(previous_loan),
+            "updated_loan": _json(updated_loan),
+            "draw_amount": draw_amount,
+            "repayment_amount": repayment_amount,
+            "accrued_interest_delta": accrued_interest_delta,
+            "fee_delta": fee_delta,
+            "repayment_allocation": repayment_allocation,
+            "draw_decision": _json(draw_decision) if draw_decision else None,
+        }
+        audit_id = self._audit("monitoring_loan_updated", account_ref, snapshot)
+        balance_event = self._append_event(
+            self._event(
+                account,
+                MonitoringEventType.LOAN_BALANCE_UPDATED,
+                MonitoringSeverity.INFO,
+                account.last_margin_state,
+                account.last_margin_state,
+                account.last_available_credit,
+                account.last_available_credit,
+                "monitored obligation updated from an idempotent client event",
+                snapshot,
+                account.last_market_data_warnings,
+                account.last_missing_data,
+                audit_id,
+                f"{account_ref}:loan_update:{event_reference}",
+            )
+        )
+        events = [balance_event]
+        if trigger_tick and account.monitoring_status == MonitoringStatus.ACTIVE:
+            account, tick_events = self.evaluate_account(
+                account_ref, force_tick_event=True
+            )
+            events.extend(tick_events)
+        return account, events
+
     def evaluate_account(
         self,
         account_ref: str,
@@ -168,6 +279,25 @@ class MonitoringService:
         previous_warnings = dict(account.last_market_data_warnings)
         previous_quality = dict(account.last_quality_scores)
         try:
+            now = utc_now()
+            if (
+                not is_initial
+                and account.last_interest_accrual_at is not None
+                and now > account.last_interest_accrual_at
+            ):
+                accrued_loan, _ = accrue_interest(
+                    account.loan,
+                    account.interest_policy,
+                    account.last_interest_accrual_at,
+                    now,
+                )
+                account.loan = replace(
+                    accrued_loan,
+                    principal=round(accrued_loan.principal, 2),
+                    accrued_interest=round(accrued_loan.accrued_interest, 2),
+                    fees=round(accrued_loan.fees, 2),
+                )
+            account.last_interest_accrual_at = now
             aggregation = self._normalize_market_data(account)
             market_data = self.lifecycle_engine._market_data_with_pledged_cash(
                 aggregation.to_core_market_data(), account.loan_currency
@@ -178,8 +308,35 @@ class MonitoringService:
             decision = self.lifecycle_engine.monitor(
                 account.account_ref, account.loan, holdings, account.policy, market_data
             )
-            now = utc_now()
             evaluation_snapshot = _json(decision.evaluation)
+            if decision.margin_state in {
+                MarginState.MARGIN_CALL,
+                MarginState.LIQUIDATION,
+            }:
+                from app.liquidation.execution import (
+                    build_recovery_advisory,
+                    projected_interest_buffer,
+                )
+
+                target = (
+                    account.loan.balance
+                    if decision.margin_state == MarginState.LIQUIDATION
+                    else decision.required_cure_amount
+                )
+                target += projected_interest_buffer(
+                    account.loan,
+                    account.interest_policy.annual_interest_rate,
+                    account.liquidation_execution_policy.liquidation_delay_observations
+                    + account.liquidation_execution_policy.settlement_delay_observations,
+                )
+                evaluation_snapshot["liquidation_plan"] = build_recovery_advisory(
+                    holdings=account.holdings,
+                    market_data=market_data,
+                    target_net_recovery=target,
+                    policy=account.liquidation_execution_policy,
+                    trigger_state=decision.margin_state.value,
+                    issued_date=now.date(),
+                )
             account.last_evaluation = evaluation_snapshot
             account.last_margin_state = decision.margin_state
             account.last_available_credit = decision.current_available_credit

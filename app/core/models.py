@@ -188,6 +188,7 @@ class Policy:
     base_ltv: dict[AssetType, float]
     risk_appetite: RiskAppetite = RiskAppetite.BALANCED
     asset_ltv_caps: dict[AssetType, float] = field(default_factory=dict)
+    portfolio_ltv_cap: float = 1.0
     max_participation_rate: float = 0.10
     min_data_quality_score: float = 0.35
     allow_lending_on_stale_or_halted_assets: bool = False
@@ -200,6 +201,8 @@ class Policy:
                 )
         if not 0 <= self.max_participation_rate <= 1:
             raise ValueError("max_participation_rate must be between 0 and 1")
+        if not 0 <= self.portfolio_ltv_cap <= 1:
+            raise ValueError("portfolio_ltv_cap must be between 0 and 1")
         if not 0 <= self.min_data_quality_score <= 1:
             raise ValueError("min_data_quality_score must be between 0 and 1")
 

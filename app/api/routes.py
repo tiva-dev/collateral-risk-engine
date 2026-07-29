@@ -21,6 +21,7 @@ from app.api.schemas import (
     MonitoringAccountsListResponse,
     MonitoringEventOut,
     MonitoringEventsResponse,
+    MonitoringLoanUpdateRequest,
     MonitoringStatusUpdateRequest,
     MonitoringTickResponse,
     MonitorRequest,
@@ -262,6 +263,9 @@ def _monitoring_account_out(account):
             "pledged_cash_balance": account.pledged_cash_balance,
             "loan": account.loan,
             "loan_currency": account.loan_currency,
+            "policy": account.policy,
+            "interest_policy": account.interest_policy,
+            "liquidation_execution_policy": account.liquidation_execution_policy,
             "data_mode": account.data_mode,
             "monitoring_status": account.monitoring_status,
             "last_evaluation": account.last_evaluation,
@@ -293,6 +297,10 @@ def register_monitored_account(
             loan=request.loan.to_domain(),
             loan_currency=request.loan_currency,
             policy=request.policy.to_domain(),
+            interest_policy=request.interest_policy.to_domain(),
+            liquidation_execution_policy=(
+                request.liquidation_execution_policy.to_domain()
+            ),
             data_mode=request.data_mode,
             market_data_policy=request.market_data_policy.to_domain(),
             client_supplied_quotes={
@@ -332,6 +340,34 @@ def get_monitored_account(account_ref: str) -> MonitoringAccountResponse:
         raise HTTPException(status_code=404, detail="monitored account not found")
     return MonitoringAccountResponse(
         account=_monitoring_account_out(account), events=[]
+    )
+
+
+@router.post(
+    "/monitoring/accounts/{account_ref}/loan",
+    response_model=MonitoringAccountResponse,
+)
+def update_monitored_account_loan(
+    account_ref: str, request: MonitoringLoanUpdateRequest
+) -> MonitoringAccountResponse:
+    try:
+        account, events = monitoring_service.apply_loan_update(
+            account_ref,
+            event_reference=request.event_reference,
+            draw_amount=request.draw_amount,
+            repayment_amount=request.repayment_amount,
+            accrued_interest_delta=request.accrued_interest_delta,
+            fee_delta=request.fee_delta,
+            trigger_tick=request.trigger_tick,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="monitored account not found"
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return MonitoringAccountResponse(
+        account=_monitoring_account_out(account), events=_events_out(events)
     )
 
 

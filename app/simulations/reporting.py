@@ -49,13 +49,48 @@ def generate_evidence_package(
         writer.writerows(metrics)
     files[csv_path.name] = str(csv_path)
 
+    result_windows = {
+        (
+            result.get("base_scenario") or result.get("scenario"),
+            result.get("comparison_regime"),
+            result.get("stress_name", "baseline"),
+        ): (
+            result.get("actual_common_start_date"),
+            result.get("actual_common_end_date"),
+        )
+        for result in results
+    }
     scenario_rows = "\n".join(
-        "| {scenario} | {regime} | {stress} | {breach} | {loss} |".format(
+        "| {scenario} | {regime} | {stress} | {start} | {end} | {ltv} | "
+        "{utilization} | {breach} | {paper_loss} | {realized_loss} | "
+        "{recovery_rate} | {flat30} | {flat50} |".format(
             scenario=metric.get("base_scenario"),
             regime=metric.get("comparison_regime"),
             stress=metric.get("stress_name", "baseline"),
+            start=result_windows.get(
+                (
+                    metric.get("base_scenario"),
+                    metric.get("comparison_regime"),
+                    metric.get("stress_name", "baseline"),
+                ),
+                (None, None),
+            )[0],
+            end=result_windows.get(
+                (
+                    metric.get("base_scenario"),
+                    metric.get("comparison_regime"),
+                    metric.get("stress_name", "baseline"),
+                ),
+                (None, None),
+            )[1],
             breach=metric.get("worst_credit_limit_breach"),
-            loss=metric.get("worst_economic_recovery_shortfall"),
+            ltv=metric.get("initial_approved_ltv"),
+            utilization=metric.get("credit_limit_utilization_at_origination"),
+            paper_loss=metric.get("worst_economic_recovery_shortfall"),
+            realized_loss=metric.get("realized_creditor_loss"),
+            recovery_rate=metric.get("forced_liquidation_full_recovery_rate"),
+            flat30=metric.get("flat_30pct_economic_recovery_shortfall_rate"),
+            flat50=metric.get("flat_50pct_economic_recovery_shortfall_rate"),
         )
         for metric in metrics
     )
@@ -63,9 +98,11 @@ def generate_evidence_package(
         "official_validation_report.md",
         "# Official Validation Report\n\n"
         "## Scenario outcomes\n\n"
-        "| Scenario | Comparison regime | Stress | Worst credit-limit breach | "
-        "Worst economic recovery shortfall |\n"
-        "|---|---|---|---:|---:|\n"
+        "| Scenario | Comparison regime | Stress | Common start | Common end | "
+        "Initial CRI LTV | Limit utilization | Worst credit-limit breach | "
+        "Worst theoretical shortfall | Realized creditor loss | Forced recovery "
+        "rate | 30% flat shortfall rate | 50% flat shortfall rate |\n"
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n"
         f"{scenario_rows}\n\n"
         "Common-exposure surveillance and policy-origination outcomes are "
         "reported separately. Completion alone is not evidence of superiority "
@@ -91,13 +128,22 @@ def generate_evidence_package(
         "interest_accrual_methodology.md",
         "# Interest Accrual Methodology\n\n"
         "Each comparison policy accrues its own principal, interest, and fee "
-        "path under the scenario interest policy.\n",
+        "path under the scenario interest policy. NGN policies are validated at "
+        "a 4% monthly nominal rate (48% annual simple); USD and EUR policies use "
+        "10% annual simple interest. The CRI principal limit reserves interest "
+        "through detection, cure, execution, and settlement latency.\n",
     )
     write(
         "simulation_assumptions.md",
         "# Simulation Assumptions\n\n"
         "Credit-limit breach and economic recovery shortfall are distinct. "
-        "Stress overlays are recorded per result. Synthetic THIN observations, "
+        "Policy-originated loans draw 100% of the CRI principal limit. Recovery "
+        "advisories contain securities, quantities, and minimum executable limit "
+        "prices. Historical execution uses current bids, volume participation "
+        "caps, explicit costs, partial fills, and settlement delay; settled "
+        "proceeds pay fees, interest, then principal. Passive 30% and 50% flat "
+        "LTV benchmarks are persisted separately. Stress overlays are recorded "
+        "per result. Synthetic THIN observations, "
         "when explicitly allowed, are a separately labelled sensitivity and "
         "cannot qualify a run as provider-backed.\n",
     )

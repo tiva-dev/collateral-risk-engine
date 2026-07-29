@@ -195,6 +195,9 @@ class AlpacaTradingHistoricalProvider(HistoricalDataProvider):
                     "page_count": data.get("data_quality_summary", {}).get(
                         "page_count", 0
                     ),
+                    "feed": data.get("data_quality_summary", {}).get(
+                        "feed", feed or "provider_default"
+                    ),
                 }
             )
             if data.get("cache_schema") == "historical_series/v1":
@@ -258,6 +261,7 @@ class AlpacaTradingHistoricalProvider(HistoricalDataProvider):
                 "page_count": page_count,
                 "api_call_count": page_count,
                 "adjustment": adjustment,
+                "feed": feed or "provider_default",
             }
         )
         self.raw_response_paths.append(str(self.cache.write("raw", merged, **key)))

@@ -18,6 +18,11 @@ from app.simulations.scenarios.official_portfolios import (
 )
 
 SUPPORTED_LOAN_CURRENCIES = {"USD", "NGN", "EUR"}
+EXECUTION_BLOCKED_COUNTERFACTUALS = {
+    "trading_halt",
+    "stale_market_data",
+    "missing_fx",
+}
 
 
 def _date(value: Any) -> date | None:
@@ -58,15 +63,14 @@ def validate_provider_coverage(
 ) -> dict[str, Any]:
     data = _manifest(manifest)
     result = _result()
-    missing = set(data.get("missing_symbols") or [])
     earliest = data.get("earliest_available_date_by_symbol") or {}
     result["earliest_available_dates"] = earliest
     required = [symbol for symbol in required_symbols if symbol != "THIN"]
     result["missing_symbols"] = [
-        symbol for symbol in required if symbol in missing or symbol not in earliest
+        symbol for symbol in required if symbol not in earliest
     ]
     result["missing_fx_pairs"] = [
-        pair for pair in required_fx_pairs if pair in missing or pair not in earliest
+        pair for pair in required_fx_pairs if pair not in earliest
     ]
     denominator = max(1, len(required) + len(required_fx_pairs))
     result["coverage_score"] = max(
@@ -195,6 +199,46 @@ def validate_evidence_package(files: Any) -> dict[str, Any]:
         result["blocking_errors"].append("no scenario metrics present")
         metrics = []
 
+    if _provider_backed(evidence_manifest):
+        for replay in records:
+            if replay.get("stress_name", "baseline") != "baseline":
+                continue
+            replay_records = replay.get("records") or []
+            label = (
+                f"{replay.get('base_scenario') or replay.get('scenario')}/"
+                f"{replay.get('comparison_regime')}"
+            )
+            if not replay_records:
+                result["blocking_errors"].append(
+                    f"provider-backed baseline has no replay records in {label}"
+                )
+                continue
+            required_instruments = set(replay.get("required_instruments") or [])
+            for record in replay_records:
+                observed = set(
+                    (record.get("data_quality") or {}).get("observations") or {}
+                )
+                missing_instruments = required_instruments - observed
+                if missing_instruments:
+                    result["blocking_errors"].append(
+                        f"provider-backed baseline contains a partial portfolio "
+                        f"on {record.get('date')} in {label}: missing "
+                        f"{', '.join(sorted(missing_instruments))}"
+                    )
+                    break
+            missing_fx_dates = replay.get("missing_fx_dates") or []
+            if missing_fx_dates:
+                result["blocking_errors"].append(
+                    f"provider-backed baseline has missing FX observations in "
+                    f"{label}: "
+                    f"{', '.join(map(str, missing_fx_dates[:5]))}"
+                )
+            if any(record.get("fx_missing") for record in replay_records):
+                result["blocking_errors"].append(
+                    f"provider-backed baseline contains FX-missing replay records in "
+                    f"{label}"
+                )
+
     artifact_checksums = evidence_manifest.get("artifact_checksums", {})
     for name, expected in artifact_checksums.items():
         path = Path(mapping.get(name, name))
@@ -231,6 +275,18 @@ def validate_evidence_package(files: Any) -> dict[str, Any]:
             "total_interest_accrued",
             "provider_coverage_by_symbol",
             "dynamic_engine_versus_static_ltv_outcome_table",
+            "initial_approved_ltv",
+            "initial_draw_ltv",
+            "credit_limit_utilization_at_origination",
+            "flat_30pct_economic_recovery_shortfall_rate",
+            "flat_50pct_economic_recovery_shortfall_rate",
+            "liquidation_episode_count",
+            "forced_liquidation_episode_count",
+            "forced_liquidation_full_recovery_rate",
+            "realized_creditor_loss",
+            "terminal_unresolved_exposure",
+            "failed_liquidation_episode_count",
+            "right_censored_liquidation_episode_count",
         ):
             if key not in metric or metric[key] in (None, ""):
                 result["blocking_errors"].append(
@@ -258,6 +314,8 @@ def validate_evidence_package(files: Any) -> dict[str, Any]:
                 for field in (
                     "dynamic_credit_limit_breach",
                     "flat_ltv_credit_limit_breach",
+                    "flat_ltv_30_credit_limit_breach",
+                    "flat_ltv_50_credit_limit_breach",
                     "static_haircut_credit_limit_breach",
                 )
             )
@@ -271,6 +329,55 @@ def validate_evidence_package(files: Any) -> dict[str, Any]:
             or str(metric.get("scenario", "")).split("::")[0]
         )
         stress = metric.get("stress_name", "baseline")
+        if metric.get("comparison_regime") == POLICY_ORIGINATION:
+            initial_limit = metric.get("initial_approved_credit_limit")
+            utilization = metric.get("credit_limit_utilization_at_origination")
+            if (
+                isinstance(initial_limit, (int, float))
+                and initial_limit > 0
+                and (
+                    not isinstance(utilization, (int, float))
+                    or abs(float(utilization) - 1.0) > 1e-9
+                )
+            ):
+                result["blocking_errors"].append(
+                    f"{base}/{stress} did not draw 100% of the CRI-approved limit"
+                )
+            if float(metric.get("realized_creditor_loss", 0.0)) > 0:
+                result["blocking_errors"].append(
+                    f"{base}/{stress} produced realized creditor loss under CRI"
+                )
+            recovery_rate = metric.get("forced_liquidation_full_recovery_rate")
+            forced_count = int(metric.get("forced_liquidation_episode_count", 0))
+            if stress == "forced_liquidation_recovery" and forced_count < 1:
+                result["blocking_errors"].append(
+                    f"{base}/{stress} did not trigger forced liquidation"
+                )
+            if (
+                isinstance(recovery_rate, (int, float))
+                and float(recovery_rate) < 1.0
+            ):
+                target = (
+                    result["warnings"]
+                    if stress in EXECUTION_BLOCKED_COUNTERFACTUALS
+                    else result["blocking_errors"]
+                )
+                target.append(
+                    f"{base}/{stress} has an incomplete forced-liquidation recovery"
+                )
+            if int(metric.get("failed_liquidation_episode_count", 0)) > 0:
+                target = (
+                    result["warnings"]
+                    if stress in EXECUTION_BLOCKED_COUNTERFACTUALS
+                    else result["blocking_errors"]
+                )
+                target.append(f"{base}/{stress} has a failed liquidation episode")
+            if int(
+                metric.get("right_censored_liquidation_episode_count", 0)
+            ) > 0:
+                result["warnings"].append(
+                    f"{base}/{stress} has a liquidation episode censored by replay end"
+                )
         regimes.setdefault((str(base), str(stress)), set()).add(
             str(metric.get("comparison_regime"))
         )
@@ -328,7 +435,6 @@ def scenario_eligibility(
     del stress
     data = _manifest(manifest)
     earliest = data.get("earliest_available_date_by_symbol") or {}
-    missing = set(data.get("missing_symbols") or [])
     scenarios = official_portfolio_scenarios()
     names = (
         list(scenarios)
@@ -347,7 +453,7 @@ def scenario_eligibility(
         for holding in scenario.holdings:
             if holding.asset_id == "THIN" and allow_synthetic:
                 continue
-            if holding.asset_id in missing or holding.asset_id not in earliest:
+            if holding.asset_id not in earliest:
                 reasons.append(f"missing bars for {holding.asset_id}")
         for pair in required_fx_pairs_for_scenarios([name]):
             source, target = pair.split("/")

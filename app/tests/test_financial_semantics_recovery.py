@@ -100,6 +100,32 @@ class FinancialSemanticsRecoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             collateral_injection_only_cure(1, 1, 0)
 
+    def test_client_portfolio_ltv_cap_limits_approved_credit(self) -> None:
+        market = {
+            "CASH": MarketData(
+                "CASH",
+                1,
+                bid=1,
+                ask=1,
+                average_daily_volume=1_000_000,
+                average_dollar_volume=1_000_000,
+                timestamp=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        }
+        policy = Policy(
+            base_ltv=Policy.default().base_ltv,
+            asset_ltv_caps=Policy.default().asset_ltv_caps,
+            portfolio_ltv_cap=0.30,
+        )
+        result = CollateralRiskEngine().evaluate(
+            "portfolio-cap",
+            [Holding("CASH", AssetType.CASH, 100_000, "USD")],
+            Loan(0),
+            policy,
+            market,
+        )
+        self.assertEqual(result.approved_credit_limit, 30_000)
+
 
 class ReviewRegressionTests(unittest.TestCase):
     def test_replay_does_not_charge_stressed_haircut_as_an_extra_cost(self) -> None:
@@ -278,6 +304,25 @@ class RecoveryEndToEndTests(unittest.TestCase):
         )
         self.assertAlmostEqual(usd_ngn, 1_000 / 0.75)
         self.assertAlmostEqual(ngn_usd, 0.001 * 0.75)
+
+    def test_fx_lookup_selects_latest_historical_rate(self) -> None:
+        from datetime import date
+
+        from app.simulations.replay import build_fx_curves, lookup_fx_rate
+
+        curves = build_fx_curves(
+            {
+                ("USD", "NGN"): [
+                    {"date": "2025-01-01", "rate": 1_500},
+                    {"date": "2025-01-03", "rate": 1_600},
+                ]
+            }
+        )
+        rate, metadata = lookup_fx_rate(
+            "USD", "NGN", curves, date(2025, 1, 2), stale_after_days=5
+        )
+        self.assertEqual(rate, 1_500)
+        self.assertEqual(metadata["fx_rate_date"], "2025-01-01")
 
     def test_comparison_regimes_use_distinct_origination_paths(self) -> None:
         from datetime import date
@@ -461,6 +506,47 @@ class RecoveryEndToEndTests(unittest.TestCase):
             self.assertEqual(content_hash(recomputed), content_hash(metrics))
             calibration = generate_calibration_diagnostics(metrics, temporary_directory)
             self.assertTrue(calibration["scenarios"])
+            saved_records[0]["missing_fx_dates"] = ["2025-01-02"]
+            Path(files["official_validation_records.json"]).write_text(
+                json.dumps(saved_records), encoding="utf-8"
+            )
+            manifest_file = Path(files["official_validation_manifest.json"])
+            evidence_manifest = json.loads(manifest_file.read_text())
+            evidence_manifest["results_checksum"] = content_hash(saved_records)
+            evidence_manifest["artifact_checksums"][
+                "official_validation_records.json"
+            ] = content_hash(saved_records)
+            manifest_file.write_text(
+                json.dumps(evidence_manifest), encoding="utf-8"
+            )
+            missing_fx_qa = validate_evidence_package(files)
+            self.assertFalse(missing_fx_qa["passed"])
+            self.assertTrue(
+                any(
+                    "provider-backed baseline has missing FX observations" in error
+                    for error in missing_fx_qa["blocking_errors"]
+                )
+            )
+            saved_records[0]["missing_fx_dates"] = []
+            saved_records[0]["required_instruments"] = ["AAPL", "MISSING"]
+            Path(files["official_validation_records.json"]).write_text(
+                json.dumps(saved_records), encoding="utf-8"
+            )
+            evidence_manifest["results_checksum"] = content_hash(saved_records)
+            evidence_manifest["artifact_checksums"][
+                "official_validation_records.json"
+            ] = content_hash(saved_records)
+            manifest_file.write_text(
+                json.dumps(evidence_manifest), encoding="utf-8"
+            )
+            partial_portfolio_qa = validate_evidence_package(files)
+            self.assertFalse(partial_portfolio_qa["passed"])
+            self.assertTrue(
+                any(
+                    "provider-backed baseline contains a partial portfolio" in error
+                    for error in partial_portfolio_qa["blocking_errors"]
+                )
+            )
             Path(files["official_validation_metrics.json"]).write_text(
                 "[]", encoding="utf-8"
             )

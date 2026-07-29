@@ -33,6 +33,12 @@ on:
         description: "Scenario name or all"
         required: true
         default: "all"
+      stress:
+        description: "Replay scope (run baseline before the full suite)"
+        required: true
+        default: "baseline"
+        type: choice
+        options: ["baseline", "severe", "all"]
       run_validation_after_build:
         description: "Run official validation after dataset build"
         required: true
@@ -52,6 +58,7 @@ jobs:
     env:
       ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
       ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+      ALPACA_DATA_FEED: "iex"
       ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
       NGNMARKET_API_KEY: ${{ secrets.NGNMARKET_API_KEY }}
       NGNMARKET_MONTHLY_CALL_BUDGET: "3000"
@@ -73,15 +80,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Restore same-window provider cache
+        uses: actions/cache@v4
+        with:
+          path: data/historical_cache
+          key: official-provider-cache-v1-${{ inputs.start_date || '2018-01-01' }}-${{ inputs.end_date }}
       - name: Build or plan official provider dataset
         shell: bash
         env:
-          PROVIDERS: ${{ inputs.providers }}
-          START_DATE: ${{ inputs.start_date }}
+          PROVIDERS: ${{ inputs.providers || 'all' }}
+          START_DATE: ${{ inputs.start_date || '2018-01-01' }}
           END_DATE: ${{ inputs.end_date }}
-          DRY_RUN: ${{ inputs.dry_run }}
-          FORCE_REFRESH: ${{ inputs.force_refresh }}
-          QUOTA_OVERRIDE: ${{ inputs.quota_override }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          FORCE_REFRESH: ${{ inputs.force_refresh || 'false' }}
+          QUOTA_OVERRIDE: ${{ inputs.quota_override || 'false' }}
         run: |
           set -euo pipefail
           mkdir -p data/simulation_results
@@ -95,12 +107,15 @@ jobs:
         if: ${{ inputs.run_validation_after_build == 'true' }}
         shell: bash
         env:
-          SCENARIO: ${{ inputs.scenario }}
+          SCENARIO: ${{ inputs.scenario || 'all' }}
+          STRESS: ${{ inputs.stress || 'all' }}
+          PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
           manifest=$(find data/simulation_results -name '*.manifest.json' | sort | tail -n 1)
-          python -m app.simulations.run_official_validation --dataset-manifest "$manifest" --scenario "$SCENARIO" --qa --calibration --output-dir data/simulation_results
+          python -m app.simulations.run_official_validation --dataset-manifest "$manifest" --scenario "$SCENARIO" --stress "$STRESS" --strict-coverage --qa --calibration --output-dir data/simulation_results
       - name: Upload evidence artifacts
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: official-provider-validation-evidence
@@ -115,4 +130,7 @@ jobs:
             data/simulation_results/**/simulation_assumptions.md
             data/simulation_results/**/calibration_diagnostics.*
             data/simulation_results/**/dataset_build.log
+            data/simulation_results/**/checkpoints/*.json
+            data/historical_cache/normalized/**
+            data/historical_cache/raw/**
           if-no-files-found: warn

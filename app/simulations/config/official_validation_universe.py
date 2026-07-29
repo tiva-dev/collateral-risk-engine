@@ -26,7 +26,7 @@ NGX_UNIVERSE = [
     "ZENITHBANK",
     "ACCESSCORP",
     "UBA",
-    "FBNH",
+    "FIRSTHOLDCO",
     "SEPLAT",
     "OANDO",
     "NESTLE",

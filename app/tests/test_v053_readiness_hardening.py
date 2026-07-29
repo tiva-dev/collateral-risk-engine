@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from app.core.enums import AssetType, RiskAppetite
 from app.core.models import Holding
@@ -12,17 +13,65 @@ from app.historical_data.models import HistoricalBar, HistoricalFXRate
 from app.simulations.metrics import compute_simulation_metrics
 from app.simulations.replay import (
     HistoricalReplayEngine,
+    build_fx_curves,
     convert_market_data_currency,
     historical_bar_to_market_data,
 )
 from app.simulations.run_official_validation import (
     _load_replay_inputs,
     _synthetic_thin_bars,
+    _write_checkpoint,
 )
 from app.simulations.scenarios.official_portfolios import OfficialPortfolioScenario
 
 
 class V053ReadinessHardeningTests(unittest.TestCase):
+    def test_replay_checkpoint_is_immediately_valid_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = _write_checkpoint(
+                Path(directory),
+                {"scenario": "sample", "records": [{"date": date(2025, 1, 2)}]},
+                scenario="sample",
+                stress="baseline",
+                regime="common_exposure_surveillance",
+            )
+            self.assertTrue(path.exists())
+            self.assertFalse(path.with_suffix(".json.tmp").exists())
+            self.assertEqual(json.loads(path.read_text())["scenario"], "sample")
+
+    def test_replay_builds_fx_curves_once_per_run(self):
+        scenario = OfficialPortfolioScenario(
+            "fx_runtime",
+            [Holding("MTNN", AssetType.LISTED_EQUITY, 10, "NGN")],
+            "USD",
+        )
+        bars = {
+            "MTNN": [
+                HistoricalBar(
+                    "MTNN",
+                    date(2025, 1, day),
+                    100,
+                    100,
+                    100,
+                    100,
+                    volume=1_000,
+                    currency="NGN",
+                )
+                for day in (2, 3)
+            ]
+        }
+        rates = {
+            ("NGN", "USD"): [
+                HistoricalFXRate("NGN", "USD", 0.001, date(2025, 1, day))
+                for day in (2, 3)
+            ]
+        }
+        with patch(
+            "app.simulations.replay.build_fx_curves", wraps=build_fx_curves
+        ) as builder:
+            HistoricalReplayEngine(seed=1).replay(scenario, bars, fx_rates=rates)
+        self.assertEqual(builder.call_count, 1)
+
     def test_missing_fx_zeroes_market_data_and_creates_shortfall_metric(self):
         bar = HistoricalBar(
             "MTNN", date(2024, 1, 1), 100, 100, 100, 100, volume=1000, currency="NGN"
@@ -88,6 +137,70 @@ class V053ReadinessHardeningTests(unittest.TestCase):
             scenario, {"MTNN": bars}, fx_rates=old_fx
         )
         self.assertTrue(stale["records"][0]["fx_stale"])
+
+    def test_replay_uses_true_common_holding_and_fx_window(self):
+        scenario = OfficialPortfolioScenario(
+            "common_window",
+            [
+                Holding("EARLY", AssetType.LISTED_EQUITY, 1, "USD"),
+                Holding("LATE", AssetType.LISTED_EQUITY, 1, "NGN"),
+            ],
+            "USD",
+        )
+        bars = {
+            "EARLY": [
+                HistoricalBar(
+                    "EARLY",
+                    date(2024, 1, day),
+                    10,
+                    10,
+                    10,
+                    10,
+                    volume=1000,
+                    currency="USD",
+                )
+                for day in (1, 2, 3, 4)
+            ],
+            "LATE": [
+                HistoricalBar(
+                    "LATE",
+                    date(2024, 1, day),
+                    100,
+                    100,
+                    100,
+                    100,
+                    volume=1000,
+                    currency="NGN",
+                )
+                for day in (2, 3, 4)
+            ],
+        }
+        rates = {
+            ("NGN", "USD"): [
+                HistoricalFXRate("NGN", "USD", 0.001, date(2024, 1, day))
+                for day in (3, 4)
+            ]
+        }
+
+        result = HistoricalReplayEngine(seed=1).replay(
+            scenario, bars, fx_rates=rates
+        )
+
+        self.assertEqual(result["actual_common_start_date"], "2024-01-03")
+        self.assertEqual(result["actual_common_end_date"], "2024-01-04")
+        self.assertEqual(result["required_instruments"], ["EARLY", "LATE"])
+        self.assertEqual(result["required_fx_pairs"], ["NGN/USD"])
+        self.assertEqual(
+            [record["date"] for record in result["records"]],
+            ["2024-01-03", "2024-01-04"],
+        )
+        self.assertFalse(result["missing_fx_dates"])
+        self.assertTrue(
+            all(
+                set(record["data_quality"]["observations"]) == {"EARLY", "LATE"}
+                for record in result["records"]
+            )
+        )
 
     def test_normalized_cache_loader_and_provider_native_warning_tolerance(self):
         with tempfile.TemporaryDirectory() as td:
@@ -205,6 +318,71 @@ class V053ReadinessHardeningTests(unittest.TestCase):
         self.assertEqual(metrics["scenario"], "retail_stress::price_gap")
         self.assertEqual(metrics["base_scenario"], "retail_stress")
         self.assertEqual(metrics["stress_name"], "price_gap")
+
+    def test_intentional_missing_fx_counterfactual_is_nonblocking(self):
+        record = {
+            "date": "2025-01-02",
+            "data_quality_haircut_impact": None,
+            "fx_missing": True,
+            "missing_data": True,
+            "economic_recovery_shortfall": 0.0,
+            "recovery_coverage_ratio": 0.0,
+            "lifecycle_safe_credit_limit": 0.0,
+            "approved_credit_limit": 0.0,
+            "policy_credit_limit": 0.0,
+            "total_obligation": 0.0,
+            "credit_limit_breach": 0.0,
+        }
+        result = {
+            "scenario": "cross_currency::missing_fx",
+            "base_scenario": "cross_currency",
+            "comparison_regime": "policy_origination_outcome",
+            "stress_name": "missing_fx",
+            "records": [record],
+            "events": [],
+            "baseline_results": {
+                "dynamic_engine": [record],
+                "flat_ltv": [record],
+                "static_haircut": [record],
+            },
+        }
+
+        metric = compute_simulation_metrics(result)["data_quality_haircut_impact"]
+
+        self.assertFalse(metric["available"])
+        self.assertFalse(metric["blocking"])
+        self.assertIn("intentional missing-FX stress", metric["reason"])
+
+    def test_unexpected_missing_counterfactual_remains_blocking(self):
+        result = {
+            "scenario": "cross_currency::price_gap",
+            "base_scenario": "cross_currency",
+            "comparison_regime": "policy_origination_outcome",
+            "stress_name": "price_gap",
+            "records": [
+                {
+                    "date": "2025-01-02",
+                    "data_quality_haircut_impact": None,
+                    "fx_missing": True,
+                    "missing_data": True,
+                    "economic_recovery_shortfall": 0.0,
+                    "recovery_coverage_ratio": 0.0,
+                    "lifecycle_safe_credit_limit": 0.0,
+                    "approved_credit_limit": 0.0,
+                    "policy_credit_limit": 0.0,
+                    "total_obligation": 0.0,
+                    "credit_limit_breach": 0.0,
+                }
+            ],
+            "events": [],
+            "baseline_results": {},
+        }
+
+        metric = compute_simulation_metrics(result)["data_quality_haircut_impact"]
+
+        self.assertFalse(metric["available"])
+        self.assertTrue(metric["blocking"])
+        self.assertEqual(metric["reason"], "data-quality counterfactual not persisted")
 
 
 if __name__ == "__main__":

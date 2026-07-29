@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from bisect import bisect_right
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 from app.core.enums import AssetType, MarginState
 from app.core.evaluator import CollateralRiskEngine
 from app.core.models import Loan, MarketData, OrderBook, OrderBookLevel, Policy
-from app.credit.interest import accrue_scheduled_periods
+from app.credit.interest import accrue_scheduled_periods, apply_repayment
 from app.historical_data.models import (
     HistoricalBar,
     HistoricalDatasetManifest,
@@ -19,6 +20,12 @@ from app.historical_data.models import (
     HistoricalFXSeries,
 )
 from app.lifecycle.service import CreditLifecycleEngine
+from app.liquidation.execution import (
+    build_recovery_advisory,
+    execute_recovery_advisory,
+    projected_interest_buffer,
+)
+from app.risk.math_utils import round_money
 from app.simulations.scenarios.official_portfolios import OfficialPortfolioScenario
 from app.version import LIFECYCLE_MODEL_VERSION, RISK_MODEL_VERSION
 
@@ -38,6 +45,7 @@ class StressOverlay:
     missing_fx: bool = False
     single_name_crash: dict[str, float] = field(default_factory=dict)
     correlated_selloff: float = 0.0
+    force_liquidation_boundary: bool = False
 
 
 def _adjusted_ohlc(bar: HistoricalBar) -> tuple[float, float, float, float]:
@@ -223,6 +231,20 @@ def build_fx_curves(
     return curves
 
 
+def _fx_curve_start(
+    from_currency: str,
+    to_currency: str,
+    fx_curves: dict[tuple[str, str], list[tuple[date, float]]],
+) -> date | None:
+    source = from_currency.upper()
+    target = to_currency.upper()
+    rows = fx_curves.get((source, target)) or fx_curves.get((target, source))
+    if not rows:
+        return None
+    dated_rows = [row_date for row_date, _ in rows if row_date != date.max]
+    return min(dated_rows) if dated_rows else None
+
+
 def lookup_fx_rate(
     from_currency: str,
     to_currency: str,
@@ -245,10 +267,13 @@ def lookup_fx_rate(
         rows = fx_curves.get((target, source))
         inverse = rows is not None
     chosen: tuple[date, float] | None = None
-    for row_date, rate in rows or []:
-        effective_date = observation_date if row_date == date.max else row_date
-        if effective_date <= observation_date:
-            chosen = (effective_date, rate)
+    if rows:
+        if len(rows) == 1 and rows[0][0] == date.max:
+            chosen = (observation_date, rows[0][1])
+        else:
+            index = bisect_right(rows, observation_date, key=lambda row: row[0])
+            if index:
+                chosen = rows[index - 1]
     if chosen is None:
         return None, {"fx_missing": True, "missing_required_fx": True}
 
@@ -280,8 +305,10 @@ def apply_fx(
     fx_rates: dict[tuple[str, str], Any],
     stress: StressOverlay | None = None,
     as_of: date | None = None,
+    *,
+    fx_curves: dict[tuple[str, str], list[tuple[date, float]]] | None = None,
 ) -> tuple[float, bool, dict[str, Any]]:
-    curves = build_fx_curves(fx_rates)
+    curves = fx_curves if fx_curves is not None else build_fx_curves(fx_rates)
     rate, metadata = lookup_fx_rate(
         from_currency, to_currency, curves, as_of, stress=stress
     )
@@ -296,6 +323,8 @@ def convert_market_data_currency(
     fx_rates: dict[tuple[str, str], Any],
     stress: StressOverlay | None = None,
     as_of: date | None = None,
+    *,
+    fx_curves: dict[tuple[str, str], list[tuple[date, float]]] | None = None,
 ) -> tuple[MarketData, bool]:
     from_currency = str(market_data.metadata.get("currency", to_currency)).upper()
 
@@ -303,7 +332,13 @@ def convert_market_data_currency(
         if value is None:
             return None, False, {}
         converted, missing, metadata = apply_fx(
-            value, from_currency, to_currency, fx_rates, stress, as_of
+            value,
+            from_currency,
+            to_currency,
+            fx_rates,
+            stress,
+            as_of,
+            fx_curves=fx_curves,
         )
         return converted, missing, metadata
 
@@ -406,8 +441,11 @@ class HistoricalReplayEngine:
         if comparison_regime not in {COMMON_EXPOSURE, POLICY_ORIGINATION}:
             raise ValueError(f"unknown comparison regime: {comparison_regime}")
         fx_rates = fx_rates or {}
+        fx_curves = build_fx_curves(fx_rates)
         stress = stress or StressOverlay()
-        configured_flat_ltv = scenario.base_ltv_policy if flat_ltv is None else flat_ltv
+        configured_flat_ltv = (
+            scenario.benchmark_flat_ltv if flat_ltv is None else flat_ltv
+        )
         all_dates = sorted(
             {
                 _as_date(bar.timestamp)
@@ -415,10 +453,48 @@ class HistoricalReplayEngine:
                 for bar in bars
             }
         )
+        common_start_candidates = [
+            min(_as_date(bar.timestamp) for bar in bars_by_symbol[holding.asset_id])
+            for holding in scenario.holdings
+            if bars_by_symbol.get(holding.asset_id)
+        ]
+        for holding_currency in {
+            holding.currency.upper()
+            for holding in scenario.holdings
+            if holding.currency.upper() != scenario.loan_currency.upper()
+        }:
+            fx_start = _fx_curve_start(
+                holding_currency,
+                scenario.loan_currency,
+                fx_curves,
+            )
+            if fx_start is not None:
+                common_start_candidates.append(fx_start)
+        common_start = (
+            max(common_start_candidates) if common_start_candidates else None
+        )
+        if common_start:
+            all_dates = [item for item in all_dates if item >= common_start]
         if start_date:
             all_dates = [item for item in all_dates if item >= start_date]
         if end_date:
             all_dates = [item for item in all_dates if item <= end_date]
+        execution_liquidity_start: date | None = None
+        if comparison_regime == POLICY_ORIGINATION:
+            first_liquid_dates = []
+            for holding in scenario.holdings:
+                liquid_dates = [
+                    _as_date(bar.timestamp)
+                    for bar in bars_by_symbol.get(holding.asset_id, [])
+                    if bar.volume > 0
+                ]
+                if liquid_dates:
+                    first_liquid_dates.append(min(liquid_dates))
+            if len(first_liquid_dates) == len(scenario.holdings):
+                execution_liquidity_start = max(first_liquid_dates)
+                all_dates = [
+                    item for item in all_dates if item >= execution_liquidity_start
+                ]
 
         policy = replace(
             Policy.default(),
@@ -426,6 +502,7 @@ class HistoricalReplayEngine:
                 key: min(value, scenario.base_ltv_policy)
                 for key, value in Policy.default().base_ltv.items()
             },
+            portfolio_ltv_cap=scenario.base_ltv_policy,
             risk_appetite=scenario.risk_appetite,
         )
         dated_bars = {
@@ -433,6 +510,7 @@ class HistoricalReplayEngine:
             for symbol, bars in bars_by_symbol.items()
         }
         positions = {symbol: 0 for symbol in bars_by_symbol}
+        current_holdings = list(scenario.holdings)
         latest: dict[str, HistoricalBar] = {}
         returns = {symbol: [] for symbol in bars_by_symbol}
         volumes = {symbol: [] for symbol in bars_by_symbol}
@@ -441,6 +519,8 @@ class HistoricalReplayEngine:
 
         records: list[dict[str, Any]] = []
         flat_records: list[dict[str, Any]] = []
+        flat_30_records: list[dict[str, Any]] = []
+        flat_50_records: list[dict[str, Any]] = []
         static_records: list[dict[str, Any]] = []
         dynamic_records: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
@@ -452,8 +532,29 @@ class HistoricalReplayEngine:
         )
         loans: dict[str, Loan] | None = None
         missing_fx_dates: list[str] = []
+        liquidation_episodes: list[dict[str, Any]] = []
+        active_episode: dict[str, Any] | None = None
+        pending_settlements: list[dict[str, Any]] = []
+        initial_snapshot: dict[str, float] | None = None
 
-        for observation_date in all_dates:
+        for observation_index, observation_date in enumerate(all_dates):
+            if observation_index == 0:
+                effective_stress = StressOverlay()
+            elif stress.force_liquidation_boundary and initial_snapshot:
+                recovery_cushion = 1.08
+                remaining_value_fraction = min(
+                    0.95,
+                    max(
+                        0.01,
+                        float(initial_snapshot["draw_ltv"]) * recovery_cushion,
+                    ),
+                )
+                effective_stress = replace(
+                    stress,
+                    price_gap=1 - remaining_value_fraction,
+                )
+            else:
+                effective_stress = stress
             market_data: dict[str, MarketData] = {}
             observation_provenance: dict[str, Any] = {}
             fx_missing = False
@@ -489,15 +590,16 @@ class HistoricalReplayEngine:
                 raw_market = historical_bar_to_market_data(
                     bar,
                     returns[symbol],
-                    stress,
+                    effective_stress,
                     average_volume,
                 )
                 converted, missing = convert_market_data_currency(
                     raw_market,
                     scenario.loan_currency,
                     fx_rates,
-                    stress,
+                    effective_stress,
                     observation_date,
+                    fx_curves=fx_curves,
                 )
                 age = max(0, (observation_date - bar_date).days)
                 converted = replace(
@@ -522,17 +624,24 @@ class HistoricalReplayEngine:
             if fx_missing:
                 missing_fx_dates.append(observation_date.isoformat())
 
-            market_value = sum(
+            passive_market_value = sum(
                 market_data[holding.asset_id].last_price * holding.quantity
                 for holding in scenario.holdings
                 if holding.asset_id in market_data
             )
+            market_value = sum(
+                market_data[holding.asset_id].last_price * holding.quantity
+                for holding in current_holdings
+                if holding.asset_id in market_data
+            )
             raw_fallback_value = sum(
                 _adjusted_ohlc(latest[holding.asset_id])[3] * holding.quantity
-                for holding in scenario.holdings
+                for holding in current_holdings
                 if holding.asset_id in latest
             )
-            flat_limit = market_value * configured_flat_ltv
+            flat_limit = passive_market_value * configured_flat_ltv
+            flat_30_limit = passive_market_value * 0.30
+            flat_50_limit = passive_market_value * 0.50
             static_limit = sum(
                 market_data[holding.asset_id].last_price
                 * holding.quantity
@@ -543,16 +652,12 @@ class HistoricalReplayEngine:
 
             if loans is None:
                 common_value = market_value or raw_fallback_value
-                common_balance = (
-                    common_value
-                    * scenario.initial_draw_assumption
-                    * scenario.base_ltv_policy
-                )
+                common_balance = common_value * configured_flat_ltv
                 zero_evaluation = None
                 try:
                     zero_evaluation = self.risk_engine.evaluate(
                         scenario.name,
-                        scenario.holdings,
+                        current_holdings,
                         Loan(0.0, currency=scenario.loan_currency),
                         policy,
                         market_data,
@@ -560,26 +665,67 @@ class HistoricalReplayEngine:
                 except Exception:
                     if not fx_missing:
                         raise
-                dynamic_limit = (
+                raw_dynamic_limit = (
                     self.lifecycle._safe_credit_limit(zero_evaluation)
                     if zero_evaluation is not None
                     else 0.0
                 )
+                protection_horizon = (
+                    1
+                    + scenario.execution_policy.margin_call_grace_observations
+                    + scenario.execution_policy.liquidation_delay_observations
+                    + scenario.execution_policy.settlement_delay_observations
+                )
+                interest_reserve_factor = (
+                    1
+                    + scenario.loan_terms.annual_interest_rate
+                    * protection_horizon
+                    / 365
+                )
+                dynamic_limit = raw_dynamic_limit / interest_reserve_factor
                 if comparison_regime == COMMON_EXPOSURE:
                     balances = {
                         "dynamic": common_balance,
                         "flat": common_balance,
+                        "flat_30": common_balance,
+                        "flat_50": common_balance,
                         "static": common_balance,
                     }
                 else:
                     balances = {
                         "dynamic": dynamic_limit * scenario.initial_draw_assumption,
                         "flat": flat_limit * scenario.initial_draw_assumption,
+                        "flat_30": flat_30_limit
+                        * scenario.initial_draw_assumption,
+                        "flat_50": flat_50_limit
+                        * scenario.initial_draw_assumption,
                         "static": static_limit * scenario.initial_draw_assumption,
                     }
                 loans = {
                     key: Loan(value, currency=scenario.loan_currency)
                     for key, value in balances.items()
+                }
+                initial_snapshot = {
+                    "market_value": market_value,
+                    "approved_credit_limit": dynamic_limit,
+                    "obligation_limit_before_interest_reserve": raw_dynamic_limit,
+                    "interest_reserve": raw_dynamic_limit - dynamic_limit,
+                    "interest_reserve_observations": protection_horizon,
+                    "approved_ltv": (
+                        dynamic_limit / market_value if market_value > 0 else 0.0
+                    ),
+                    "drawn_principal": loans["dynamic"].principal,
+                    "draw_ltv": (
+                        loans["dynamic"].principal / market_value
+                        if market_value > 0
+                        else 0.0
+                    ),
+                    "credit_limit_utilization": (
+                        loans["dynamic"].principal / dynamic_limit
+                        if dynamic_limit > 0
+                        else 0.0
+                    ),
+                    "configured_flat_ltv": configured_flat_ltv,
                 }
 
             current_time = datetime.combine(observation_date, time.min, tzinfo=UTC)
@@ -592,33 +738,283 @@ class HistoricalReplayEngine:
                     current_time,
                 )
             previous_time = current_time
+            settled_recovery = 0.0
+            settlement_allocations: list[dict[str, Any]] = []
+            still_pending: list[dict[str, Any]] = []
+            for settlement in pending_settlements:
+                if int(settlement["due_index"]) > observation_index:
+                    still_pending.append(settlement)
+                    continue
+                before = loans["dynamic"].balance
+                loans["dynamic"], allocation = apply_repayment(
+                    loans["dynamic"], float(settlement["amount"])
+                )
+                applied = round_money(before - loans["dynamic"].balance)
+                settled_recovery += applied
+                allocation_record = {
+                    **allocation,
+                    "episode_id": settlement["episode_id"],
+                    "settled_amount": applied,
+                }
+                settlement_allocations.append(allocation_record)
+                episode = next(
+                    item
+                    for item in liquidation_episodes
+                    if item["episode_id"] == settlement["episode_id"]
+                )
+                episode["settled_recovery"] = round_money(
+                    float(episode["settled_recovery"]) + applied
+                )
+                episode["last_settlement_date"] = observation_date.isoformat()
+            pending_settlements = still_pending
 
             evaluation = None
-            try:
-                if include_monitoring:
-                    monitoring = self.lifecycle.monitor(
-                        scenario.name,
-                        loans["dynamic"],
-                        scenario.holdings,
-                        policy,
-                        market_data,
-                    )
-                    evaluation = monitoring.evaluation
-                else:
-                    evaluation = self.risk_engine.evaluate(
-                        scenario.name,
-                        scenario.holdings,
-                        loans["dynamic"],
-                        policy,
-                        market_data,
-                    )
-                safe_limit = self.lifecycle._safe_credit_limit(evaluation)
-                state = evaluation.margin_state.value
-            except Exception:
-                if not fx_missing:
-                    raise
+            if not current_holdings:
                 safe_limit = 0.0
-                state = MarginState.LIQUIDATION.value
+                state = (
+                    MarginState.SAFE.value
+                    if loans["dynamic"].balance <= 0.01
+                    else MarginState.LIQUIDATION.value
+                )
+            else:
+                try:
+                    if include_monitoring:
+                        monitoring = self.lifecycle.monitor(
+                            scenario.name,
+                            loans["dynamic"],
+                            current_holdings,
+                            policy,
+                            market_data,
+                        )
+                        evaluation = monitoring.evaluation
+                    else:
+                        evaluation = self.risk_engine.evaluate(
+                            scenario.name,
+                            current_holdings,
+                            loans["dynamic"],
+                            policy,
+                            market_data,
+                        )
+                    safe_limit = self.lifecycle._safe_credit_limit(evaluation)
+                    state = evaluation.margin_state.value
+                except Exception:
+                    if not fx_missing:
+                        raise
+                    safe_limit = 0.0
+                    state = MarginState.LIQUIDATION.value
+
+            daily_advisory: dict[str, Any] | None = None
+            daily_execution: dict[str, Any] | None = None
+            if (
+                active_episode is not None
+                and active_episode["status"] == "settling"
+                and float(active_episode["settled_recovery"])
+                >= float(active_episode["target_net_recovery"]) - 0.01
+            ):
+                active_episode["status"] = (
+                    "fully_recovered"
+                    if loans["dynamic"].balance <= 0.01
+                    else "cure_settled"
+                )
+                active_episode["completion_date"] = observation_date.isoformat()
+                active_episode["time_to_completion_observations"] = (
+                    observation_index - int(active_episode["trigger_index"])
+                )
+                active_episode["residual_obligation"] = round_money(
+                    loans["dynamic"].balance
+                )
+                active_episode = None
+
+            if (
+                active_episode is None
+                and loans["dynamic"].balance > 0.01
+                and state
+                in {
+                    MarginState.MARGIN_CALL.value,
+                    MarginState.LIQUIDATION.value,
+                }
+            ):
+                forced = state == MarginState.LIQUIDATION.value
+                delay = (
+                    scenario.execution_policy.liquidation_delay_observations
+                    if forced
+                    else scenario.execution_policy.margin_call_grace_observations
+                )
+                settlement_delay = (
+                    scenario.execution_policy.settlement_delay_observations
+                )
+                if (
+                    forced
+                    and scenario.execution_policy.full_liquidation_on_forced_trigger
+                ):
+                    target = loans["dynamic"].balance
+                    action = "full_recovery"
+                else:
+                    target = max(
+                        (
+                            evaluation.trigger_levels.repayment_only_cure
+                            if evaluation is not None
+                            else 0.0
+                        ),
+                        loans["dynamic"].balance - safe_limit,
+                    )
+                    action = "restore_coverage"
+                target += projected_interest_buffer(
+                    loans["dynamic"],
+                    scenario.loan_terms.annual_interest_rate,
+                    delay + settlement_delay,
+                )
+                target = min(
+                    target,
+                    loans["dynamic"].balance
+                    + projected_interest_buffer(
+                        loans["dynamic"],
+                        scenario.loan_terms.annual_interest_rate,
+                        delay + settlement_delay,
+                    ),
+                )
+                daily_advisory = build_recovery_advisory(
+                    holdings=current_holdings,
+                    market_data=market_data,
+                    target_net_recovery=target,
+                    policy=scenario.execution_policy,
+                    trigger_state=state,
+                    issued_date=observation_date,
+                )
+                active_episode = {
+                    "episode_id": f"{scenario.name}:{comparison_regime}:{len(liquidation_episodes) + 1}",
+                    "trigger_date": observation_date.isoformat(),
+                    "trigger_index": observation_index,
+                    "trigger_state": state,
+                    "action": action,
+                    "obligation_at_trigger": round_money(loans["dynamic"].balance),
+                    "target_net_recovery": round_money(target),
+                    "execution_due_index": observation_index + delay,
+                    "execution_due_date": (
+                        all_dates[min(len(all_dates) - 1, observation_index + delay)]
+                    ).isoformat(),
+                    "status": "scheduled",
+                    "advisory": daily_advisory,
+                    "execution_attempts": [],
+                    "gross_proceeds": 0.0,
+                    "execution_costs": 0.0,
+                    "net_proceeds": 0.0,
+                    "settled_recovery": 0.0,
+                    "residual_obligation": None,
+                    "realized_creditor_loss": 0.0,
+                }
+                liquidation_episodes.append(active_episode)
+
+            if active_episode is not None:
+                has_execution = bool(active_episode["execution_attempts"])
+                if (
+                    active_episode["action"] == "restore_coverage"
+                    and state
+                    not in {
+                        MarginState.MARGIN_CALL.value,
+                        MarginState.LIQUIDATION.value,
+                    }
+                    and not has_execution
+                ):
+                    active_episode["status"] = "cancelled_after_recovery"
+                    active_episode["completion_date"] = observation_date.isoformat()
+                    active_episode["residual_obligation"] = round_money(
+                        loans["dynamic"].balance
+                    )
+                    active_episode = None
+                elif (
+                    int(active_episode["execution_due_index"]) <= observation_index
+                    and active_episode["status"]
+                    not in {"settling", "failed", "fully_recovered", "cure_settled"}
+                ):
+                    remaining_target = max(
+                        0.0,
+                        float(active_episode["target_net_recovery"])
+                        - float(active_episode["net_proceeds"]),
+                    )
+                    current_holdings, daily_execution = execute_recovery_advisory(
+                        holdings=current_holdings,
+                        market_data=market_data,
+                        advisory=active_episode["advisory"],
+                        remaining_target=remaining_target,
+                        policy=scenario.execution_policy,
+                        observation_date=observation_date,
+                    )
+                    active_episode["execution_attempts"].append(daily_execution)
+                    active_episode["first_execution_date"] = active_episode.get(
+                        "first_execution_date", observation_date.isoformat()
+                    )
+                    for key in ("gross_proceeds", "execution_costs", "net_proceeds"):
+                        active_episode[key] = round_money(
+                            float(active_episode[key])
+                            + float(daily_execution[key])
+                        )
+                    if float(daily_execution["net_proceeds"]) > 0:
+                        pending_settlements.append(
+                            {
+                                "episode_id": active_episode["episode_id"],
+                                "amount": float(daily_execution["net_proceeds"]),
+                                "trade_date": observation_date.isoformat(),
+                                "due_index": observation_index
+                                + scenario.execution_policy.settlement_delay_observations,
+                            }
+                        )
+                    if (
+                        float(active_episode["net_proceeds"])
+                        >= float(active_episode["target_net_recovery"]) - 0.01
+                    ):
+                        active_episode["status"] = "settling"
+                    elif (
+                        len(active_episode["execution_attempts"])
+                        >= scenario.execution_policy.max_execution_observations
+                    ):
+                        active_episode["status"] = "failed"
+                        active_episode["completion_date"] = observation_date.isoformat()
+                        active_episode["residual_obligation"] = round_money(
+                            loans["dynamic"].balance
+                        )
+                        if not current_holdings and not pending_settlements:
+                            active_episode["realized_creditor_loss"] = round_money(
+                                loans["dynamic"].balance
+                            )
+                    else:
+                        active_episode["status"] = "executing"
+
+                    if not current_holdings:
+                        evaluation = None
+                        safe_limit = 0.0
+                        state = (
+                            MarginState.SAFE.value
+                            if loans["dynamic"].balance <= 0.01
+                            else MarginState.LIQUIDATION.value
+                        )
+                    else:
+                        try:
+                            if include_monitoring:
+                                monitoring = self.lifecycle.monitor(
+                                    scenario.name,
+                                    loans["dynamic"],
+                                    current_holdings,
+                                    policy,
+                                    market_data,
+                                )
+                                evaluation = monitoring.evaluation
+                            else:
+                                evaluation = self.risk_engine.evaluate(
+                                    scenario.name,
+                                    current_holdings,
+                                    loans["dynamic"],
+                                    policy,
+                                    market_data,
+                                )
+                            safe_limit = self.lifecycle._safe_credit_limit(evaluation)
+                            state = evaluation.margin_state.value
+                        except Exception:
+                            if not fx_missing:
+                                raise
+                            evaluation = None
+                            safe_limit = 0.0
+                            state = MarginState.LIQUIDATION.value
 
             if state != previous_state:
                 severity = {
@@ -643,7 +1039,24 @@ class HistoricalReplayEngine:
             proceeds = (
                 evaluation.stressed_liquidation_value if evaluation is not None else 0.0
             )
-            costs = 0.0
+            costs = (
+                float(daily_execution["execution_costs"])
+                if daily_execution is not None
+                else 0.0
+            )
+            passive_proceeds = 0.0
+            try:
+                passive_evaluation = self.risk_engine.evaluate(
+                    f"{scenario.name}:passive",
+                    scenario.holdings,
+                    loans["flat"],
+                    policy,
+                    market_data,
+                )
+                passive_proceeds = passive_evaluation.stressed_liquidation_value
+            except Exception:
+                if not fx_missing:
+                    raise
             obligation = loans["dynamic"].balance
             quality_one_limit = None
             if evaluation is not None:
@@ -653,7 +1066,7 @@ class HistoricalReplayEngine:
                 }
                 quality_one_evaluation = self.risk_engine.evaluate(
                     scenario.name,
-                    scenario.holdings,
+                    current_holdings,
                     loans["dynamic"],
                     policy,
                     quality_one_market,
@@ -671,8 +1084,10 @@ class HistoricalReplayEngine:
             )
             record = {
                 "date": observation_date.isoformat(),
+                "applied_stress_price_gap": effective_stress.price_gap,
                 "comparison_regime": comparison_regime,
                 "market_value": market_value,
+                "passive_portfolio_market_value": passive_market_value,
                 "collateral_value": market_value,
                 "policy_credit_limit": safe_limit,
                 "credit_limit": safe_limit,
@@ -697,6 +1112,19 @@ class HistoricalReplayEngine:
                     asdict(evaluation.liquidation_plan)
                     if evaluation and evaluation.liquidation_plan
                     else None
+                ),
+                "liquidation_advisory": daily_advisory,
+                "liquidation_execution": daily_execution,
+                "settled_recovery": round_money(settled_recovery),
+                "settlement_allocations": settlement_allocations,
+                "pending_settlement_amount": round_money(
+                    sum(float(item["amount"]) for item in pending_settlements)
+                ),
+                "cumulative_realized_creditor_loss": round_money(
+                    sum(
+                        float(item.get("realized_creditor_loss", 0.0))
+                        for item in liquidation_episodes
+                    )
                 ),
                 "with_interest_balance": obligation,
                 "without_interest_balance": loans["dynamic"].principal,
@@ -723,21 +1151,39 @@ class HistoricalReplayEngine:
             records.append(record)
             flat_record = _baseline_record(
                 observation_date,
-                market_value,
+                passive_market_value,
                 loans["flat"],
                 flat_limit,
                 "flat_ltv",
-                proceeds,
-                costs,
+                passive_proceeds,
+                0.0,
+            )
+            flat_30_record = _baseline_record(
+                observation_date,
+                passive_market_value,
+                loans["flat_30"],
+                flat_30_limit,
+                "flat_ltv_30",
+                passive_proceeds,
+                0.0,
+            )
+            flat_50_record = _baseline_record(
+                observation_date,
+                passive_market_value,
+                loans["flat_50"],
+                flat_50_limit,
+                "flat_ltv_50",
+                passive_proceeds,
+                0.0,
             )
             static_record = _baseline_record(
                 observation_date,
-                market_value,
+                passive_market_value,
                 loans["static"],
                 static_limit,
                 "static_haircut",
-                proceeds,
-                costs,
+                passive_proceeds,
+                0.0,
             )
             dynamic_record = _baseline_record(
                 observation_date,
@@ -749,22 +1195,80 @@ class HistoricalReplayEngine:
                 costs,
             )
             flat_records.append(flat_record)
+            flat_30_records.append(flat_30_record)
+            flat_50_records.append(flat_50_record)
             static_records.append(static_record)
             dynamic_records.append(dynamic_record)
+
+        if active_episode is not None and active_episode["status"] in {
+            "scheduled",
+            "executing",
+            "settling",
+        }:
+            active_episode["status"] = "unresolved_at_replay_end"
+            active_episode["residual_obligation"] = round_money(
+                loans["dynamic"].balance if loans is not None else 0.0
+            )
+            if not current_holdings and not pending_settlements:
+                active_episode["realized_creditor_loss"] = round_money(
+                    loans["dynamic"].balance if loans is not None else 0.0
+                )
+        terminal_obligation = loans["dynamic"].balance if loans is not None else 0.0
+        terminal_recoverable_value = (
+            float(records[-1]["stressed_liquidation_proceeds"]) if records else 0.0
+        )
 
         return {
             "scenario": scenario.name,
             "comparison_regime": comparison_regime,
             "seed": self.seed,
+            "required_instruments": [
+                holding.asset_id for holding in scenario.holdings
+            ],
+            "required_fx_pairs": sorted(
+                {
+                    f"{holding.currency.upper()}/{scenario.loan_currency.upper()}"
+                    for holding in scenario.holdings
+                    if holding.currency.upper() != scenario.loan_currency.upper()
+                }
+            ),
+            "requested_start_date": start_date.isoformat() if start_date else None,
+            "requested_end_date": end_date.isoformat() if end_date else None,
+            "execution_liquidity_start_date": (
+                execution_liquidity_start.isoformat()
+                if execution_liquidity_start
+                else None
+            ),
+            "actual_common_start_date": (
+                records[0]["date"] if records else None
+            ),
+            "actual_common_end_date": records[-1]["date"] if records else None,
             "records": records,
             "baseline_results": {
                 "flat_ltv": flat_records,
+                "flat_ltv_30": flat_30_records,
+                "flat_ltv_50": flat_50_records,
                 "static_haircut": static_records,
                 "dynamic_engine": dynamic_records,
             },
+            "initial_credit_snapshot": initial_snapshot or {},
+            "liquidation_execution_policy": asdict(scenario.execution_policy),
+            "liquidation_episodes": liquidation_episodes,
+            "terminal_obligation": terminal_obligation,
+            "terminal_stressed_liquidation_value": terminal_recoverable_value,
+            "terminal_unresolved_exposure": round_money(
+                max(
+                    0.0,
+                    terminal_obligation
+                    - terminal_recoverable_value
+                    - sum(float(item["amount"]) for item in pending_settlements),
+                )
+            ),
             "events": events,
             "missing_fx_dates": missing_fx_dates,
             "stress_assumptions": asdict(stress),
             "interest_policy": asdict(scenario.loan_terms),
+            "initial_draw_assumption": scenario.initial_draw_assumption,
+            "conventional_flat_ltv": configured_flat_ltv,
             "synthetic_depth_used": False,
         }

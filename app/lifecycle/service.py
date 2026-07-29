@@ -1019,6 +1019,7 @@ class CreditLifecycleEngine:
             "asset_ltv_caps": {
                 key.value: value for key, value in policy.asset_ltv_caps.items()
             },
+            "portfolio_ltv_cap": policy.portfolio_ltv_cap,
             "max_participation_rate": policy.max_participation_rate,
             "min_data_quality_score": policy.min_data_quality_score,
             "allow_lending_on_stale_or_halted_assets": policy.allow_lending_on_stale_or_halted_assets,

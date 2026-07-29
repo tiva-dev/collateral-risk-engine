@@ -8,6 +8,8 @@ from typing import Any
 
 from app.core.enums import DataMode, MarginState
 from app.core.models import Holding, Loan, Policy
+from app.credit.interest import InterestPolicy
+from app.liquidation.policy import LiquidationExecutionPolicy
 from app.market_data.policy import MarketDataPolicy
 from app.market_data.providers import FXRate, RawQuote
 
@@ -30,6 +32,7 @@ class MonitoringEventType(str, Enum):
     LIQUIDATION_TRIGGERED = "liquidation_triggered"
     MARKET_DATA_DEGRADED = "market_data_degraded"
     FX_MISSING = "fx_missing"
+    LOAN_BALANCE_UPDATED = "loan_balance_updated"
     MONITORING_ERROR = "monitoring_error"
 
 
@@ -56,6 +59,8 @@ class MonitoredAccount:
     loan: Loan
     loan_currency: str
     policy: Policy
+    interest_policy: InterestPolicy
+    liquidation_execution_policy: LiquidationExecutionPolicy
     data_mode: DataMode
     market_data_policy: MarketDataPolicy
     client_supplied_quotes: dict[str, RawQuote] = field(default_factory=dict)
@@ -71,6 +76,8 @@ class MonitoredAccount:
     last_quality_scores: dict[str, float] = field(default_factory=dict)
     last_checked_at: datetime | None = None
     next_check_after: datetime | None = None
+    last_interest_accrual_at: datetime | None = None
+    processed_loan_event_references: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 

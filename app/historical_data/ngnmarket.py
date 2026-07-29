@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, date, datetime
@@ -38,22 +40,47 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
         self.provider_coverage_summary = {}
         self.total_api_call_count = 0
 
+    def _api_key(self) -> str:
+        key = (self.config.ngnmarket_api_key or "").strip()
+        if key.lower().startswith("bearer "):
+            key = key[7:].strip()
+        if not key:
+            raise ProviderError(
+                "NGNMarket API key is missing",
+                provider=self.provider_name,
+                code="missing_api_key",
+            )
+        if not key.startswith("ngm_"):
+            raise ProviderError(
+                "NGNMarket API key has an invalid format; expected an ngm_ key",
+                provider=self.provider_name,
+                code="invalid_api_key_format",
+            )
+        return key
+
     def auth_headers(self):
-        return (
-            {"Authorization": f"Bearer {self.config.ngnmarket_api_key}"}
-            if self.config.ngnmarket_api_key
-            else {}
-        )
+        return {
+            "Authorization": f"Bearer {self._api_key()}",
+            "Accept": "application/json",
+            "User-Agent": "collateral-risk-engine/0.6.2",
+        }
 
     def parse_envelope(self, payload):
         if isinstance(payload, dict) and "meta" in payload:
             self.quota_metadata.update(payload.get("meta") or {})
         if isinstance(payload, dict) and payload.get("success") is False:
-            msg = str(
-                payload.get("error") or payload.get("message") or "NGNMarket error"
+            error = payload.get("error")
+            code = error.get("code") if isinstance(error, dict) else None
+            msg = (
+                error.get("message")
+                if isinstance(error, dict)
+                else error or payload.get("message") or "NGNMarket error"
             )
+            msg = str(msg)
             self.warnings.append(msg)
-            raise ProviderError(msg, provider=self.provider_name, metadata=payload)
+            raise ProviderError(
+                msg, provider=self.provider_name, code=code, metadata=payload
+            )
         return payload.get("data", payload) if isinstance(payload, dict) else payload
 
     def _request_json(self, path, params=None):
@@ -67,6 +94,72 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
             # URL scheme and host are validated immediately above.
             with urllib.request.urlopen(req, timeout=30) as r:  # nosec B310
                 return json.loads(r.read().decode())
+        except urllib.error.HTTPError as exc:
+            raw_body = ""
+            try:
+                raw_body = exc.read().decode(errors="replace")
+                payload = json.loads(raw_body)
+            except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
+                payload = {}
+            error = payload.get("error") if isinstance(payload, dict) else None
+            provider_code = (
+                str(error.get("code"))
+                if isinstance(error, dict) and error.get("code")
+                else str(payload.get("code"))
+                if isinstance(payload, dict) and payload.get("code")
+                else f"http_{exc.code}"
+            )
+            provider_message = (
+                str(error.get("message"))
+                if isinstance(error, dict) and error.get("message")
+                else str(payload.get("message"))
+                if isinstance(payload, dict) and payload.get("message")
+                else ""
+            )
+            if not provider_message and raw_body:
+                body_text = re.sub(r"<[^>]+>", " ", raw_body)
+                body_text = " ".join(body_text.split())
+                provider_message = f"request rejected; response={body_text[:240]}"
+            provider_message = provider_message or "request rejected"
+            provider_message = provider_message.replace(self._api_key(), "[redacted]")
+            response_headers = {
+                name: value
+                for name, value in {
+                    "content_type": exc.headers.get("Content-Type")
+                    if exc.headers
+                    else None,
+                    "server": exc.headers.get("Server") if exc.headers else None,
+                    "request_id": (
+                        exc.headers.get("CF-Ray")
+                        or exc.headers.get("X-Request-ID")
+                        or exc.headers.get("X-Correlation-ID")
+                    )
+                    if exc.headers
+                    else None,
+                }.items()
+                if value
+            }
+            raise ProviderError(
+                f"NGNMarket HTTP {exc.code}: {provider_code}: {provider_message}",
+                provider=self.provider_name,
+                code=provider_code,
+                metadata={
+                    "http_status": exc.code,
+                    "response_headers": response_headers,
+                },
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ProviderError(
+                f"NGNMarket transport error: {exc.reason}",
+                provider=self.provider_name,
+                code="transport_error",
+            ) from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ProviderError(
+                "NGNMarket returned an invalid JSON response",
+                provider=self.provider_name,
+                code="invalid_json",
+            ) from exc
         except Exception as exc:
             raise ProviderError(
                 "NGNMarket request failed (credentials and URL redacted)",
@@ -104,6 +197,7 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
         warnings = list(self.warnings)
         bars = []
         identity = self._identity(symbol, asset_type)
+        null_ohlc_fallbacks = 0
         if not rows:
             warnings.append(f"No NGNMarket chart data for {symbol}")
             self.missing_symbols.append(symbol)
@@ -130,13 +224,20 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                 dt = date.fromisoformat(str(d)[:10])
                 if start_date <= dt <= end_date:
                     c = float(close)
+                    open_value = b.get("open", b.get("o"))
+                    high_value = b.get("high", b.get("h"))
+                    low_value = b.get("low", b.get("l"))
+                    null_ohlc_fallbacks += sum(
+                        value in (None, "")
+                        for value in (open_value, high_value, low_value)
+                    )
                     bars.append(
                         HistoricalBar(
                             symbol,
                             dt,
-                            float(b.get("open", b.get("o", c))),
-                            float(b.get("high", b.get("h", c))),
-                            float(b.get("low", b.get("l", c))),
+                            float(c if open_value in (None, "") else open_value),
+                            float(c if high_value in (None, "") else high_value),
+                            float(c if low_value in (None, "") else low_value),
                             c,
                             b.get("adjusted_close"),
                             float(b.get("volume", b.get("v", 0)) or 0),
@@ -151,6 +252,11 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                 warnings.append(
                     f"Malformed NGNMarket chart row skipped for {symbol}: {exc}"
                 )
+        if null_ohlc_fallbacks:
+            warnings.append(
+                f"NGNMarket filled {null_ohlc_fallbacks} missing OHLC field(s) "
+                f"from close for {symbol}"
+            )
         return HistoricalSeries(
             symbol,
             bars,
@@ -235,7 +341,8 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
             return self.parse_envelope(c["data"])
         p = self._request_json("/companies")
         self.raw_response_paths.append(str(self.cache.write("raw", p, **key)))
-        return self.parse_envelope(p)
+        data = self.parse_envelope(p)
+        return data.get("data", data) if isinstance(data, dict) else data
 
     def fetch_equity_history(
         self, instrument, start_date, end_date, interval="1d", force_refresh=False
@@ -265,8 +372,7 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
             {
                 "from": start_date.isoformat(),
                 "to": end_date.isoformat(),
-                "period": "1d",
-                "format": "json",
+                "format": "detailed",
             },
         )
         self.raw_response_paths.append(str(self.cache.write("raw", p, **key)))

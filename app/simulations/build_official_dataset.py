@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from datetime import date
 
 from app.simulations.config.official_validation_universe import START_DATE
@@ -41,6 +42,31 @@ def main():
     )
     path = b.write_manifest(m)
     print(path)
+    available_equities = sorted(
+        symbol
+        for symbol in m.instruments
+        if symbol in m.earliest_available_date_by_symbol
+    )
+    print(
+        json.dumps(
+            {
+                "dataset_id": m.dataset_id,
+                "cache_path_count": len(m.cache_paths),
+                "raw_response_path_count": len(m.raw_response_paths),
+                "available_equities": available_equities,
+                "provider_coverage_summary": m.provider_coverage_summary,
+                "missing_symbol_reasons": m.missing_symbol_reasons,
+                "warnings": m.warnings,
+            },
+            indent=2,
+            default=str,
+        )
+    )
+    if not a.dry_run and not available_equities:
+        raise SystemExit(
+            "Provider dataset build produced no usable equity histories; "
+            "see the sanitized manifest summary above."
+        )
 
 
 if __name__ == "__main__":
