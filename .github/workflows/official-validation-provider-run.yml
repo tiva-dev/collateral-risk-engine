@@ -1,6 +1,9 @@
 name: Official Provider Validation Run
 
 on:
+  push:
+    branches:
+      - codex/complete-recovery-and-backtests
   workflow_dispatch:
     inputs:
       dry_run:
@@ -84,16 +87,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/historical_cache
-          key: official-provider-cache-v1-${{ inputs.start_date }}-${{ inputs.end_date }}
+          key: official-provider-cache-v1-${{ inputs.start_date || '2018-01-01' }}-${{ inputs.end_date }}
       - name: Build or plan official provider dataset
         shell: bash
         env:
-          PROVIDERS: ${{ inputs.providers }}
-          START_DATE: ${{ inputs.start_date }}
+          PROVIDERS: ${{ inputs.providers || 'all' }}
+          START_DATE: ${{ inputs.start_date || '2018-01-01' }}
           END_DATE: ${{ inputs.end_date }}
-          DRY_RUN: ${{ inputs.dry_run }}
-          FORCE_REFRESH: ${{ inputs.force_refresh }}
-          QUOTA_OVERRIDE: ${{ inputs.quota_override }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          FORCE_REFRESH: ${{ inputs.force_refresh || 'false' }}
+          QUOTA_OVERRIDE: ${{ inputs.quota_override || 'false' }}
         run: |
           set -euo pipefail
           mkdir -p data/simulation_results
@@ -104,11 +107,11 @@ jobs:
           if [ "$QUOTA_OVERRIDE" = "true" ]; then args+=(--quota-override); fi
           python -m app.simulations.build_official_dataset "${args[@]}" | tee data/simulation_results/dataset_build.log
       - name: Run official validation
-        if: ${{ inputs.run_validation_after_build == 'true' }}
+        if: ${{ github.event_name == 'push' || inputs.run_validation_after_build == 'true' }}
         shell: bash
         env:
-          SCENARIO: ${{ inputs.scenario }}
-          STRESS: ${{ inputs.stress }}
+          SCENARIO: ${{ inputs.scenario || 'all' }}
+          STRESS: ${{ inputs.stress || 'all' }}
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
