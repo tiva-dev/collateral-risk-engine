@@ -221,6 +221,20 @@ class V06ProviderValidationTests(unittest.TestCase):
         self.assertEqual(elig["eligible_scenarios"], [])
         self.assertTrue(elig["ineligible_scenarios"])
 
+    def test_coverage_accepts_a_series_supplied_by_a_fallback_provider(self):
+        manifest = {
+            "missing_symbols": ["USD/NGN"],
+            "earliest_available_date_by_symbol": {
+                "SPY": "2018-01-01",
+                "USD/NGN": "2018-01-01",
+            },
+        }
+        coverage = validate_provider_coverage(
+            manifest, ["SPY"], ["USD/NGN"]
+        )
+        self.assertTrue(coverage["passed"])
+        self.assertEqual(coverage["missing_fx_pairs"], [])
+
     def test_evidence_qa_and_calibration(self):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d)

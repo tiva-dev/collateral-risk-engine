@@ -100,7 +100,10 @@ class CollateralRiskEngine:
         stressed_liquidation_value = sum(
             a.stressed_liquidation_value for a in asset_results
         )
-        approved_credit_limit = max(0.0, risk_adjusted_collateral_value)
+        portfolio_ltv_limit = portfolio_market_value * policy.portfolio_ltv_cap
+        approved_credit_limit = max(
+            0.0, min(risk_adjusted_collateral_value, portfolio_ltv_limit)
+        )
         available_credit = max(0.0, approved_credit_limit - outstanding_balance)
         projected_available_credit = max(
             0.0, approved_credit_limit - projected_loan_balance
@@ -146,6 +149,8 @@ class CollateralRiskEngine:
             "risk_adjusted_collateral_value": round_money(
                 risk_adjusted_collateral_value
             ),
+            "portfolio_ltv_cap": policy.portfolio_ltv_cap,
+            "portfolio_ltv_limit": round_money(portfolio_ltv_limit),
             "approved_credit_limit": round_money(approved_credit_limit),
             "stressed_liquidation_value": round_money(stressed_liquidation_value),
             "current_outstanding_balance": round_money(outstanding_balance),

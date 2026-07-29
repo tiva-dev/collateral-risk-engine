@@ -231,7 +231,12 @@ def main():
     p.add_argument("--scenario", default="all")
     p.add_argument("--output-dir")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--flat-ltv", type=float, default=0.70)
+    p.add_argument(
+        "--flat-ltv",
+        type=float,
+        default=None,
+        help="Optional common-exposure override; defaults to 30% for NGN and 50% otherwise.",
+    )
     p.add_argument("--static-haircut-profile", default="standard")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--qa", action="store_true")
@@ -268,6 +273,8 @@ def main():
     config = {
         "seed": a.seed,
         "flat_ltv": a.flat_ltv,
+        "flat_ltv_benchmarks": [0.30, 0.50],
+        "policy_origination_limit_utilization": 1.0,
         "static_haircut_profile": a.static_haircut_profile,
         "scenario": a.scenario,
         "selected_scenarios": selected,
@@ -303,6 +310,11 @@ def main():
             volume_collapse=0.8,
             spread_widening=4.0,
             order_book_thinning=0.8,
+        ),
+        "forced_liquidation_recovery": StressOverlay(
+            volume_collapse=0.50,
+            spread_widening=2.0,
+            force_liquidation_boundary=True,
         ),
     }
     eligibility = scenario_eligibility(
@@ -360,7 +372,13 @@ def main():
         stress_overlays = {
             k: v
             for k, v in stress_overlays.items()
-            if k in {"combined_severe", "price_gap", "fx_devaluation"}
+            if k
+            in {
+                "combined_severe",
+                "price_gap",
+                "fx_devaluation",
+                "forced_liquidation_recovery",
+            }
         }
     total_replays = len(selected) * len(stress_overlays) * 2
     completed_replays = 0

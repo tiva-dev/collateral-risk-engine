@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from app.core.enums import AssetType, RiskAppetite
 from app.core.models import Holding
 from app.credit.interest import InterestPolicy
+from app.liquidation.policy import LiquidationExecutionPolicy
 
 
 @dataclass(frozen=True)
@@ -14,11 +15,29 @@ class OfficialPortfolioScenario:
     loan_currency: str
     base_ltv_policy: float = 0.70
     risk_appetite: RiskAppetite = RiskAppetite.BALANCED
-    initial_draw_assumption: float = 0.60
+    initial_draw_assumption: float = 1.0
     loan_terms: InterestPolicy = field(default_factory=lambda: InterestPolicy(0.10))
+    conventional_flat_ltv: float | None = None
+    execution_policy: LiquidationExecutionPolicy = field(
+        default_factory=LiquidationExecutionPolicy
+    )
     rebalance: bool = False
     monitoring_frequency: str = "daily"
     methodology_notes: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.initial_draw_assumption <= 1:
+            raise ValueError("initial_draw_assumption must be between zero and one")
+        if self.conventional_flat_ltv is not None and not (
+            0 <= self.conventional_flat_ltv <= 1
+        ):
+            raise ValueError("conventional_flat_ltv must be between zero and one")
+
+    @property
+    def benchmark_flat_ltv(self) -> float:
+        if self.conventional_flat_ltv is not None:
+            return self.conventional_flat_ltv
+        return 0.30 if self.loan_currency.upper() == "NGN" else 0.50
 
 
 def _h(s, q, c="USD", t=AssetType.LISTED_EQUITY):
@@ -75,9 +94,27 @@ def official_portfolio_scenarios() -> dict[str, OfficialPortfolioScenario]:
         ("thin_liquidity_portfolio", [_h("THIN", 1000, "USD")], "USD"),
         ("single_name_concentration_portfolio", [_h("AAPL", 300)], "USD"),
     ]
-    return {
-        n: OfficialPortfolioScenario(
-            n, h, c, methodology_notes=["Official v0.5B validation scenario"]
+    scenarios: dict[str, OfficialPortfolioScenario] = {}
+    for name, holdings, currency in rows:
+        nigeria_terms = currency.upper() == "NGN"
+        scenarios[name] = OfficialPortfolioScenario(
+            name,
+            holdings,
+            currency,
+            loan_terms=(
+                InterestPolicy(0.48, accrual_frequency="monthly")
+                if nigeria_terms
+                else InterestPolicy(0.10)
+            ),
+            conventional_flat_ltv=0.30 if nigeria_terms else 0.50,
+            methodology_notes=[
+                "Official provider-backed validation scenario",
+                "Policy-originated exposure draws 100% of the approved limit.",
+                (
+                    "NGN policy uses a 4% monthly nominal rate (48% annual simple)."
+                    if nigeria_terms
+                    else "USD/EUR policy uses 10% annual simple interest."
+                ),
+            ],
         )
-        for n, h, c in rows
-    }
+    return scenarios

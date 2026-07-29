@@ -90,7 +90,11 @@ def compute_simulation_metrics(
     baselines = result.get("baseline_results", {})
     dynamic_records = list(baselines.get("dynamic_engine", records))
     flat_records = list(baselines.get("flat_ltv", []))
+    flat_30_records = list(baselines.get("flat_ltv_30") or flat_records)
+    flat_50_records = list(baselines.get("flat_ltv_50") or flat_records)
     static_records = list(baselines.get("static_haircut", []))
+    initial = dict(result.get("initial_credit_snapshot") or {})
+    episodes = list(result.get("liquidation_episodes") or [])
 
     breaches = [_breach(record) for record in records]
     economic_shortfalls = [
@@ -113,6 +117,8 @@ def compute_simulation_metrics(
             "date": dynamic.get("date"),
             "dynamic_credit_limit_breach": _breach(dynamic),
             "flat_ltv_credit_limit_breach": _breach(flat),
+            "flat_ltv_30_credit_limit_breach": _breach(flat_30),
+            "flat_ltv_50_credit_limit_breach": _breach(flat_50),
             "static_haircut_credit_limit_breach": _breach(static),
             "dynamic_economic_recovery_shortfall": dynamic.get(
                 "economic_recovery_shortfall"
@@ -120,12 +126,23 @@ def compute_simulation_metrics(
             "flat_ltv_economic_recovery_shortfall": flat.get(
                 "economic_recovery_shortfall"
             ),
+            "flat_ltv_30_economic_recovery_shortfall": flat_30.get(
+                "economic_recovery_shortfall"
+            ),
+            "flat_ltv_50_economic_recovery_shortfall": flat_50.get(
+                "economic_recovery_shortfall"
+            ),
             "static_haircut_economic_recovery_shortfall": static.get(
                 "economic_recovery_shortfall"
             ),
         }
-        for dynamic, flat, static in zip(
-            dynamic_records, flat_records, static_records, strict=False
+        for dynamic, flat, flat_30, flat_50, static in zip(
+            dynamic_records,
+            flat_records,
+            flat_30_records,
+            flat_50_records,
+            static_records,
+            strict=False,
         )
     ]
 
@@ -202,12 +219,88 @@ def compute_simulation_metrics(
     static_capacities = [
         float(record.get("policy_credit_limit", 0.0)) for record in static_records
     ]
+    forced_episodes = [
+        episode for episode in episodes if episode.get("action") == "full_recovery"
+    ]
+    completed_forced_episodes = [
+        episode
+        for episode in forced_episodes
+        if episode.get("status") == "fully_recovered"
+    ]
+    completed_episode_times = [
+        float(episode["time_to_completion_observations"])
+        for episode in episodes
+        if episode.get("time_to_completion_observations") is not None
+    ]
+    execution_attempts = [
+        attempt
+        for episode in episodes
+        for attempt in episode.get("execution_attempts", [])
+    ]
+    flat_30_shortfalls = [
+        float(record.get("economic_recovery_shortfall", 0.0))
+        for record in flat_30_records
+    ]
+    flat_50_shortfalls = [
+        float(record.get("economic_recovery_shortfall", 0.0))
+        for record in flat_50_records
+    ]
+    initial_market_value = float(initial.get("market_value", 0.0))
+    initial_approved_limit = float(initial.get("approved_credit_limit", 0.0))
+    initial_approved_ltv: float | dict[str, Any] = (
+        float(initial["approved_ltv"])
+        if "approved_ltv" in initial
+        else unavailable("initial credit snapshot absent", blocking=False)
+    )
+    initial_draw_ltv: float | dict[str, Any] = (
+        float(initial["draw_ltv"])
+        if "draw_ltv" in initial
+        else unavailable("initial credit snapshot absent", blocking=False)
+    )
+    utilization: float | dict[str, Any] = (
+        float(initial["credit_limit_utilization"])
+        if "credit_limit_utilization" in initial
+        else unavailable("initial credit snapshot absent", blocking=False)
+    )
 
     return {
         "scenario": result.get("scenario"),
         "comparison_regime": result.get("comparison_regime"),
         "base_scenario": result.get("base_scenario", result.get("scenario")),
         "stress_name": result.get("stress_name", "baseline"),
+        "initial_portfolio_market_value": (
+            initial_market_value
+            if initial
+            else unavailable("initial credit snapshot absent", blocking=False)
+        ),
+        "initial_approved_credit_limit": (
+            initial_approved_limit
+            if initial
+            else unavailable("initial credit snapshot absent", blocking=False)
+        ),
+        "initial_approved_ltv": initial_approved_ltv,
+        "initial_draw_ltv": initial_draw_ltv,
+        "credit_limit_utilization_at_origination": utilization,
+        "initial_ltv_advantage_versus_30pct": (
+            float(initial_approved_ltv) - 0.30
+            if isinstance(initial_approved_ltv, float)
+            else initial_approved_ltv
+        ),
+        "initial_ltv_advantage_versus_50pct": (
+            float(initial_approved_ltv) - 0.50
+            if isinstance(initial_approved_ltv, float)
+            else initial_approved_ltv
+        ),
+        "incremental_lendable_value_versus_30pct": (
+            initial_approved_limit - 0.30 * initial_market_value
+            if initial
+            else unavailable("initial credit snapshot absent", blocking=False)
+        ),
+        "incremental_lendable_value_versus_50pct": (
+            initial_approved_limit - 0.50 * initial_market_value
+            if initial
+            else unavailable("initial credit snapshot absent", blocking=False)
+        ),
         "credit_limit_breach_rate": (
             sum(value > 0 for value in breaches) / len(breaches)
             if breaches
@@ -238,6 +331,68 @@ def compute_simulation_metrics(
         "average_recovery_coverage_ratio": _average(coverage),
         "liquidation_plan_completeness": plan_completeness,
         "unrecovered_liquidation_target": unrecovered_target,
+        "liquidation_episode_count": len(episodes),
+        "forced_liquidation_episode_count": len(forced_episodes),
+        "forced_liquidation_full_recovery_rate": (
+            len(completed_forced_episodes) / len(forced_episodes)
+            if forced_episodes
+            else unavailable(
+                "no forced-liquidation episode occurred", blocking=False
+            )
+        ),
+        "average_observations_to_recovery": (
+            sum(completed_episode_times) / len(completed_episode_times)
+            if completed_episode_times
+            else unavailable("no completed recovery episode", blocking=False)
+        ),
+        "gross_executed_liquidation_proceeds": sum(
+            float(episode.get("gross_proceeds", 0.0)) for episode in episodes
+        ),
+        "liquidation_execution_costs": sum(
+            float(episode.get("execution_costs", 0.0)) for episode in episodes
+        ),
+        "net_executed_liquidation_proceeds": sum(
+            float(episode.get("net_proceeds", 0.0)) for episode in episodes
+        ),
+        "settled_liquidation_recovery": sum(
+            float(episode.get("settled_recovery", 0.0)) for episode in episodes
+        ),
+        "realized_creditor_loss": sum(
+            float(episode.get("realized_creditor_loss", 0.0))
+            for episode in episodes
+        ),
+        "terminal_unresolved_exposure": float(
+            result.get("terminal_unresolved_exposure", 0.0)
+        ),
+        "unexecuted_liquidation_episode_count": sum(
+            episode.get("status") in {"failed", "unresolved_at_replay_end"}
+            for episode in episodes
+        ),
+        "failed_liquidation_episode_count": sum(
+            episode.get("status") == "failed" for episode in episodes
+        ),
+        "right_censored_liquidation_episode_count": sum(
+            episode.get("status") == "unresolved_at_replay_end"
+            for episode in episodes
+        ),
+        "partial_fill_attempt_count": sum(
+            attempt.get("status") == "partial" for attempt in execution_attempts
+        ),
+        "unfilled_attempt_count": sum(
+            attempt.get("status") == "unfilled" for attempt in execution_attempts
+        ),
+        "flat_30pct_economic_recovery_shortfall_rate": (
+            sum(value > 0 for value in flat_30_shortfalls)
+            / len(flat_30_shortfalls)
+            if flat_30_shortfalls
+            else unavailable("30% benchmark records absent", blocking=False)
+        ),
+        "flat_50pct_economic_recovery_shortfall_rate": (
+            sum(value > 0 for value in flat_50_shortfalls)
+            / len(flat_50_shortfalls)
+            if flat_50_shortfalls
+            else unavailable("50% benchmark records absent", blocking=False)
+        ),
         "average_approved_credit": _average(
             [float(record.get("approved_credit_limit", 0.0)) for record in records]
         ),

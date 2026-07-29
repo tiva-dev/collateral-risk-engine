@@ -100,6 +100,32 @@ class FinancialSemanticsRecoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             collateral_injection_only_cure(1, 1, 0)
 
+    def test_client_portfolio_ltv_cap_limits_approved_credit(self) -> None:
+        market = {
+            "CASH": MarketData(
+                "CASH",
+                1,
+                bid=1,
+                ask=1,
+                average_daily_volume=1_000_000,
+                average_dollar_volume=1_000_000,
+                timestamp=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        }
+        policy = Policy(
+            base_ltv=Policy.default().base_ltv,
+            asset_ltv_caps=Policy.default().asset_ltv_caps,
+            portfolio_ltv_cap=0.30,
+        )
+        result = CollateralRiskEngine().evaluate(
+            "portfolio-cap",
+            [Holding("CASH", AssetType.CASH, 100_000, "USD")],
+            Loan(0),
+            policy,
+            market,
+        )
+        self.assertEqual(result.approved_credit_limit, 30_000)
+
 
 class ReviewRegressionTests(unittest.TestCase):
     def test_replay_does_not_charge_stressed_haircut_as_an_extra_cost(self) -> None:

@@ -135,6 +135,33 @@ class MonitoringRepositoryTests(unittest.TestCase):
 
 
 class MonitoringServiceTests(unittest.TestCase):
+    def test_idempotent_draw_repayment_and_obligation_update(self):
+        svc = service()
+        register(svc, "loan_updates", loan=1_000.0)
+
+        account, events = svc.apply_loan_update(
+            "loan_updates",
+            event_reference="client-event-1",
+            draw_amount=500.0,
+            repayment_amount=100.0,
+            accrued_interest_delta=10.0,
+            fee_delta=5.0,
+            trigger_tick=False,
+        )
+        self.assertEqual(account.loan.principal, 1_415.0)
+        self.assertEqual(account.loan.accrued_interest, 0.0)
+        self.assertEqual(account.loan.fees, 0.0)
+        self.assertEqual(events[0].event_type, MonitoringEventType.LOAN_BALANCE_UPDATED)
+
+        duplicate, duplicate_events = svc.apply_loan_update(
+            "loan_updates",
+            event_reference="client-event-1",
+            draw_amount=500.0,
+            trigger_tick=False,
+        )
+        self.assertEqual(duplicate.loan.principal, 1_415.0)
+        self.assertEqual(duplicate_events, [])
+
     def test_register_account_emits_initial_tick_and_get_list_delete(self):
         svc = service()
         account, events = register(svc, "reg_acct")
@@ -179,10 +206,16 @@ class MonitoringServiceTests(unittest.TestCase):
         self.assertIn(MonitoringEventType.MARGIN_CALL_TRIGGERED, types)
         svc.market_data_cache.merge({"SPY": quote(price=10.0)}, {}, "test")
         _, events = svc.evaluate_account("state_acct")
-        self.assertIn(
-            MonitoringEventType.LIQUIDATION_TRIGGERED,
-            [event.event_type for event in events],
+        liquidation_event = next(
+            event
+            for event in events
+            if event.event_type == MonitoringEventType.LIQUIDATION_TRIGGERED
         )
+        self.assertTrue(liquidation_event.liquidation_plan["orders"])
+        order = liquidation_event.liquidation_plan["orders"][0]
+        self.assertEqual(order["asset_id"], "SPY")
+        self.assertGreater(order["requested_quantity"], 0)
+        self.assertGreater(order["minimum_limit_price"], 0)
 
     def test_missing_fx_and_market_data_degradation_events(self):
         svc = service()
@@ -532,6 +565,26 @@ class MonitoringEndpointTests(unittest.TestCase):
         )
         self.assertEqual(update.status_code, 200, update.text)
         self.assertIn(account_ref, update.json()["affected_accounts"])
+        loan_update = client.post(
+            f"/monitoring/accounts/{account_ref}/loan",
+            json={
+                "event_reference": "api-draw-1",
+                "repayment_amount": 50.0,
+                "trigger_tick": False,
+            },
+        )
+        self.assertEqual(loan_update.status_code, 200, loan_update.text)
+        self.assertEqual(loan_update.json()["account"]["loan"]["principal"], 950.0)
+        duplicate = client.post(
+            f"/monitoring/accounts/{account_ref}/loan",
+            json={
+                "event_reference": "api-draw-1",
+                "repayment_amount": 50.0,
+                "trigger_tick": False,
+            },
+        )
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertEqual(duplicate.json()["account"]["loan"]["principal"], 950.0)
         events = client.get("/monitoring/events", params={"account_ref": account_ref})
         self.assertEqual(events.status_code, 200)
         event_id = events.json()["events"][0]["event_id"]
