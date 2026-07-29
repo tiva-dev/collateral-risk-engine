@@ -319,6 +319,71 @@ class V053ReadinessHardeningTests(unittest.TestCase):
         self.assertEqual(metrics["base_scenario"], "retail_stress")
         self.assertEqual(metrics["stress_name"], "price_gap")
 
+    def test_intentional_missing_fx_counterfactual_is_nonblocking(self):
+        record = {
+            "date": "2025-01-02",
+            "data_quality_haircut_impact": None,
+            "fx_missing": True,
+            "missing_data": True,
+            "economic_recovery_shortfall": 0.0,
+            "recovery_coverage_ratio": 0.0,
+            "lifecycle_safe_credit_limit": 0.0,
+            "approved_credit_limit": 0.0,
+            "policy_credit_limit": 0.0,
+            "total_obligation": 0.0,
+            "credit_limit_breach": 0.0,
+        }
+        result = {
+            "scenario": "cross_currency::missing_fx",
+            "base_scenario": "cross_currency",
+            "comparison_regime": "policy_origination_outcome",
+            "stress_name": "missing_fx",
+            "records": [record],
+            "events": [],
+            "baseline_results": {
+                "dynamic_engine": [record],
+                "flat_ltv": [record],
+                "static_haircut": [record],
+            },
+        }
+
+        metric = compute_simulation_metrics(result)["data_quality_haircut_impact"]
+
+        self.assertFalse(metric["available"])
+        self.assertFalse(metric["blocking"])
+        self.assertIn("intentional missing-FX stress", metric["reason"])
+
+    def test_unexpected_missing_counterfactual_remains_blocking(self):
+        result = {
+            "scenario": "cross_currency::price_gap",
+            "base_scenario": "cross_currency",
+            "comparison_regime": "policy_origination_outcome",
+            "stress_name": "price_gap",
+            "records": [
+                {
+                    "date": "2025-01-02",
+                    "data_quality_haircut_impact": None,
+                    "fx_missing": True,
+                    "missing_data": True,
+                    "economic_recovery_shortfall": 0.0,
+                    "recovery_coverage_ratio": 0.0,
+                    "lifecycle_safe_credit_limit": 0.0,
+                    "approved_credit_limit": 0.0,
+                    "policy_credit_limit": 0.0,
+                    "total_obligation": 0.0,
+                    "credit_limit_breach": 0.0,
+                }
+            ],
+            "events": [],
+            "baseline_results": {},
+        }
+
+        metric = compute_simulation_metrics(result)["data_quality_haircut_impact"]
+
+        self.assertFalse(metric["available"])
+        self.assertTrue(metric["blocking"])
+        self.assertEqual(metric["reason"], "data-quality counterfactual not persisted")
+
 
 if __name__ == "__main__":
     unittest.main()
