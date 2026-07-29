@@ -168,6 +168,24 @@ def compute_simulation_metrics(
         for record in records
         if record.get("data_quality_haircut_impact") is not None
     ]
+    if data_quality_impacts:
+        data_quality_impact_metric: float | dict[str, Any] = sum(
+            data_quality_impacts
+        ) / len(data_quality_impacts)
+    elif (
+        result.get("stress_name") == "missing_fx"
+        and records
+        and all(record.get("fx_missing") for record in records)
+    ):
+        data_quality_impact_metric = unavailable(
+            "counterfactual cannot be valued in the intentional missing-FX stress",
+            blocking=False,
+        )
+    else:
+        data_quality_impact_metric = unavailable(
+            "data-quality counterfactual not persisted",
+            blocking=True,
+        )
     false_triggers = (
         sum(
             1
@@ -320,11 +338,7 @@ def compute_simulation_metrics(
             for record in records
         ),
         "fx_missing_events": sum(bool(record.get("fx_missing")) for record in records),
-        "data_quality_haircut_impact": (
-            sum(data_quality_impacts) / len(data_quality_impacts)
-            if data_quality_impacts
-            else unavailable("data-quality counterfactual not persisted", blocking=True)
-        ),
+        "data_quality_haircut_impact": data_quality_impact_metric,
         "provider_coverage_by_symbol": (manifest or {}).get(
             "provider_coverage_summary", {}
         ),
