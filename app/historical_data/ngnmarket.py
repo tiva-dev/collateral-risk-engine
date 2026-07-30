@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime
 
 from app.core.enums import AssetType
 from app.market_data.identity import InstrumentIdentity
+from app.version import PROJECT_VERSION
 
 from .cache import HistoricalDataCache
 from .config import load_config
@@ -62,7 +63,7 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
         return {
             "Authorization": f"Bearer {self._api_key()}",
             "Accept": "application/json",
-            "User-Agent": "collateral-risk-engine/0.6.2",
+            "User-Agent": f"collateral-risk-engine/{PROJECT_VERSION}",
         }
 
     def parse_envelope(self, payload):
@@ -240,7 +241,11 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                             float(c if low_value in (None, "") else low_value),
                             c,
                             b.get("adjusted_close"),
-                            float(b.get("volume", b.get("v", 0)) or 0),
+                            (
+                                None
+                                if b.get("volume", b.get("v")) in (None, "")
+                                else float(b.get("volume", b.get("v")))
+                            ),
                             b.get("value_traded"),
                             "NGN",
                             provider_name=self.provider_name,

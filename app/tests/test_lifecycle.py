@@ -104,7 +104,7 @@ class CreditLifecycleEngineTests(unittest.TestCase):
     def test_draw_above_limit_is_rejected_when_no_capacity_remains(self) -> None:
         result = self.lifecycle.check_draw(
             "acct_draw_reject",
-            Loan(principal=3_881.88),
+            Loan(principal=7_000.0),
             100.0,
             self.holdings,
             self.policy,
@@ -115,14 +115,14 @@ class CreditLifecycleEngineTests(unittest.TestCase):
         self.assertEqual(
             result.reason, "requested draw exceeds projected available credit"
         )
-        self.assertEqual(result.projected_outstanding_balance, 3_981.88)
+        self.assertEqual(result.projected_outstanding_balance, 7_100.0)
         self.assertEqual(result.max_approved_draw_amount, 0.0)
 
     def test_partial_draw_approval(self) -> None:
         result = self.lifecycle.check_draw(
             "acct_draw_partial",
             Loan(principal=1_000.0),
-            5_000.0,
+            7_000.0,
             self.holdings,
             self.policy,
             self.market_data,
@@ -132,9 +132,9 @@ class CreditLifecycleEngineTests(unittest.TestCase):
         self.assertEqual(
             result.reason, "requested draw exceeds projected available credit"
         )
-        self.assertEqual(result.projected_outstanding_balance, 6_000.0)
+        self.assertEqual(result.projected_outstanding_balance, 8_000.0)
         self.assertGreater(result.max_approved_draw_amount or 0.0, 0.0)
-        self.assertLess(result.max_approved_draw_amount or 0.0, 5_000.0)
+        self.assertLess(result.max_approved_draw_amount or 0.0, 7_000.0)
 
     def test_repayment_allocation_preserves_remaining_components(self) -> None:
         result = self.lifecycle.check_draw(
@@ -201,7 +201,7 @@ class CreditLifecycleEngineTests(unittest.TestCase):
     def test_active_monitoring_margin_call(self) -> None:
         result = self.lifecycle.monitor(
             "acct_monitor_margin",
-            Loan(principal=5_000.0),
+            Loan(principal=8_000.0),
             self.holdings,
             self.policy,
             self.market_data,
@@ -232,17 +232,14 @@ class CreditLifecycleEngineTests(unittest.TestCase):
     def test_readme_documents_api_contract_terms(self) -> None:
         readme = Path("README.md").read_text(encoding="utf-8")
 
-        self.assertIn("/risk/evaluate", readme)
+        self.assertIn("/credit/originate", readme)
+        self.assertIn("/credit/draw/check", readme)
         self.assertIn("/portfolio/action/check", readme)
-        self.assertIn("preferred endpoint", readme)
-        self.assertIn("legacy endpoint", readme)
-        self.assertIn("loan_balance", readme)
-        self.assertIn("current_outstanding_balance", readme)
-        self.assertIn("current_available_credit", readme)
-        self.assertIn("outstanding_balance", readme)
-        self.assertIn("minimum_stressed_liquidation_value", readme)
-        self.assertIn("withdrawal` is an alias for `withdraw_security", readme)
-        self.assertIn("rejected", readme)
+        self.assertIn("/monitoring/accounts/{account_ref}/draws", readme)
+        self.assertIn("/monitoring/accounts/{account_ref}/repayments", readme)
+        self.assertIn("/liquidation/fills", readme)
+        self.assertIn("safe principal capacity", readme)
+        self.assertIn("full outstanding obligation", readme)
 
 
 if __name__ == "__main__":

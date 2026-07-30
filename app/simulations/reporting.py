@@ -17,6 +17,12 @@ from app.version import (
 SIMULATION_CONFIG_VERSION = PROJECT_VERSION
 
 
+def _json_default(value: Any) -> Any:
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
 def generate_evidence_package(
     results: list[dict[str, Any]],
     metrics: list[dict[str, Any]],
@@ -35,11 +41,11 @@ def generate_evidence_package(
 
     write(
         "official_validation_records.json",
-        json.dumps(results, indent=2, sort_keys=True, default=str),
+        json.dumps(results, indent=2, sort_keys=True, default=_json_default),
     )
     write(
         "official_validation_metrics.json",
-        json.dumps(metrics, indent=2, sort_keys=True, default=str),
+        json.dumps(metrics, indent=2, sort_keys=True, default=_json_default),
     )
     csv_path = out / "official_validation_metrics.csv"
     keys = sorted({key for metric in metrics for key in metric})
@@ -62,8 +68,9 @@ def generate_evidence_package(
     }
     scenario_rows = "\n".join(
         "| {scenario} | {regime} | {stress} | {start} | {end} | {ltv} | "
-        "{utilization} | {breach} | {paper_loss} | {realized_loss} | "
-        "{recovery_rate} | {flat30} | {flat50} |".format(
+        "{effective_ltv} | {utilization} | {breach} | {paper_loss} | "
+        "{realized_loss} | {recovery_rate} | {advisory_recovery} | {flat30} | "
+        "{flat50} |".format(
             scenario=metric.get("base_scenario"),
             regime=metric.get("comparison_regime"),
             stress=metric.get("stress_name", "baseline"),
@@ -85,10 +92,14 @@ def generate_evidence_package(
             )[1],
             breach=metric.get("worst_credit_limit_breach"),
             ltv=metric.get("initial_approved_ltv"),
+            effective_ltv=metric.get("median_effective_principal_ltv"),
             utilization=metric.get("credit_limit_utilization_at_origination"),
             paper_loss=metric.get("worst_economic_recovery_shortfall"),
             realized_loss=metric.get("realized_creditor_loss"),
             recovery_rate=metric.get("forced_liquidation_full_recovery_rate"),
+            advisory_recovery=metric.get(
+                "liquidation_advisory_full_debt_recovery_rate"
+            ),
             flat30=metric.get("flat_30pct_economic_recovery_shortfall_rate"),
             flat50=metric.get("flat_50pct_economic_recovery_shortfall_rate"),
         )
@@ -99,10 +110,12 @@ def generate_evidence_package(
         "# Official Validation Report\n\n"
         "## Scenario outcomes\n\n"
         "| Scenario | Comparison regime | Stress | Common start | Common end | "
-        "Initial CRI LTV | Limit utilization | Worst credit-limit breach | "
+        "Initial CRI LTV | Median effective principal LTV | Limit utilization | "
+        "Worst credit-limit breach | "
         "Worst theoretical shortfall | Realized creditor loss | Forced recovery "
-        "rate | 30% flat shortfall rate | 50% flat shortfall rate |\n"
-        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n"
+        "rate | Advisory full-debt coverage rate | 30% flat shortfall rate | "
+        "50% flat shortfall rate |\n"
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
         f"{scenario_rows}\n\n"
         "Common-exposure surveillance and policy-origination outcomes are "
         "reported separately. Completion alone is not evidence of superiority "
@@ -130,8 +143,10 @@ def generate_evidence_package(
         "Each comparison policy accrues its own principal, interest, and fee "
         "path under the scenario interest policy. NGN policies are validated at "
         "a 4% monthly nominal rate (48% annual simple); USD and EUR policies use "
-        "10% annual simple interest. The CRI principal limit reserves interest "
-        "through detection, cure, execution, and settlement latency.\n",
+        "10% annual simple interest. Policy-origination limits "
+        "reserve capacity for interest through the next contractual payment "
+        "date or maturity, so the reported principal LTV is lower when more "
+        "interest must be protected.\n",
     )
     write(
         "simulation_assumptions.md",
@@ -145,7 +160,9 @@ def generate_evidence_package(
         "LTV benchmarks are persisted separately. Stress overlays are recorded "
         "per result. Synthetic THIN observations, "
         "when explicitly allowed, are a separately labelled sensitivity and "
-        "cannot qualify a run as provider-backed.\n",
+        "cannot qualify a run as provider-backed. The comparison benchmark is "
+        "30% for NGX/NGN collateral and 50% for other collateral unless an "
+        "explicit sensitivity override is recorded.\n",
     )
 
     artifact_checksums = {
@@ -177,7 +194,12 @@ def generate_evidence_package(
     }
     manifest_path = out / "official_validation_manifest.json"
     manifest_path.write_text(
-        json.dumps(evidence_manifest, indent=2, sort_keys=True, default=str)
+        json.dumps(
+            evidence_manifest,
+            indent=2,
+            sort_keys=True,
+            default=_json_default,
+        )
     )
     files[manifest_path.name] = str(manifest_path)
     return files

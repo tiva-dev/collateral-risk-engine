@@ -168,7 +168,7 @@ class LifecycleEndpointTests(unittest.TestCase):
                     "holdings": holdings_payload(),
                     "market_data": market_payload(),
                     "actions": [
-                        {"action_type": "credit_draw", "amount": 5_000.0},
+                        {"action_type": "credit_draw", "amount": 6_500.0},
                     ],
                 }
             )

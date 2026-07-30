@@ -224,7 +224,7 @@ def _write_checkpoint(
 
 
 def main():
-    p = argparse.ArgumentParser(description="Run v0.5B official validation replay")
+    p = argparse.ArgumentParser(description="Run v0.7.0 official validation replay")
     p.add_argument("--dataset-manifest")
     p.add_argument("--start-date", type=parse_date)
     p.add_argument("--end-date", type=parse_date)
@@ -235,7 +235,10 @@ def main():
         "--flat-ltv",
         type=float,
         default=None,
-        help="Optional common-exposure override; defaults to 30% for NGN and 50% otherwise.",
+        help=(
+            "Optional flat-LTV sensitivity override. By default the benchmark "
+            "uses 30%% for NGX/NGN collateral and 50%% for other collateral."
+        ),
     )
     p.add_argument("--static-haircut-profile", default="standard")
     p.add_argument("--dry-run", action="store_true")

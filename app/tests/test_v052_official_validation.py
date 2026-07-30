@@ -153,7 +153,7 @@ class V052ProviderFoundationTests(unittest.TestCase):
         self.assertEqual(len(series.bars), 1)
         bar = series.bars[0]
         self.assertEqual((bar.open, bar.high, bar.low, bar.close), (42.5,) * 4)
-        self.assertEqual(bar.volume, 0)
+        self.assertIsNone(bar.volume)
         self.assertEqual(len(series.warnings), 1)
         self.assertIn("filled 3 missing OHLC", series.warnings[0])
 
@@ -167,7 +167,7 @@ class V052ProviderFoundationTests(unittest.TestCase):
         )
         self.assertEqual(provider.auth_headers()["Accept"], "application/json")
         self.assertEqual(
-            provider.auth_headers()["User-Agent"], "collateral-risk-engine/0.6.2"
+            provider.auth_headers()["User-Agent"], "collateral-risk-engine/0.7.0"
         )
 
     def test_ngnmarket_http_error_exposes_safe_status_and_code(self):

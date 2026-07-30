@@ -31,7 +31,9 @@ class HistoricalBar:
     low: float
     close: float
     adjusted_close: float | None = None
-    volume: float = 0.0
+    # None means the provider did not report volume. It must never be treated
+    # as an observed zero-volume session.
+    volume: float | None = None
     value_traded: float | None = None
     currency: str = "USD"
     source: str = "historical_provider"

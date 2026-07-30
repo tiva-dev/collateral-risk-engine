@@ -175,7 +175,7 @@ class MonitoringServiceTests(unittest.TestCase):
 
     def test_register_margin_call_emits_margin_event(self):
         svc = service()
-        _, events = register(svc, "margin_acct", loan=5_000.0)
+        _, events = register(svc, "margin_acct", loan=8_000.0)
         self.assertIn(
             MonitoringEventType.MARGIN_CALL_TRIGGERED,
             [event.event_type for event in events],
@@ -199,7 +199,7 @@ class MonitoringServiceTests(unittest.TestCase):
             MonitoringEventType.AVAILABLE_CREDIT_CHANGED,
             [event.event_type for event in events],
         )
-        svc.market_data_cache.merge({"SPY": quote(price=25.0)}, {}, "test")
+        svc.market_data_cache.merge({"SPY": quote(price=12.0)}, {}, "test")
         _, events = svc.evaluate_account("state_acct")
         types = [event.event_type for event in events]
         self.assertIn(MonitoringEventType.RISK_STATE_CHANGED, types)

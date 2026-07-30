@@ -43,10 +43,18 @@ def estimate_stressed_recovery(
         raw.confidence,
     )
 
-    order_book_estimate = estimate_market_sell_from_order_book(
-        quantity=quantity,
-        last_price=last_price,
-        order_book=market.order_book,
+    depth_is_complete = market.metadata.get("depth") not in {
+        "top_of_book",
+        "not_available",
+    }
+    order_book_estimate = (
+        estimate_market_sell_from_order_book(
+            quantity=quantity,
+            last_price=last_price,
+            order_book=market.order_book,
+        )
+        if depth_is_complete
+        else None
     )
 
     if order_book_estimate is not None:

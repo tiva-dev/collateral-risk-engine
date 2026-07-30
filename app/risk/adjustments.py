@@ -21,6 +21,9 @@ class RawRiskInputs:
     liquidation_horizon_days: float
     concentration: float
     confidence: float
+    safe_participation_rate: float
+    liquidity_observed: bool
+    data_driven_high_risk: bool
 
 
 RISK_APPETITE_CONFIDENCE = {
@@ -46,19 +49,6 @@ BASE_HORIZON_DAYS = {
     AssetType.OPTION: 0.5,
     AssetType.PRIVATE_ASSET: 90.0,
     AssetType.OTHER: 10.0,
-}
-
-CONCENTRATION_TOLERANCE = {
-    AssetType.CASH: 0.90,
-    AssetType.BOND: 0.65,
-    AssetType.BOND_FUND: 0.60,
-    AssetType.ETF: 0.50,
-    AssetType.LISTED_EQUITY: 0.35,
-    AssetType.HIGH_VOLATILITY_EQUITY: 0.20,
-    AssetType.CRYPTO: 0.15,
-    AssetType.OPTION: 0.10,
-    AssetType.PRIVATE_ASSET: 0.10,
-    AssetType.OTHER: 0.10,
 }
 
 STRESS_FLOOR_BY_ASSET = {
@@ -89,13 +79,28 @@ DEFAULT_VOL_BY_ASSET = {
 
 
 def annualized_volatility(asset_type: AssetType, market: MarketData) -> float:
-    candidates = [
+    observed = [
         market.volatility_30d,
         market.volatility_90d,
+        market.volatility_252d,
         market.intraday_volatility,
-        DEFAULT_VOL_BY_ASSET.get(asset_type, 0.60),
     ]
-    return max(float(v) for v in candidates if v is not None)
+    values = [float(value) for value in observed if value is not None]
+    if values:
+        return max(values)
+    return DEFAULT_VOL_BY_ASSET.get(asset_type, 0.60)
+
+
+def data_driven_high_risk(market: MarketData) -> bool:
+    return any(
+        (
+            (market.volatility_30d or 0.0) >= 0.60,
+            (market.volatility_90d or 0.0) >= 0.55,
+            (market.volatility_252d or 0.0) >= 0.50,
+            (market.max_drawdown_252d or 0.0) >= 0.35,
+            (market.max_gap_252d or 0.0) >= 0.12,
+        )
+    )
 
 
 def spread_rate(market: MarketData) -> float:
@@ -103,6 +108,37 @@ def spread_rate(market: MarketData) -> float:
         return 0.02
     mid = (market.bid + market.ask) / 2.0
     return clamp((market.ask - market.bid) / max(mid, 1e-9), 0.0, 1.0)
+
+
+def derive_safe_participation_rate(
+    holding: Holding,
+    market: MarketData,
+    market_value: float,
+) -> float:
+    """Estimate how much normal daily value the CRI can safely consume.
+
+    This is an engine output, not a client-configured assumption. It decreases
+    as volatility, spreads, and position size relative to observed turnover rise.
+    """
+    if holding.asset_type == AssetType.CASH:
+        return 1.0
+    adv = market.average_dollar_volume
+    if adv is None and market.average_daily_volume is not None:
+        adv = market.average_daily_volume * market.last_price
+    if adv is None or adv <= 0:
+        return 0.02
+    volatility = annualized_volatility(holding.asset_type, market)
+    spread = spread_rate(market)
+    position_ratio = market_value / max(adv, 1.0)
+    rate = (
+        0.20
+        - min(0.10, volatility * 0.08)
+        - min(0.06, spread * 2.0)
+        - min(0.06, 0.025 * math.sqrt(max(position_ratio, 0.0)))
+    )
+    if market.data_quality_score < 0.80:
+        rate *= max(0.40, market.data_quality_score)
+    return clamp(rate, 0.02, 0.20)
 
 
 def liquidation_horizon_days(
@@ -118,10 +154,12 @@ def liquidation_horizon_days(
     if adv is None and market.average_daily_volume is not None:
         adv = market.average_daily_volume * market.last_price
     if adv is None or adv <= 0:
-        return max(base, 10.0)
-    daily_exit_capacity = max(
-        1.0, adv * clamp(policy.max_participation_rate, 0.01, 0.25)
-    )
+        # The time is unknown. Use the market's minimum executable horizon for
+        # volatility scaling and let the separate unknown-liquidity penalty
+        # carry the uncertainty. Do not invent a ten-day observation.
+        return base
+    participation_rate = derive_safe_participation_rate(holding, market, market_value)
+    daily_exit_capacity = max(1.0, adv * participation_rate)
     required_days = market_value / daily_exit_capacity
     return clamp(max(base, required_days), base, 90.0)
 
@@ -149,6 +187,11 @@ def build_raw_inputs(
         liquidation_horizon_days=horizon,
         concentration=concentration,
         confidence=confidence,
+        safe_participation_rate=derive_safe_participation_rate(
+            holding, market, market_value
+        ),
+        liquidity_observed=adv is not None and adv > 0,
+        data_driven_high_risk=data_driven_high_risk(market),
     )
 
 
@@ -162,8 +205,7 @@ def volatility_adjustment(
     )
     recent_move = abs(market.recent_return_1d or 0.0)
     jump_penalty = 0.0
-    if asset_type in {
-        AssetType.HIGH_VOLATILITY_EQUITY,
+    if raw.data_driven_high_risk or asset_type in {
         AssetType.CRYPTO,
         AssetType.OPTION,
     }:
@@ -180,7 +222,9 @@ def liquidity_adjustment(
     if adv is None and market.average_daily_volume is not None:
         adv = market.average_daily_volume * market.last_price
     if adv is None or adv <= 0:
-        return 0.25
+        # Unknown is not zero. Retain a meaningful but uncertainty-capped
+        # collateral contribution until observed turnover is available.
+        return 0.60
     horizon_penalty = 0.035 * math.sqrt(max(0.0, raw.liquidation_horizon_days))
     impact_penalty = sqrt_impact(market_value, adv)
     haircut = clamp(horizon_penalty + impact_penalty, 0.0, 0.85)
@@ -195,22 +239,25 @@ def bid_ask_spread_adjustment(raw: RawRiskInputs) -> float:
 
 
 def concentration_adjustment(raw: RawRiskInputs, asset_type: AssetType) -> float:
-    tolerance = CONCENTRATION_TOLERANCE.get(asset_type, 0.20)
-    excess = max(0.0, raw.concentration - tolerance)
-    slope = (
-        0.70
-        if asset_type
-        not in {AssetType.HIGH_VOLATILITY_EQUITY, AssetType.CRYPTO, AssetType.OPTION}
-        else 1.20
-    )
-    haircut = clamp(excess * slope, 0.0, 0.90)
-    return clamp(1.0 - haircut, 0.05, 1.0)
+    # Concentration is charged once at portfolio level through HHI-driven
+    # coverage. Keeping this factor neutral prevents repeated punishment.
+    return 1.0
 
 
 def stress_adjustment(
     raw: RawRiskInputs, asset_type: AssetType, policy: Policy
 ) -> float:
-    stress_floor = STRESS_FLOOR_BY_ASSET.get(asset_type, 0.30)
+    risk_type = asset_type
+    if asset_type in {
+        AssetType.LISTED_EQUITY,
+        AssetType.HIGH_VOLATILITY_EQUITY,
+    }:
+        risk_type = (
+            AssetType.HIGH_VOLATILITY_EQUITY
+            if raw.data_driven_high_risk
+            else AssetType.LISTED_EQUITY
+        )
+    stress_floor = STRESS_FLOOR_BY_ASSET.get(risk_type, 0.30)
     stress_es = normal_expected_shortfall_loss(
         raw.annualized_volatility,
         max(raw.liquidation_horizon_days * 2.0, 1.0),

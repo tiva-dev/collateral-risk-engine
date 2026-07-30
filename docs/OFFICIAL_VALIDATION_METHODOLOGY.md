@@ -1,15 +1,46 @@
-# OFFICIAL VALIDATION METHODOLOGY
+# Official validation methodology
 
-This document is part of the v0.5B official validation evidence package.
+## Data windows
 
-## Scope
+US equities and FX use the requested provider window. NGX equities use the
+latest 370 calendar days because this is the currently validated reliable
+NGNMarket history. Every result records requested dates, the actual common
+portfolio window, per-instrument provenance, carry-forward age, missing data,
+and FX state.
 
-The validation framework replays cache-first historical datasets and applies deterministic synthetic stress overlays to compare flat LTV, static haircut, and dynamic collateral risk engine lending outcomes. It does not call live providers during normal CI, does not execute broker orders, and does not require production databases or real API keys.
+Missing volume remains unavailable. It is never converted to zero turnover.
+Adjusted prices are used when available, rolling histories exclude repeated
+non-trading-day returns, and synthetic order books are excluded from official
+execution evidence.
 
-## Reproducibility
+## Comparisons
 
-Runs record deterministic seeds, manifest checksums, simulation configuration version, model versions, interest settings, provider coverage metadata, warnings, and stress assumptions.
+Two regimes are reported separately:
 
-## Outputs
+1. Common-exposure surveillance: every policy monitors the same fixed debt.
+2. Policy-origination outcome: each policy originates its own debt from its own
+   day-zero principal capacity and follows that obligation path through
+   contractual maturity. Relative-term scenarios use the most recent complete
+   cohort available in the replay window.
 
-The reporting layer produces official validation manifest JSON, metrics JSON, metrics CSV, validation report Markdown, provider coverage report, data methodology, interest accrual methodology, and simulation assumptions.
+The conventional flat benchmark is 30% for NGX/NGN collateral and 50% for other
+collateral unless the evidence manifest records an explicit override.
+
+## Economic outcomes
+
+`credit limit breach = max(0, total obligation - policy credit limit)`
+
+`economic recovery shortfall = max(0, total obligation + liquidation costs - stressed liquidation proceeds)`
+
+Replay persists principal, interest, fees, safe principal capacity, effective
+principal LTV, future-interest reserve, stressed proceeds, CRI-derived
+participation rates, monitoring transitions, and liquidation advisories.
+
+## Reproducibility and acceptance
+
+Runs record the commit, deterministic seed, model/config versions, loan terms,
+stress assumptions, provider coverage, checksummed normalized caches, complete
+replay records, metrics, and artifact checksums. QA independently recomputes
+metrics from saved records and exits nonzero on coverage, checksum, labelling,
+or blocking-metric failure. Calibration output is diagnostic only and never
+changes model coefficients automatically.

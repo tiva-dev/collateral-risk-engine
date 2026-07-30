@@ -63,7 +63,7 @@ def _failure(name, exc):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="v0.6 real provider validation smoke test")
+    p = argparse.ArgumentParser(description="v0.7.0 real provider validation smoke test")
     p.add_argument("--confirm-real-provider-calls", action="store_true")
     p.add_argument(
         "--start-date",

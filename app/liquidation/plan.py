@@ -61,7 +61,9 @@ def build_liquidation_plan(
         for a in asset_results
         if a.eligible and a.quantity > 0 and a.stressed_liquidation_value > 0
     ]
-    for asset in sorted(candidates, key=priority, reverse=True):
+    for sequence, asset in enumerate(
+        sorted(candidates, key=priority, reverse=True), start=1
+    ):
         if remaining <= 0:
             break
         per_unit = asset.stressed_liquidation_value / max(asset.quantity, 1e-9)
@@ -78,6 +80,10 @@ def build_liquidation_plan(
                 order_type="marketable_limit",
                 estimated_cash_recovery=round(estimated_cash, 2),
                 reason="restore_dynamic_recovery_coverage",
+                minimum_execution_price=round(per_unit, 6),
+                estimated_slippage_rate=asset.estimated_slippage_rate,
+                sequence=sequence,
+                stable_key=asset.stable_key,
             )
         )
 
@@ -96,6 +102,7 @@ def build_liquidation_plan(
             estimated_total_recovery=0.0,
             unrecovered_target_amount=round(target_cash_recovery, 2),
             plan_complete=False,
+            remaining_debt_after_plan=round(target_cash_recovery, 2),
         )
 
     reason = (
@@ -115,4 +122,5 @@ def build_liquidation_plan(
         estimated_total_recovery=round(estimated_total_recovery, 2),
         unrecovered_target_amount=round(unrecovered, 2),
         plan_complete=plan_complete,
+        remaining_debt_after_plan=round(unrecovered, 2),
     )

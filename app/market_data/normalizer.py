@@ -23,7 +23,10 @@ class NormalizedMarketData:
     average_dollar_volume: float | None = None
     volatility_30d: float | None = None
     volatility_90d: float | None = None
+    volatility_252d: float | None = None
     intraday_volatility: float | None = None
+    max_drawdown_252d: float | None = None
+    max_gap_252d: float | None = None
     recent_return_1d: float | None = None
     order_book: OrderBook | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -64,7 +67,10 @@ class NormalizedMarketData:
             average_dollar_volume=self.average_dollar_volume,
             volatility_30d=self.volatility_30d,
             volatility_90d=self.volatility_90d,
+            volatility_252d=self.volatility_252d,
             intraday_volatility=self.intraday_volatility,
+            max_drawdown_252d=self.max_drawdown_252d,
+            max_gap_252d=self.max_gap_252d,
             recent_return_1d=self.recent_return_1d,
             timestamp=self.timestamp,
             data_quality_score=clamp_score(self.data_quality_score),
@@ -162,7 +168,10 @@ def normalize_quote(
         average_dollar_volume=average_dollar_volume,
         volatility_30d=quote.volatility_30d,
         volatility_90d=quote.volatility_90d,
+        volatility_252d=quote.volatility_252d,
         intraday_volatility=quote.intraday_volatility,
+        max_drawdown_252d=quote.max_drawdown_252d,
+        max_gap_252d=quote.max_gap_252d,
         recent_return_1d=quote.recent_return_1d,
         order_book=quote.order_book,
         timestamp=quote.timestamp,

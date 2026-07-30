@@ -1,4 +1,4 @@
-# Calibration Review Guide (v0.6)
+# Calibration Review Guide (v0.7.0)
 
 The calibration pack writes `calibration_diagnostics.json` and `calibration_diagnostics.md`.
 

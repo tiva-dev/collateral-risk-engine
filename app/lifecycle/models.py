@@ -27,6 +27,8 @@ class LifecycleDecision:
     evaluation: PortfolioEvaluation
     audit_id: str
     created_at: datetime
+    safe_obligation_capacity: float | None = None
+    future_interest_reserve: float | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,8 @@ class OriginationResult:
     evaluation: PortfolioEvaluation
     audit_id: str
     created_at: datetime
+    safe_obligation_capacity: float | None = None
+    future_interest_reserve: float | None = None
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -9,9 +10,11 @@ from fastapi.responses import StreamingResponse
 
 from app.api.schemas import (
     DrawCheckRequest,
+    DrawNotificationRequest,
     EvaluateRequest,
     EvaluateResponse,
     LifecycleResponse,
+    LiquidationExecutionRequest,
     MarketDataNormalizeRequest,
     MarketDataNormalizeResponse,
     MarketDataUpdateRequest,
@@ -30,18 +33,23 @@ from app.api.schemas import (
     PortfolioActionCheckResponse,
     PreTradeRiskCheckRequest,
     PreTradeRiskCheckResponse,
+    RepaymentNotificationRequest,
 )
 from app.audit.logger import AuditLogger
 from app.core.evaluator import CollateralRiskEngine, RiskEvaluationError
 from app.lifecycle.service import CreditLifecycleEngine
 from app.market_data.aggregator import MarketDataAggregator
+from app.market_data.live_providers import (
+    configured_live_equity_provider,
+    configured_live_fx_provider,
+)
 from app.market_data.providers import MissingProvider
 from app.monitoring.events import serialize_event, serialize_sse_event
 from app.monitoring.market_updates import InMemoryMarketDataCache
 from app.monitoring.models import MonitoringEventType, MonitoringSeverity
 from app.monitoring.repositories import (
-    InMemoryMonitoredAccountRepository,
-    InMemoryMonitoringEventRepository,
+    SQLiteMonitoredAccountRepository,
+    SQLiteMonitoringEventRepository,
 )
 from app.monitoring.service import MonitoringService
 from app.version import MARKET_DATA_MODEL_VERSION
@@ -50,11 +58,17 @@ router = APIRouter()
 audit_logger = AuditLogger(Path("./data/audit/audit_log.jsonl"))
 engine = CollateralRiskEngine(audit_logger=audit_logger)
 lifecycle_engine = CreditLifecycleEngine(risk_engine=engine, audit_logger=audit_logger)
-monitoring_account_repo = InMemoryMonitoredAccountRepository()
-monitoring_event_repo = InMemoryMonitoringEventRepository()
+monitoring_database_path = os.getenv(
+    "CRI_STATE_DB_PATH", "./data/runtime/monitoring.sqlite3"
+)
+monitoring_account_repo = SQLiteMonitoredAccountRepository(monitoring_database_path)
+monitoring_event_repo = SQLiteMonitoringEventRepository(monitoring_database_path)
 monitoring_market_data_cache = InMemoryMarketDataCache()
+runtime_equity_provider = configured_live_equity_provider() or MissingProvider()
+runtime_fx_provider = configured_live_fx_provider() or MissingProvider()
 runtime_aggregator = MarketDataAggregator(
-    equity_provider=MissingProvider(), fx_provider=MissingProvider()
+    equity_provider=runtime_equity_provider,
+    fx_provider=runtime_fx_provider,
 )
 monitoring_service = MonitoringService(
     account_repo=monitoring_account_repo,
@@ -214,6 +228,7 @@ def originate_credit(request: OriginateRequest) -> LifecycleResponse:
             holdings=[holding.to_domain() for holding in request.holdings],
             policy=request.policy.to_domain(),
             market_data={k: v.to_domain() for k, v in request.market_data.items()},
+            loan_terms=request.loan_terms.to_domain(),
         )
     except RiskEvaluationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -232,6 +247,7 @@ def check_credit_draw(request: DrawCheckRequest) -> LifecycleResponse:
             holdings=[holding.to_domain() for holding in request.holdings],
             policy=request.policy.to_domain(),
             market_data={k: v.to_domain() for k, v in request.market_data.items()},
+            loan_terms=request.loan_terms.to_domain(),
         )
     except RiskEvaluationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -248,6 +264,8 @@ def monitor_loan(request: MonitorRequest) -> LifecycleResponse:
             holdings=[holding.to_domain() for holding in request.holdings],
             policy=request.policy.to_domain(),
             market_data={k: v.to_domain() for k, v in request.market_data.items()},
+            loan_terms=request.loan_terms.to_domain() if request.loan_terms else None,
+            last_accrual_at=request.last_accrual_at,
         )
     except RiskEvaluationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -266,6 +284,7 @@ def _monitoring_account_out(account):
             "policy": account.policy,
             "interest_policy": account.interest_policy,
             "liquidation_execution_policy": account.liquidation_execution_policy,
+            "last_interest_accrual_at": account.last_interest_accrual_at,
             "data_mode": account.data_mode,
             "monitoring_status": account.monitoring_status,
             "last_evaluation": account.last_evaluation,
@@ -433,6 +452,84 @@ def tick_monitored_account(
 @router.post("/monitoring/tick", response_model=MonitoringTickResponse)
 def tick_all_monitored_accounts() -> MonitoringTickResponse:
     return MonitoringTickResponse(results=monitoring_service.tick_all())
+
+
+@router.post(
+    "/monitoring/accounts/{account_ref}/liquidation/fills",
+    response_model=MonitoringTickResponse,
+)
+def record_liquidation_fills(
+    account_ref: str,
+    request: LiquidationExecutionRequest,
+) -> MonitoringTickResponse:
+    try:
+        account, events = monitoring_service.apply_liquidation_fills(
+            account_ref=account_ref,
+            fills=[fill.model_dump() for fill in request.fills],
+            execution_reference=request.execution_reference,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="monitored account not found"
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return MonitoringTickResponse(
+        account=_monitoring_account_out(account),
+        events=_events_out(events),
+    )
+
+
+@router.post(
+    "/monitoring/accounts/{account_ref}/repayments",
+    response_model=MonitoringTickResponse,
+)
+def record_repayment(
+    account_ref: str,
+    request: RepaymentNotificationRequest,
+) -> MonitoringTickResponse:
+    try:
+        account, events = monitoring_service.apply_repayment_notification(
+            account_ref=account_ref,
+            amount=request.amount,
+            repayment_reference=request.repayment_reference,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="monitored account not found"
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return MonitoringTickResponse(
+        account=_monitoring_account_out(account),
+        events=_events_out(events),
+    )
+
+
+@router.post(
+    "/monitoring/accounts/{account_ref}/draws",
+    response_model=MonitoringTickResponse,
+)
+def record_draw(
+    account_ref: str,
+    request: DrawNotificationRequest,
+) -> MonitoringTickResponse:
+    try:
+        account, events = monitoring_service.apply_draw_notification(
+            account_ref=account_ref,
+            amount=request.amount,
+            draw_reference=request.draw_reference,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="monitored account not found"
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return MonitoringTickResponse(
+        account=_monitoring_account_out(account),
+        events=_events_out(events),
+    )
 
 
 @router.post("/monitoring/market-data/update", response_model=MarketDataUpdateResponse)

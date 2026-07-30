@@ -64,6 +64,32 @@ class LoanIn(BaseModel):
         )
 
 
+class InterestPolicyIn(BaseModel):
+    annual_interest_rate: float = Field(default=0.0, ge=0)
+    quoted_interest_rate: float | None = Field(default=None, ge=0)
+    rate_period: Literal["daily", "monthly", "quarterly", "yearly"] = "yearly"
+    accrual_frequency: Literal["daily", "monthly", "quarterly", "yearly"] = "daily"
+    payment_frequency: Literal[
+        "daily", "monthly", "quarterly", "yearly", "at_maturity"
+    ] = "at_maturity"
+    compounding: Literal["simple", "compound"] = "simple"
+    day_count_convention: Literal[
+        "actual_365", "actual_360", "thirty_360"
+    ] = "actual_365"
+    interest_accrual_mode: Literal["engine_calculated", "client_supplied"] = (
+        "engine_calculated"
+    )
+    term_days: int | None = Field(default=None, gt=0)
+    maturity_at: datetime | None = None
+    grace_period_days: int = Field(default=0, ge=0)
+    fixed_fees: float = Field(default=0.0, ge=0)
+    last_accrual_at: datetime | None = None
+    next_accrual_at: datetime | None = None
+
+    def to_domain(self):
+        return InterestPolicy(**self.model_dump())
+
+
 class PortfolioActionIn(BaseModel):
     action_type: PortfolioActionType
     asset_id: str | None = None
@@ -177,7 +203,10 @@ class MarketDataIn(BaseModel):
     average_dollar_volume: float | None = None
     volatility_30d: float | None = None
     volatility_90d: float | None = None
+    volatility_252d: float | None = None
     intraday_volatility: float | None = None
+    max_drawdown_252d: float | None = Field(default=None, ge=0, le=1)
+    max_gap_252d: float | None = Field(default=None, ge=0, le=1)
     recent_return_1d: float | None = None
     timestamp: datetime
     data_quality_score: float = Field(default=1.0, ge=0, le=1)
@@ -201,7 +230,10 @@ class MarketDataIn(BaseModel):
             average_dollar_volume=self.average_dollar_volume,
             volatility_30d=self.volatility_30d,
             volatility_90d=self.volatility_90d,
+            volatility_252d=self.volatility_252d,
             intraday_volatility=self.intraday_volatility,
+            max_drawdown_252d=self.max_drawdown_252d,
+            max_gap_252d=self.max_gap_252d,
             recent_return_1d=self.recent_return_1d,
             timestamp=self.timestamp,
             data_quality_score=self.data_quality_score,
@@ -216,9 +248,12 @@ class PolicyIn(BaseModel):
     risk_appetite: RiskAppetite = RiskAppetite.BALANCED
     asset_ltv_caps: dict[AssetType, float] = Field(default_factory=dict)
     portfolio_ltv_cap: float = Field(default=1.0, ge=0, le=1)
-    max_participation_rate: float = Field(default=0.10, ge=0, le=1)
     min_data_quality_score: float = Field(default=0.35, ge=0, le=1)
     allow_lending_on_stale_or_halted_assets: bool = False
+    allowed_asset_types: set[AssetType] | None = None
+    allowed_exchanges: set[str] | None = None
+    excluded_asset_ids: set[str] = Field(default_factory=set)
+    security_ltv_caps: dict[str, float] = Field(default_factory=dict)
 
     def to_domain(self) -> Policy:
         default_policy = Policy.default()
@@ -229,30 +264,24 @@ class PolicyIn(BaseModel):
             risk_appetite=self.risk_appetite,
             asset_ltv_caps=caps,
             portfolio_ltv_cap=self.portfolio_ltv_cap,
-            max_participation_rate=self.max_participation_rate,
             min_data_quality_score=self.min_data_quality_score,
             allow_lending_on_stale_or_halted_assets=self.allow_lending_on_stale_or_halted_assets,
-        )
-
-
-class InterestPolicyIn(BaseModel):
-    annual_interest_rate: float = Field(ge=0)
-    accrual_frequency: Literal["daily", "monthly", "quarterly", "yearly"] = "daily"
-    compounding: Literal["simple", "compound"] = "simple"
-    day_count_convention: Literal[
-        "actual_365", "actual_360", "thirty_360"
-    ] = "actual_365"
-    interest_accrual_mode: Literal[
-        "engine_calculated", "client_supplied"
-    ] = "engine_calculated"
-
-    def to_domain(self) -> InterestPolicy:
-        return InterestPolicy(
-            annual_interest_rate=self.annual_interest_rate,
-            accrual_frequency=self.accrual_frequency,
-            compounding=self.compounding,
-            day_count_convention=self.day_count_convention,
-            interest_accrual_mode=self.interest_accrual_mode,
+            allowed_asset_types=(
+                None
+                if self.allowed_asset_types is None
+                else frozenset(self.allowed_asset_types)
+            ),
+            allowed_exchanges=(
+                None
+                if self.allowed_exchanges is None
+                else frozenset(value.upper() for value in self.allowed_exchanges)
+            ),
+            excluded_asset_ids=frozenset(
+                value.upper() for value in self.excluded_asset_ids
+            ),
+            security_ltv_caps={
+                key.upper(): value for key, value in self.security_ltv_caps.items()
+            },
         )
 
 
@@ -311,7 +340,10 @@ class ClientQuoteIn(BaseModel):
     average_dollar_volume: float | None = None
     volatility_30d: float | None = None
     volatility_90d: float | None = None
+    volatility_252d: float | None = None
     intraday_volatility: float | None = None
+    max_drawdown_252d: float | None = Field(default=None, ge=0, le=1)
+    max_gap_252d: float | None = Field(default=None, ge=0, le=1)
     recent_return_1d: float | None = None
     order_book: OrderBookIn | None = None
     timestamp: datetime
@@ -346,7 +378,10 @@ class ClientQuoteIn(BaseModel):
             average_dollar_volume=self.average_dollar_volume,
             volatility_30d=self.volatility_30d,
             volatility_90d=self.volatility_90d,
+            volatility_252d=self.volatility_252d,
             intraday_volatility=self.intraday_volatility,
+            max_drawdown_252d=self.max_drawdown_252d,
+            max_gap_252d=self.max_gap_252d,
             recent_return_1d=self.recent_return_1d,
             order_book=self.order_book.to_domain() if self.order_book else None,
             timestamp=self.timestamp,
@@ -491,6 +526,7 @@ class OriginateRequest(BaseModel):
     policy: PolicyIn
     holdings: list[HoldingIn]
     market_data: dict[str, MarketDataIn]
+    loan_terms: InterestPolicyIn = Field(default_factory=InterestPolicyIn)
 
 
 class DrawCheckRequest(BaseModel):
@@ -501,6 +537,7 @@ class DrawCheckRequest(BaseModel):
     policy: PolicyIn
     holdings: list[HoldingIn]
     market_data: dict[str, MarketDataIn]
+    loan_terms: InterestPolicyIn = Field(default_factory=InterestPolicyIn)
 
 
 class MonitorRequest(BaseModel):
@@ -509,6 +546,8 @@ class MonitorRequest(BaseModel):
     policy: PolicyIn
     holdings: list[HoldingIn]
     market_data: dict[str, MarketDataIn]
+    loan_terms: InterestPolicyIn | None = None
+    last_accrual_at: datetime | None = None
 
 
 class PreTradeCheckRequest(BaseModel):
@@ -600,6 +639,8 @@ class LifecycleResult(BaseModel):
     projected_available_credit: float | None = None
     projected_margin_state: MarginState | None = None
     approved_credit_limit: float
+    safe_obligation_capacity: float | None = None
+    future_interest_reserve: float | None = None
     margin_state: MarginState
     required_cure_amount: float
     minimum_stressed_liquidation_value: float
@@ -704,6 +745,7 @@ class MonitoredAccountOut(BaseModel):
     policy: PolicyIn
     interest_policy: InterestPolicyIn
     liquidation_execution_policy: LiquidationExecutionPolicyIn
+    last_interest_accrual_at: datetime | None = None
     data_mode: DataMode
     monitoring_status: MonitoringStatus
     last_evaluation: dict[str, Any] | None = None
@@ -749,6 +791,29 @@ class MonitoringLoanUpdateRequest(BaseModel):
         ):
             raise ValueError("at least one loan change must be greater than zero")
         return self
+
+
+class LiquidationFillIn(BaseModel):
+    asset_id: str
+    stable_key: str | None = None
+    quantity: float = Field(gt=0)
+    execution_price: float = Field(gt=0)
+    fees: float = Field(default=0.0, ge=0)
+
+
+class LiquidationExecutionRequest(BaseModel):
+    fills: list[LiquidationFillIn] = Field(min_length=1)
+    execution_reference: str
+
+
+class RepaymentNotificationRequest(BaseModel):
+    amount: float = Field(gt=0)
+    repayment_reference: str = Field(min_length=1)
+
+
+class DrawNotificationRequest(BaseModel):
+    amount: float = Field(gt=0)
+    draw_reference: str = Field(min_length=1)
 
 
 class MonitoringErrorResponse(BaseModel):

@@ -43,9 +43,12 @@ class CollateralRiskEngineTests(unittest.TestCase):
             "acct_2", holdings, Loan(principal=500), self.policy, market
         )
         nvda = result.asset_results[0]
-        self.assertLess(nvda.effective_ltv, nvda.base_ltv)
+        self.assertLessEqual(nvda.effective_ltv, nvda.base_ltv)
         self.assertIn("volatility", nvda.risk_drivers)
-        self.assertIn("concentration", nvda.risk_drivers)
+        self.assertNotIn("concentration", nvda.risk_drivers)
+        self.assertEqual(nvda.adjustments.concentration, 1.0)
+        self.assertIsNotNone(nvda.safe_participation_rate)
+        self.assertLess(nvda.safe_participation_rate or 1.0, 0.20)
 
     def test_order_book_thinning_reduces_stressed_recovery(self) -> None:
         rich_book = MarketData(
@@ -101,7 +104,7 @@ class CollateralRiskEngineTests(unittest.TestCase):
         holdings = [Holding("THIN", AssetType.HIGH_VOLATILITY_EQUITY, 500)]
         market = self.provider.get_snapshot(["THIN"])
         result = self.engine.evaluate(
-            "acct_5", holdings, Loan(principal=3_000), self.policy, market
+            "acct_5", holdings, Loan(principal=3_500), self.policy, market
         )
         self.assertIn(
             result.margin_state, {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}
