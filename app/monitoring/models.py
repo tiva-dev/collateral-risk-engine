@@ -30,6 +30,8 @@ class MonitoringEventType(str, Enum):
     AVAILABLE_CREDIT_CHANGED = "available_credit_changed"
     MARGIN_CALL_TRIGGERED = "margin_call_triggered"
     LIQUIDATION_TRIGGERED = "liquidation_triggered"
+    DRAW_APPLIED = "draw_applied"
+    REPAYMENT_APPLIED = "repayment_applied"
     MARKET_DATA_DEGRADED = "market_data_degraded"
     FX_MISSING = "fx_missing"
     LOAN_BALANCE_UPDATED = "loan_balance_updated"
@@ -59,10 +61,12 @@ class MonitoredAccount:
     loan: Loan
     loan_currency: str
     policy: Policy
-    interest_policy: InterestPolicy
-    liquidation_execution_policy: LiquidationExecutionPolicy
     data_mode: DataMode
     market_data_policy: MarketDataPolicy
+    interest_policy: InterestPolicy = field(default_factory=InterestPolicy)
+    liquidation_execution_policy: LiquidationExecutionPolicy = field(
+        default_factory=LiquidationExecutionPolicy
+    )
     client_supplied_quotes: dict[str, RawQuote] = field(default_factory=dict)
     client_supplied_fx_rates: dict[tuple[str, str], FXRate] = field(
         default_factory=dict
@@ -78,6 +82,9 @@ class MonitoredAccount:
     next_check_after: datetime | None = None
     last_interest_accrual_at: datetime | None = None
     processed_loan_event_references: list[str] = field(default_factory=list)
+    processed_execution_references: set[str] = field(default_factory=set)
+    processed_draw_references: set[str] = field(default_factory=set)
+    processed_repayment_references: set[str] = field(default_factory=set)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 

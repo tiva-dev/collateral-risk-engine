@@ -101,7 +101,7 @@ class PortfolioActionControlsTests(unittest.TestCase):
             PortfolioActionCheck(
                 PortfolioActionType.SELL,
                 asset_id="SPY",
-                quantity=70.0,
+                quantity=80.0,
                 withdraw_proceeds=True,
             ),
         )
@@ -182,13 +182,16 @@ class PortfolioActionControlsTests(unittest.TestCase):
 
         self.assertEqual(result.decision, RiskDecision.REDUCE_AVAILABLE_CREDIT)
         self.assertEqual(result.projected_margin_state, MarginState.SAFE)
-        self.assertLess(result.projected_available_credit, 4_000.0)
+        self.assertLess(
+            result.projected_available_credit,
+            result.current_available_credit,
+        )
 
     def test_withdraw_securities_while_owing_is_rejected_below_safety(self) -> None:
         result = self.check(
             self.account(),
             PortfolioActionCheck(
-                PortfolioActionType.WITHDRAW_SECURITY, asset_id="SPY", quantity=50.0
+                PortfolioActionType.WITHDRAW_SECURITY, asset_id="SPY", quantity=70.0
             ),
         )
 
@@ -209,7 +212,7 @@ class PortfolioActionControlsTests(unittest.TestCase):
         result = self.check(
             self.account(),
             PortfolioActionCheck(
-                PortfolioActionType.WITHDRAW_SECURITY, asset_id="SPY", quantity=50.0
+                PortfolioActionType.WITHDRAW_SECURITY, asset_id="SPY", quantity=70.0
             ),
         )
 
@@ -220,7 +223,7 @@ class PortfolioActionControlsTests(unittest.TestCase):
         result = self.check(
             self.account(),
             PortfolioActionCheck(
-                PortfolioActionType.WITHDRAW_SECURITY, asset_id="SPY", quantity=70.0
+                PortfolioActionType.WITHDRAW_SECURITY, asset_id="SPY", quantity=80.0
             ),
         )
 

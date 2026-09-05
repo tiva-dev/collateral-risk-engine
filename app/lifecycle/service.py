@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, replace
+from datetime import datetime
 
 from app.audit.logger import AuditLogger
 from app.core.enums import (
@@ -21,6 +22,11 @@ from app.core.models import (
     Policy,
     PortfolioActionCheck,
     PortfolioActionCheckResult,
+)
+from app.credit.interest import (
+    InterestPolicy,
+    accrue_scheduled_periods,
+    principal_capacity_from_obligation,
 )
 from app.lifecycle.models import (
     LifecycleDecision,
@@ -68,6 +74,7 @@ class CreditLifecycleEngine:
         holdings: list[Holding],
         policy: Policy,
         market_data: Mapping[str, MarketData],
+        loan_terms: InterestPolicy | None = None,
     ) -> OriginationResult:
         aggregated_holdings = aggregate_holdings(holdings)
         zero_loan = Loan(principal=0.0)
@@ -78,8 +85,18 @@ class CreditLifecycleEngine:
             policy=policy,
             market_data=market_data,
         )
-        safe_credit_limit = self._safe_credit_limit(evaluation)
+        loan_terms = loan_terms or InterestPolicy()
+        originated_at = now_utc()
+        safe_obligation_capacity = self._safe_credit_limit(evaluation)
+        safe_credit_limit = principal_capacity_from_obligation(
+            safe_obligation_capacity,
+            loan_terms,
+            originated_at,
+        )
         safe_available_credit = round_money(max(0.0, safe_credit_limit))
+        future_interest_reserve = round_money(
+            max(0.0, safe_obligation_capacity - safe_available_credit)
+        )
         if safe_available_credit <= 0:
             raise RiskEvaluationError(
                 "origination rejected: approved available credit is zero"
@@ -96,6 +113,9 @@ class CreditLifecycleEngine:
                 "projected_margin_state": MarginState.SAFE.value,
                 "approved_credit_limit": evaluation.approved_credit_limit,
                 "safe_credit_limit": safe_credit_limit,
+                "safe_obligation_capacity": safe_obligation_capacity,
+                "future_interest_reserve": future_interest_reserve,
+                "loan_terms": asdict(loan_terms),
                 "minimum_stressed_liquidation_value": evaluation.minimum_stressed_liquidation_value,
                 "risk_evaluation_audit_id": evaluation.audit_id,
             },
@@ -121,7 +141,9 @@ class CreditLifecycleEngine:
             liquidation_plan=None,
             evaluation=evaluation,
             audit_id=audit_id,
-            created_at=now_utc(),
+            created_at=originated_at,
+            safe_obligation_capacity=safe_obligation_capacity,
+            future_interest_reserve=future_interest_reserve,
         )
 
     def check_draw(
@@ -133,6 +155,7 @@ class CreditLifecycleEngine:
         policy: Policy,
         market_data: Mapping[str, MarketData],
         requested_repayment_amount: float = 0.0,
+        loan_terms: InterestPolicy | None = None,
     ) -> LifecycleDecision:
         aggregated_holdings = aggregate_holdings(holdings)
         requested_draw_amount = round_money(max(0.0, requested_draw_amount))
@@ -163,11 +186,36 @@ class CreditLifecycleEngine:
             market_data=market_data,
         )
 
-        safe_credit_limit = self._safe_credit_limit(current_evaluation)
-        projected_safe_credit_limit = self._safe_credit_limit(projected_evaluation)
+        safe_obligation_capacity = self._safe_credit_limit(current_evaluation)
+        projected_safe_obligation_capacity = self._safe_credit_limit(
+            projected_evaluation
+        )
+        loan_terms = loan_terms or InterestPolicy()
+        decision_time = now_utc()
+        safe_principal_capacity = principal_capacity_from_obligation(
+            safe_obligation_capacity,
+            loan_terms,
+            decision_time,
+        )
+        projected_safe_principal_capacity = principal_capacity_from_obligation(
+            projected_safe_obligation_capacity,
+            loan_terms,
+            decision_time,
+        )
+        safe_credit_limit = min(safe_obligation_capacity, safe_principal_capacity)
+        projected_safe_credit_limit = min(
+            projected_safe_obligation_capacity,
+            projected_safe_principal_capacity,
+        )
         outstanding_after_repayment = round_money(loan_after_repayment.balance)
         max_approved_draw = round_money(
-            max(0.0, safe_credit_limit - outstanding_after_repayment)
+            max(
+                0.0,
+                min(
+                    safe_obligation_capacity - outstanding_after_repayment,
+                    safe_principal_capacity - loan_after_repayment.principal,
+                ),
+            )
         )
         projected_outstanding_balance = projected_evaluation.loan_balance
         current_available_credit = round_money(
@@ -210,6 +258,11 @@ class CreditLifecycleEngine:
                 "projected_loan": asdict(projected_loan),
                 "approved_credit_limit": current_evaluation.approved_credit_limit,
                 "safe_credit_limit": safe_credit_limit,
+                "safe_obligation_capacity": safe_obligation_capacity,
+                "future_interest_reserve": round_money(
+                    max(0.0, safe_obligation_capacity - safe_credit_limit)
+                ),
+                "loan_terms": asdict(loan_terms),
                 "projected_safe_credit_limit": projected_safe_credit_limit,
                 "minimum_stressed_liquidation_value": projected_evaluation.minimum_stressed_liquidation_value,
                 "max_approved_draw_amount": max_approved_draw_amount,
@@ -235,7 +288,11 @@ class CreditLifecycleEngine:
             liquidation_plan=projected_evaluation.liquidation_plan,
             evaluation=projected_evaluation,
             audit_id=audit_id,
-            created_at=now_utc(),
+            created_at=decision_time,
+            safe_obligation_capacity=safe_obligation_capacity,
+            future_interest_reserve=round_money(
+                max(0.0, safe_obligation_capacity - safe_credit_limit)
+            ),
         )
 
     def check_portfolio_action(
@@ -393,7 +450,23 @@ class CreditLifecycleEngine:
         holdings: list[Holding],
         policy: Policy,
         market_data: Mapping[str, MarketData],
+        loan_terms: InterestPolicy | None = None,
+        last_accrual_at: datetime | None = None,
+        as_of: datetime | None = None,
     ) -> LifecycleDecision:
+        as_of = as_of or now_utc()
+        loan_terms = loan_terms or InterestPolicy()
+        if (
+            loan_terms.interest_accrual_mode == "engine_calculated"
+            and last_accrual_at is not None
+            and last_accrual_at < as_of
+        ):
+            loan, _ = accrue_scheduled_periods(
+                loan,
+                loan_terms,
+                last_accrual_at,
+                as_of,
+            )
         aggregated_holdings = aggregate_holdings(holdings)
         evaluation = self.risk_engine.evaluate(
             account_ref=account_ref,
@@ -404,6 +477,15 @@ class CreditLifecycleEngine:
         )
         decision = LifecycleDecisionValue(evaluation.margin_state.value)
         reason = self._monitor_reason(evaluation.margin_state)
+        safe_obligation_capacity = self._safe_credit_limit(evaluation)
+        principal_capacity = principal_capacity_from_obligation(
+            safe_obligation_capacity,
+            loan_terms,
+            as_of,
+        )
+        future_interest_reserve = round_money(
+            max(0.0, safe_obligation_capacity - principal_capacity)
+        )
         audit_id = self._write_lifecycle_audit(
             event_type="monitoring_run",
             account_ref=account_ref,
@@ -425,6 +507,9 @@ class CreditLifecycleEngine:
                     else None
                 ),
                 "risk_evaluation_audit_id": evaluation.audit_id,
+                "safe_obligation_capacity": safe_obligation_capacity,
+                "future_interest_reserve": future_interest_reserve,
+                "loan_terms": asdict(loan_terms),
             },
         )
         return LifecycleDecision(
@@ -445,7 +530,9 @@ class CreditLifecycleEngine:
             liquidation_plan=evaluation.liquidation_plan,
             evaluation=evaluation,
             audit_id=audit_id,
-            created_at=now_utc(),
+            created_at=as_of,
+            safe_obligation_capacity=safe_obligation_capacity,
+            future_interest_reserve=future_interest_reserve,
         )
 
     def pre_trade_check(
@@ -1020,7 +1107,7 @@ class CreditLifecycleEngine:
                 key.value: value for key, value in policy.asset_ltv_caps.items()
             },
             "portfolio_ltv_cap": policy.portfolio_ltv_cap,
-            "max_participation_rate": policy.max_participation_rate,
+            "participation_rate_method": "cri_derived_per_instrument",
             "min_data_quality_score": policy.min_data_quality_score,
             "allow_lending_on_stale_or_halted_assets": policy.allow_lending_on_stale_or_halted_assets,
         }

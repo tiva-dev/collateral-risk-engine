@@ -24,13 +24,14 @@ The API accepts:
 
 * base LTVs and maximum LTVs by asset type;
 * a maximum LTV for the whole portfolio;
-* risk appetite, data-quality threshold, and maximum market participation;
+* risk appetite and data-quality threshold;
 * annual interest rate, daily/monthly/quarterly/yearly accrual frequency,
   simple or compound interest, day-count convention, and either
   engine-calculated or client-supplied accruals;
 * loan currency;
 * margin-call grace, liquidation delay, settlement delay, execution horizon,
-  costs, maximum slippage, quote age, and forced-liquidation behavior.
+  costs, maximum slippage, quote age, and forced-liquidation behavior. CRI
+  derives safe market participation; the client does not supply it.
 
 CRI may approve less than the client's cap when concentration, volatility,
 liquidity, price stress, FX, or data quality makes the collateral less
@@ -41,12 +42,15 @@ recoverable. Client caps are ceilings, not targets.
 * Stable-identity aggregation before concentration, HHI, valuation, lending,
   stressed recovery, portfolio risk, and margin calculations.
 * Credit-limit and lifecycle endpoints with canonical available-credit logic.
+* The safe principal capacity reserves room for contractual interest and
+  recovery latency before returning the amount available to draw.
 * Idempotent draw, repayment, interest, and fee updates for monitored accounts.
 * Interest accrual as part of the monitored obligation.
 * State-change monitoring for normal, warning, margin-call, and liquidation
   conditions.
 * Liquidation advisories naming the security, quantity, reference bid, minimum
-  limit price, estimated costs, and estimated net recovery.
+  limit price, estimated costs, and estimated net recovery required to cover
+  the full outstanding obligation.
 * Historical execution constrained by observed bid proxies, quote freshness,
   trading halts, rolling volume, participation limits, slippage limits, costs,
   execution delay, and settlement delay.
@@ -66,6 +70,13 @@ The non-network suite is:
 python -m pytest -q
 ```
 
+## Manual client testing
+
+Run the API locally and open `http://127.0.0.1:8000/docs` to call every
+endpoint from the browser. The complete setup, recommended lender journey,
+authentication instructions, and runnable HTTP walkthrough are in
+[docs/CLIENT_API_SANDBOX.md](docs/CLIENT_API_SANDBOX.md).
+
 ## Operational API surface
 
 | Endpoint | Purpose |
@@ -76,6 +87,9 @@ python -m pytest -q
 | `POST /portfolio/action/check` | Approve or reject buys, sells, deposits, withdrawals, draws, and repayments at executable-side prices |
 | `POST /monitoring/accounts` | Register holdings, loan, policy, interest policy, and execution policy |
 | `POST /monitoring/accounts/{account_ref}/loan` | Apply an idempotent draw, repayment, interest, or fee event |
+| `POST /monitoring/accounts/{account_ref}/draws` | Notify CRI of an idempotent loan draw |
+| `POST /monitoring/accounts/{account_ref}/repayments` | Notify CRI of an idempotent repayment |
+| `POST /monitoring/accounts/{account_ref}/liquidation/fills` | Record actual fills and reduce collateral and debt |
 | `POST /monitoring/accounts/{account_ref}/tick` | Revalue one monitored account and emit state-change/advisory events |
 | `POST /monitoring/market-data/update` | Ingest timestamped quote/FX updates and optionally trigger monitoring |
 | `GET /monitoring/events` | Retrieve monitoring, margin, and liquidation-advisory events |

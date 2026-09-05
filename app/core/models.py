@@ -158,7 +158,10 @@ class MarketData:
     average_dollar_volume: float | None = None
     volatility_30d: float | None = None  # annualized decimal, e.g. 0.32
     volatility_90d: float | None = None  # annualized decimal
+    volatility_252d: float | None = None  # annualized decimal
     intraday_volatility: float | None = None  # annualized decimal when available
+    max_drawdown_252d: float | None = None
+    max_gap_252d: float | None = None
     recent_return_1d: float | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     data_quality_score: float = 1.0  # 0 to 1
@@ -189,9 +192,16 @@ class Policy:
     risk_appetite: RiskAppetite = RiskAppetite.BALANCED
     asset_ltv_caps: dict[AssetType, float] = field(default_factory=dict)
     portfolio_ltv_cap: float = 1.0
-    max_participation_rate: float = 0.10
+    # Retained for request compatibility. Liquidation participation is derived
+    # by the CRI from observed liquidity and risk; this is only an absolute
+    # safety ceiling and is not a client-selected trading assumption.
+    max_participation_rate: float = 0.25
     min_data_quality_score: float = 0.35
     allow_lending_on_stale_or_halted_assets: bool = False
+    allowed_asset_types: frozenset[AssetType] | None = None
+    allowed_exchanges: frozenset[str] | None = None
+    excluded_asset_ids: frozenset[str] = field(default_factory=frozenset)
+    security_ltv_caps: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for asset_type, haircut in {**self.base_ltv, **self.asset_ltv_caps}.items():
@@ -205,6 +215,9 @@ class Policy:
             raise ValueError("portfolio_ltv_cap must be between 0 and 1")
         if not 0 <= self.min_data_quality_score <= 1:
             raise ValueError("min_data_quality_score must be between 0 and 1")
+        for asset_id, cap in self.security_ltv_caps.items():
+            if not asset_id or not 0 <= cap <= 1:
+                raise ValueError("security_ltv_caps must contain valid ids and caps")
 
     @staticmethod
     def default() -> Policy:
@@ -215,7 +228,7 @@ class Policy:
                 AssetType.BOND_FUND: 0.78,
                 AssetType.ETF: 0.70,
                 AssetType.LISTED_EQUITY: 0.65,
-                AssetType.HIGH_VOLATILITY_EQUITY: 0.35,
+                AssetType.HIGH_VOLATILITY_EQUITY: 0.65,
                 AssetType.CRYPTO: 0.20,
                 AssetType.OPTION: 0.05,
                 AssetType.PRIVATE_ASSET: 0.0,
@@ -228,7 +241,7 @@ class Policy:
                 AssetType.BOND_FUND: 0.88,
                 AssetType.ETF: 0.80,
                 AssetType.LISTED_EQUITY: 0.75,
-                AssetType.HIGH_VOLATILITY_EQUITY: 0.50,
+                AssetType.HIGH_VOLATILITY_EQUITY: 0.75,
                 AssetType.CRYPTO: 0.35,
                 AssetType.OPTION: 0.10,
                 AssetType.PRIVATE_ASSET: 0.20,
@@ -288,6 +301,9 @@ class AssetRiskResult:
     eligible: bool
     adjustments: RiskAdjustmentBreakdown
     notes: list[str] = field(default_factory=list)
+    safe_participation_rate: float | None = None
+    liquidity_observed: bool = False
+    stable_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -309,6 +325,11 @@ class LiquidationOrder:
     order_type: str
     estimated_cash_recovery: float
     reason: str
+    minimum_execution_price: float | None = None
+    estimated_slippage_rate: float = 0.0
+    sequence: int = 0
+    status: str = "advisory"
+    stable_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -320,6 +341,9 @@ class LiquidationPlan:
     estimated_total_recovery: float = 0.0
     unrecovered_target_amount: float = 0.0
     plan_complete: bool = True
+    remaining_debt_after_plan: float = 0.0
+    execution_status: str = "awaiting_client_execution"
+    generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass(frozen=True)

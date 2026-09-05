@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from dataclasses import asdict
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from app.historical_data.alpaca import AlpacaTradingHistoricalProvider
 from app.historical_data.alpha_vantage import AlphaVantageHistoricalProvider
@@ -33,6 +33,7 @@ DEFAULT_CALL_BUDGETS = {
     "alpaca": {"monthly": None, "max_per_run": 500},
 }
 INDEPENDENT_FX_PAIRS = ("USD/NGN", "EUR/USD")
+NGX_RELIABLE_LOOKBACK_DAYS = 370
 
 
 def _inverse_fx_series(
@@ -279,6 +280,16 @@ class OfficialDatasetBuilder:
         )
         if "alpaca" in self.provider_names:
             notes.append(f"Alpaca market-data feed: {self.alpaca_feed}.")
+        ngx_start_date = max(
+            start_date,
+            end - timedelta(days=NGX_RELIABLE_LOOKBACK_DAYS),
+        )
+        if "ngnmarket" in self.provider_names:
+            notes.append(
+                "NGX equity history is limited to the latest 370 calendar days "
+                f"({ngx_start_date.isoformat()} to {end.isoformat()}) because "
+                "that is the currently validated reliable provider window."
+            )
         providers = {}
         ngnmarket_preflight_error: str | None = None
         if not dry_run:
@@ -400,7 +411,7 @@ class OfficialDatasetBuilder:
                     "ngnmarket",
                     s,
                     lambda s=s: providers["ngnmarket"].fetch_equity_history(
-                        s, start_date, end, force_refresh=force_refresh
+                        s, ngx_start_date, end, force_refresh=force_refresh
                     ),
                 )
             provider_fx: dict[tuple[str, str], HistoricalFXSeries] = {}

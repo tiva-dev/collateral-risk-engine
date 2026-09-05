@@ -1,6 +1,6 @@
-# Official Provider Validation Runbook (v0.6)
+# Official Provider Validation Runbook (v0.7.0)
 
-v0.6 prepares safe, reproducible, auditable provider-backed validation evidence. It does not change model parameters automatically, does not implement broker execution, and does not add live WebSocket market data.
+v0.7.0 produces reproducible, auditable provider-backed validation evidence. It does not change model parameters automatically, implement broker execution, or add live WebSocket market data.
 
 ## Dry-run validation
 

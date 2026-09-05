@@ -163,7 +163,7 @@ class RecoveryExecutionTests(unittest.TestCase):
                     currency="USD",
                     provider_name="fixture",
                 )
-                for day, price in enumerate([100, 100, 50, 50, 50, 50], start=1)
+                for day, price in enumerate([100, 100, 80, 80, 80, 80], start=1)
             ]
         }
         scenario = OfficialPortfolioScenario(

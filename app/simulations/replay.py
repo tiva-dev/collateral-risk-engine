@@ -11,8 +11,12 @@ from typing import Any
 
 from app.core.enums import AssetType, MarginState
 from app.core.evaluator import CollateralRiskEngine
-from app.core.models import Loan, MarketData, OrderBook, OrderBookLevel, Policy
-from app.credit.interest import accrue_scheduled_periods, apply_repayment
+from app.core.models import Holding, Loan, MarketData, OrderBook, OrderBookLevel, Policy
+from app.credit.interest import (
+    accrue_scheduled_periods,
+    apply_repayment,
+    principal_capacity_from_obligation,
+)
 from app.historical_data.models import (
     HistoricalBar,
     HistoricalDatasetManifest,
@@ -24,6 +28,10 @@ from app.liquidation.execution import (
     build_recovery_advisory,
     execute_recovery_advisory,
     projected_interest_buffer,
+)
+from app.risk.features import (
+    HistoricalRiskFeatures,
+    calculate_historical_risk_features,
 )
 from app.risk.math_utils import round_money
 from app.simulations.scenarios.official_portfolios import OfficialPortfolioScenario
@@ -67,6 +75,7 @@ def historical_bar_to_market_data(
     average_volume: float | None = None,
     *,
     use_synthetic_depth: bool = False,
+    risk_features: HistoricalRiskFeatures | None = None,
 ) -> MarketData:
     """Convert a historical observation without presenting synthetic depth as observed."""
     stress = stress or StressOverlay()
@@ -84,7 +93,11 @@ def historical_bar_to_market_data(
         else None
     )
     spread = estimate_spread(price, rolling_volume) * max(1.0, stress.spread_widening)
-    volatility = rolling_volatility(returns or [], min(len(returns or []), 30)) or None
+    volatility = (
+        risk_features.volatility_30d
+        if risk_features is not None
+        else rolling_volatility(returns or [], min(len(returns or []), 30)) or None
+    )
     timestamp = (
         bar.timestamp
         if isinstance(bar.timestamp, datetime)
@@ -113,6 +126,18 @@ def historical_bar_to_market_data(
             rolling_volume * price if rolling_volume is not None else None
         ),
         volatility_30d=volatility,
+        volatility_90d=(
+            risk_features.volatility_90d if risk_features is not None else None
+        ),
+        volatility_252d=(
+            risk_features.volatility_252d if risk_features is not None else None
+        ),
+        max_drawdown_252d=(
+            risk_features.max_drawdown_252d if risk_features is not None else None
+        ),
+        max_gap_252d=(
+            risk_features.max_gap_252d if risk_features is not None else None
+        ),
         recent_return_1d=(returns or [None])[-1],
         timestamp=timestamp,
         data_quality_score=(
@@ -129,6 +154,23 @@ def historical_bar_to_market_data(
             "spread_method": "historical_volume_proxy",
             "depth_method": (
                 "synthetic_sensitivity" if use_synthetic_depth else "not_observed"
+            ),
+            "volume_status": (
+                "observed"
+                if risk_features
+                and risk_features.volume_observation_count_30d > 0
+                else "unavailable"
+            ),
+            "volume_coverage_30d": (
+                risk_features.volume_coverage_30d if risk_features else None
+            ),
+            "inconsistent_zero_volume_count_30d": (
+                risk_features.inconsistent_zero_volume_count_30d
+                if risk_features
+                else None
+            ),
+            "data_driven_high_risk": (
+                risk_features.data_driven_high_risk if risk_features else None
             ),
         },
     )
@@ -385,6 +427,13 @@ def _static_haircut(asset_type: AssetType) -> float:
     }.get(asset_type, 1.0)
 
 
+def _conventional_ltv(holding: Holding) -> float:
+    """Market benchmark used for comparison, not a CRI risk input."""
+    if holding.currency.upper() == "NGN" or holding.exchange.upper() == "NGX":
+        return 0.30
+    return 0.50
+
+
 def _baseline_record(
     observation_date: date,
     market_value: float,
@@ -495,6 +544,16 @@ class HistoricalReplayEngine:
                 all_dates = [
                     item for item in all_dates if item >= execution_liquidity_start
                 ]
+        if (
+            comparison_regime == POLICY_ORIGINATION
+            and all_dates
+            and scenario.loan_terms.maturity_at is None
+            and scenario.loan_terms.term_days is not None
+        ):
+            cohort_start = all_dates[-1] - timedelta(
+                days=scenario.loan_terms.term_days
+            )
+            all_dates = [item for item in all_dates if item >= cohort_start]
 
         policy = replace(
             Policy.default(),
@@ -513,7 +572,10 @@ class HistoricalReplayEngine:
         current_holdings = list(scenario.holdings)
         latest: dict[str, HistoricalBar] = {}
         returns = {symbol: [] for symbol in bars_by_symbol}
-        volumes = {symbol: [] for symbol in bars_by_symbol}
+        prices = {symbol: [] for symbol in bars_by_symbol}
+        volumes: dict[str, list[float | None]] = {
+            symbol: [] for symbol in bars_by_symbol
+        }
         previous_adjusted_price: dict[str, float] = {}
         previous_observation_date: dict[str, date] = {}
 
@@ -530,6 +592,12 @@ class HistoricalReplayEngine:
             if all_dates
             else datetime.now(UTC)
         )
+        loan_terms = scenario.loan_terms.resolve_contract_dates(previous_time)
+        contractual_end = loan_terms.contractual_end(previous_time)
+        if comparison_regime == POLICY_ORIGINATION and contractual_end is not None:
+            all_dates = [
+                item for item in all_dates if item <= contractual_end.date()
+            ]
         loans: dict[str, Loan] | None = None
         missing_fx_dates: list[str] = []
         liquidation_episodes: list[dict[str, Any]] = []
@@ -559,39 +627,41 @@ class HistoricalReplayEngine:
             observation_provenance: dict[str, Any] = {}
             fx_missing = False
             for symbol, bars in dated_bars.items():
-                new_observation = False
                 while positions[symbol] < len(bars):
                     candidate = bars[positions[symbol]]
                     if _as_date(candidate.timestamp) > observation_date:
                         break
                     latest[symbol] = candidate
                     positions[symbol] += 1
-                    new_observation = True
+                    candidate_date = _as_date(candidate.timestamp)
+                    if previous_observation_date.get(symbol) == candidate_date:
+                        continue
+                    adjusted_price = _adjusted_ohlc(candidate)[3]
+                    previous = previous_adjusted_price.get(symbol)
+                    if previous and previous > 0:
+                        returns[symbol].append(adjusted_price / previous - 1)
+                    prices[symbol].append(adjusted_price)
+                    volumes[symbol].append(
+                        None
+                        if candidate.volume is None
+                        else max(0.0, candidate.volume)
+                    )
+                    previous_adjusted_price[symbol] = adjusted_price
+                    previous_observation_date[symbol] = candidate_date
                 bar = latest.get(symbol)
                 if bar is None:
                     continue
                 bar_date = _as_date(bar.timestamp)
-                if (
-                    new_observation
-                    and previous_observation_date.get(symbol) != bar_date
-                ):
-                    adjusted_price = _adjusted_ohlc(bar)[3]
-                    previous = previous_adjusted_price.get(symbol)
-                    if previous and previous > 0:
-                        returns[symbol].append(adjusted_price / previous - 1)
-                    previous_adjusted_price[symbol] = adjusted_price
-                    previous_observation_date[symbol] = bar_date
-                    volumes[symbol].append(max(0.0, bar.volume))
-                average_volume = (
-                    sum(volumes[symbol][-30:]) / len(volumes[symbol][-30:])
-                    if volumes[symbol]
-                    else None
+                features = calculate_historical_risk_features(
+                    prices[symbol], volumes[symbol]
                 )
+                average_volume = features.average_daily_volume_30d
                 raw_market = historical_bar_to_market_data(
                     bar,
                     returns[symbol],
                     effective_stress,
                     average_volume,
+                    risk_features=features,
                 )
                 converted, missing = convert_market_data_currency(
                     raw_market,
@@ -618,6 +688,21 @@ class HistoricalReplayEngine:
                     "observation_date": bar_date.isoformat(),
                     "age_days": age,
                     "adjustment": converted.metadata["price_adjustment"],
+                    "risk_features": {
+                        "observation_count": features.observation_count,
+                        "volatility_30d": features.volatility_30d,
+                        "volatility_90d": features.volatility_90d,
+                        "volatility_252d": features.volatility_252d,
+                        "max_drawdown_252d": features.max_drawdown_252d,
+                        "max_gap_252d": features.max_gap_252d,
+                        "average_daily_volume_30d": (
+                            features.average_daily_volume_30d
+                        ),
+                        "volume_coverage_30d": features.volume_coverage_30d,
+                        "inconsistent_zero_volume_count_30d": (
+                            features.inconsistent_zero_volume_count_30d
+                        ),
+                    },
                 }
             if not market_data:
                 continue
@@ -649,6 +734,7 @@ class HistoricalReplayEngine:
                 for holding in scenario.holdings
                 if holding.asset_id in market_data
             )
+            current_time = datetime.combine(observation_date, time.min, tzinfo=UTC)
 
             if loans is None:
                 common_value = market_value or raw_fallback_value
@@ -676,13 +762,48 @@ class HistoricalReplayEngine:
                     + scenario.execution_policy.liquidation_delay_observations
                     + scenario.execution_policy.settlement_delay_observations
                 )
-                interest_reserve_factor = (
-                    1
-                    + scenario.loan_terms.annual_interest_rate
-                    * protection_horizon
-                    / 365
+                execution_reserve_end = current_time + timedelta(
+                    days=protection_horizon
                 )
-                dynamic_limit = raw_dynamic_limit / interest_reserve_factor
+                contractual_reserve_end = loan_terms.interest_reserve_end(
+                    current_time
+                )
+                reserve_end = max(
+                    item
+                    for item in (execution_reserve_end, contractual_reserve_end)
+                    if item is not None
+                )
+                dynamic_principal_limit = principal_capacity_from_obligation(
+                    raw_dynamic_limit,
+                    loan_terms,
+                    current_time,
+                    through_datetime=reserve_end,
+                )
+                flat_principal_limit = principal_capacity_from_obligation(
+                    flat_limit,
+                    loan_terms,
+                    current_time,
+                    through_datetime=reserve_end,
+                )
+                flat_30_principal_limit = principal_capacity_from_obligation(
+                    flat_30_limit,
+                    loan_terms,
+                    current_time,
+                    through_datetime=reserve_end,
+                )
+                flat_50_principal_limit = principal_capacity_from_obligation(
+                    flat_50_limit,
+                    loan_terms,
+                    current_time,
+                    through_datetime=reserve_end,
+                )
+                static_principal_limit = principal_capacity_from_obligation(
+                    static_limit,
+                    loan_terms,
+                    current_time,
+                    through_datetime=reserve_end,
+                )
+                dynamic_limit = dynamic_principal_limit
                 if comparison_regime == COMMON_EXPOSURE:
                     balances = {
                         "dynamic": common_balance,
@@ -693,13 +814,16 @@ class HistoricalReplayEngine:
                     }
                 else:
                     balances = {
-                        "dynamic": dynamic_limit * scenario.initial_draw_assumption,
-                        "flat": flat_limit * scenario.initial_draw_assumption,
-                        "flat_30": flat_30_limit
+                        "dynamic": dynamic_principal_limit
                         * scenario.initial_draw_assumption,
-                        "flat_50": flat_50_limit
+                        "flat": flat_principal_limit
                         * scenario.initial_draw_assumption,
-                        "static": static_limit * scenario.initial_draw_assumption,
+                        "flat_30": flat_30_principal_limit
+                        * scenario.initial_draw_assumption,
+                        "flat_50": flat_50_principal_limit
+                        * scenario.initial_draw_assumption,
+                        "static": static_principal_limit
+                        * scenario.initial_draw_assumption,
                     }
                 loans = {
                     key: Loan(value, currency=scenario.loan_currency)
@@ -710,7 +834,7 @@ class HistoricalReplayEngine:
                     "approved_credit_limit": dynamic_limit,
                     "obligation_limit_before_interest_reserve": raw_dynamic_limit,
                     "interest_reserve": raw_dynamic_limit - dynamic_limit,
-                    "interest_reserve_observations": protection_horizon,
+                    "interest_reserve_end": reserve_end.isoformat(),
                     "approved_ltv": (
                         dynamic_limit / market_value if market_value > 0 else 0.0
                     ),
@@ -728,12 +852,11 @@ class HistoricalReplayEngine:
                     "configured_flat_ltv": configured_flat_ltv,
                 }
 
-            current_time = datetime.combine(observation_date, time.min, tzinfo=UTC)
             accruals = {}
             for key, current_loan in loans.items():
                 loans[key], accruals[key] = accrue_scheduled_periods(
                     current_loan,
-                    scenario.loan_terms,
+                    loan_terms,
                     previous_time,
                     current_time,
                 )
@@ -1079,6 +1202,20 @@ class HistoricalReplayEngine:
                 if quality_one_limit is not None
                 else None
             )
+            safe_principal_capacity = principal_capacity_from_obligation(
+                safe_limit,
+                loan_terms,
+                current_time,
+            )
+            future_interest_reserve = max(
+                0.0,
+                safe_limit - safe_principal_capacity,
+            )
+            participation_rates = [
+                asset.safe_participation_rate
+                for asset in (evaluation.asset_results if evaluation else [])
+                if asset.safe_participation_rate is not None
+            ]
             fx_stale = any(
                 item.metadata.get("fx_stale") for item in market_data.values()
             )
@@ -1102,6 +1239,14 @@ class HistoricalReplayEngine:
                     evaluation.approved_credit_limit if evaluation else 0.0
                 ),
                 "lifecycle_safe_credit_limit": safe_limit,
+                "safe_principal_capacity": safe_principal_capacity,
+                "future_interest_reserve": future_interest_reserve,
+                "effective_principal_ltv": (
+                    safe_principal_capacity / market_value
+                    if market_value > 0
+                    else None
+                ),
+                "cri_derived_participation_rates": participation_rates,
                 "stressed_liquidation_proceeds": proceeds,
                 "liquidation_costs": costs,
                 "credit_limit_breach": max(0.0, obligation - safe_limit),
@@ -1125,6 +1270,13 @@ class HistoricalReplayEngine:
                         float(item.get("realized_creditor_loss", 0.0))
                         for item in liquidation_episodes
                     )
+                ),
+                "liquidation_advisory_full_debt_covered": (
+                    evaluation.liquidation_plan.remaining_debt_after_plan <= 0.01
+                    if evaluation
+                    and evaluation.margin_state == MarginState.LIQUIDATION
+                    and evaluation.liquidation_plan
+                    else None
                 ),
                 "with_interest_balance": obligation,
                 "without_interest_balance": loans["dynamic"].principal,
@@ -1267,8 +1419,30 @@ class HistoricalReplayEngine:
             "events": events,
             "missing_fx_dates": missing_fx_dates,
             "stress_assumptions": asdict(stress),
-            "interest_policy": asdict(scenario.loan_terms),
+            "interest_policy": asdict(loan_terms),
             "initial_draw_assumption": scenario.initial_draw_assumption,
             "conventional_flat_ltv": configured_flat_ltv,
+            "policy_cohort": (
+                {
+                    "originated_at": previous_time.isoformat(),
+                    "contractual_end": (
+                        contractual_end.isoformat() if contractual_end else None
+                    ),
+                }
+                if comparison_regime == POLICY_ORIGINATION
+                else None
+            ),
+            "flat_ltv_benchmark": (
+                {
+                    "type": "explicit_override",
+                    "ltv": flat_ltv,
+                }
+                if flat_ltv is not None
+                else {
+                    "type": "market_convention",
+                    "ngx_or_ngn_collateral_ltv": 0.30,
+                    "other_collateral_ltv": 0.50,
+                }
+            ),
             "synthetic_depth_used": False,
         }

@@ -80,7 +80,7 @@ def _reduction(baseline: list[float], dynamic: list[float]) -> float | dict[str,
 
 def compute_simulation_metrics(
     result: dict[str, Any],
-    flat_ltv: float = 0.70,
+    flat_ltv: float | None = None,
     static_haircut: float = 0.30,
     manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -111,6 +111,27 @@ def compute_simulation_metrics(
         float(record.get("lifecycle_safe_credit_limit", 0.0)) for record in records
     ]
     obligations = [float(record.get("total_obligation", 0.0)) for record in records]
+    effective_principal_ltvs = [
+        float(record["effective_principal_ltv"])
+        for record in records
+        if record.get("effective_principal_ltv") is not None
+    ]
+    future_interest_reserves = [
+        float(record["future_interest_reserve"])
+        for record in records
+        if record.get("future_interest_reserve") is not None
+    ]
+    participation_rates = [
+        float(rate)
+        for record in records
+        for rate in record.get("cri_derived_participation_rates", [])
+        if rate is not None
+    ]
+    liquidation_recoverability = [
+        bool(record["liquidation_advisory_full_debt_covered"])
+        for record in records
+        if record.get("liquidation_advisory_full_debt_covered") is not None
+    ]
 
     outcome_table = [
         {
@@ -329,6 +350,20 @@ def compute_simulation_metrics(
             else unavailable("economic recovery fields absent", blocking=True)
         ),
         "average_recovery_coverage_ratio": _average(coverage),
+        "full_economic_recovery_observation_rate": (
+            sum(value <= 0.01 for value in economic_shortfalls)
+            / len(economic_shortfalls)
+            if economic_shortfalls
+            else unavailable("economic recovery fields absent", blocking=True)
+        ),
+        "liquidation_advisory_full_debt_recovery_rate": (
+            sum(liquidation_recoverability) / len(liquidation_recoverability)
+            if liquidation_recoverability
+            else unavailable(
+                "no liquidation advisory was triggered",
+                blocking=False,
+            )
+        ),
         "liquidation_plan_completeness": plan_completeness,
         "unrecovered_liquidation_target": unrecovered_target,
         "liquidation_episode_count": len(episodes),
@@ -405,6 +440,20 @@ def compute_simulation_metrics(
         ),
         "p5_credit_capacity": _percentile(capacities, 0.05),
         "p95_credit_capacity": _percentile(capacities, 0.95),
+        "average_effective_principal_ltv": _average(effective_principal_ltvs),
+        "median_effective_principal_ltv": (
+            statistics.median(effective_principal_ltvs)
+            if effective_principal_ltvs
+            else unavailable("effective principal LTV absent", blocking=True)
+        ),
+        "p5_effective_principal_ltv": _percentile(
+            effective_principal_ltvs, 0.05
+        ),
+        "p95_effective_principal_ltv": _percentile(
+            effective_principal_ltvs, 0.95
+        ),
+        "average_future_interest_reserve": _average(future_interest_reserves),
+        "average_cri_derived_participation_rate": _average(participation_rates),
         "credit_capacity_versus_flat_ltv": (
             sum(capacities) / len(capacities)
             - sum(flat_capacities) / len(flat_capacities)

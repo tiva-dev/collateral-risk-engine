@@ -207,7 +207,7 @@ class V031FunctionalHardeningTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["normalized_market_data"], {})
         self.assertIn("MTNN", body["missing_data"])
-        self.assertEqual(body["market_data_model_version"], "market-data-v0.6.2")
+        self.assertEqual(body["market_data_model_version"], "market-data-v0.7.0")
 
     def test_numeric_validation_rejects_invalid_inputs(self) -> None:
         with self.assertRaises(ValueError):

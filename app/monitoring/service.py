@@ -10,7 +10,12 @@ from app.audit.logger import AuditLogger
 from app.core.enums import DataMode, LifecycleDecisionValue, MarginState
 from app.core.evaluator import RiskEvaluationError
 from app.core.models import Holding, Loan, Policy
-from app.credit.interest import InterestPolicy, accrue_interest, apply_repayment
+from app.credit.interest import (
+    InterestPolicy,
+    accrue_interest,
+    accrue_scheduled_periods,
+    apply_repayment,
+)
 from app.lifecycle.service import CreditLifecycleEngine
 from app.liquidation.policy import LiquidationExecutionPolicy
 from app.market_data.aggregator import MarketDataAggregator
@@ -81,6 +86,13 @@ class MonitoringService:
         run_initial_evaluation: bool = True,
     ) -> tuple[MonitoredAccount, list[MonitoringEvent]]:
         now = utc_now()
+        if loan.currency.upper() != loan_currency.upper():
+            raise ValueError(
+                "loan.currency must match the monitored account loan_currency"
+            )
+        resolved_interest_policy = (
+            interest_policy or InterestPolicy(0.0)
+        ).resolve_contract_dates(now)
         account = MonitoredAccount(
             account_ref=account_ref,
             holdings=holdings,
@@ -88,7 +100,7 @@ class MonitoringService:
             loan=loan,
             loan_currency=loan_currency,
             policy=policy,
-            interest_policy=interest_policy or InterestPolicy(0.0),
+            interest_policy=resolved_interest_policy,
             liquidation_execution_policy=(
                 liquidation_execution_policy or LiquidationExecutionPolicy()
             ),
@@ -429,6 +441,272 @@ class MonitoringService:
                     }
                 )
         return results
+
+    def apply_liquidation_fills(
+        self,
+        *,
+        account_ref: str,
+        fills: list[dict[str, Any]],
+        execution_reference: str,
+    ) -> tuple[MonitoredAccount, list[MonitoringEvent]]:
+        account = self.account_repo.get(account_ref)
+        if account is None:
+            raise KeyError(account_ref)
+        if not execution_reference:
+            raise ValueError("execution_reference is required")
+        if execution_reference in account.processed_execution_references:
+            return self.evaluate_account(
+                account_ref,
+                force_tick_event=True,
+                force=True,
+            )
+        applied_at = utc_now()
+        if account.last_interest_accrual_at is not None:
+            account.loan, _ = accrue_scheduled_periods(
+                account.loan,
+                account.interest_policy,
+                account.last_interest_accrual_at,
+                applied_at,
+            )
+        holdings_by_key = {holding.stable_key: holding for holding in account.holdings}
+        asset_keys: dict[str, list[str]] = {}
+        for holding in account.holdings:
+            asset_keys.setdefault(holding.asset_id.upper(), []).append(
+                holding.stable_key
+            )
+        quantities = {
+            holding.stable_key: holding.quantity for holding in account.holdings
+        }
+        total_net_proceeds = 0.0
+        for fill in fills:
+            asset_id = str(fill["asset_id"])
+            stable_key = fill.get("stable_key")
+            if stable_key is None:
+                matching_keys = asset_keys.get(asset_id.upper(), [])
+                if len(matching_keys) != 1:
+                    raise ValueError(
+                        f"fill for {asset_id} requires stable_key because the "
+                        "asset identity is ambiguous"
+                    )
+                stable_key = matching_keys[0]
+            if stable_key not in holdings_by_key:
+                raise ValueError(f"unknown pledged instrument: {stable_key}")
+            quantity = float(fill["quantity"])
+            price = float(fill["execution_price"])
+            fees = float(fill.get("fees", 0.0))
+            if quantity <= 0 or price <= 0 or fees < 0:
+                raise ValueError("fill quantity and price must be positive")
+            if quantity > quantities.get(stable_key, 0.0) + 1e-9:
+                raise ValueError(f"fill exceeds pledged quantity for {asset_id}")
+            quantities[stable_key] -= quantity
+            total_net_proceeds += max(0.0, quantity * price - fees)
+        account.holdings = [
+            Holding(
+                asset_id=holding.asset_id,
+                asset_type=holding.asset_type,
+                quantity=quantities[holding.stable_key],
+                currency=holding.currency,
+                exchange=holding.exchange,
+                provider_id=holding.provider_id,
+            )
+            for holding in account.holdings
+            if quantities[holding.stable_key] > 1e-12
+        ]
+        account.loan, _ = apply_repayment(account.loan, total_net_proceeds)
+        account.last_interest_accrual_at = applied_at
+        account.processed_execution_references.add(execution_reference)
+        account.updated_at = applied_at
+        self.account_repo.update(account)
+        self._audit(
+            "liquidation_fills_recorded",
+            account_ref,
+            {
+                "execution_reference": execution_reference,
+                "fills": fills,
+                "net_proceeds": total_net_proceeds,
+                "remaining_loan": _json(account.loan),
+            },
+        )
+        return self.evaluate_account(
+            account_ref,
+            force_tick_event=True,
+            force=True,
+        )
+
+    def apply_repayment_notification(
+        self,
+        *,
+        account_ref: str,
+        amount: float,
+        repayment_reference: str,
+    ) -> tuple[MonitoredAccount, list[MonitoringEvent]]:
+        account = self.account_repo.get(account_ref)
+        if account is None:
+            raise KeyError(account_ref)
+        if amount <= 0:
+            raise ValueError("repayment amount must be positive")
+        if not repayment_reference:
+            raise ValueError("repayment_reference is required")
+        if repayment_reference in account.processed_repayment_references:
+            return self.evaluate_account(
+                account_ref,
+                force_tick_event=True,
+                force=True,
+            )
+
+        applied_at = utc_now()
+        if account.last_interest_accrual_at is not None:
+            account.loan, _ = accrue_scheduled_periods(
+                account.loan,
+                account.interest_policy,
+                account.last_interest_accrual_at,
+                applied_at,
+            )
+        previous_balance = account.loan.balance
+        account.loan, _ = apply_repayment(account.loan, amount)
+        account.last_interest_accrual_at = applied_at
+        account.processed_repayment_references.add(repayment_reference)
+        account.updated_at = applied_at
+        self.account_repo.update(account)
+        audit_id = self._audit(
+            "repayment_applied",
+            account_ref,
+            {
+                "repayment_reference": repayment_reference,
+                "amount": amount,
+                "previous_balance": previous_balance,
+                "remaining_balance": account.loan.balance,
+            },
+        )
+        account, tick_events = self.evaluate_account(
+            account_ref,
+            force_tick_event=True,
+            force=True,
+        )
+        repayment_event = self._append_event(
+            self._event(
+                account,
+                MonitoringEventType.REPAYMENT_APPLIED,
+                MonitoringSeverity.INFO,
+                account.last_margin_state,
+                account.last_margin_state,
+                None,
+                account.last_available_credit,
+                (
+                    f"repayment of {amount:.2f} applied; remaining obligation "
+                    f"is {account.loan.balance:.2f}"
+                ),
+                account.last_evaluation,
+                account.last_market_data_warnings,
+                account.last_missing_data,
+                audit_id,
+                f"{account_ref}:repayment:{repayment_reference}",
+            )
+        )
+        return account, [repayment_event, *tick_events]
+
+    def apply_draw_notification(
+        self,
+        *,
+        account_ref: str,
+        amount: float,
+        draw_reference: str,
+    ) -> tuple[MonitoredAccount, list[MonitoringEvent]]:
+        account = self.account_repo.get(account_ref)
+        if account is None:
+            raise KeyError(account_ref)
+        if amount <= 0:
+            raise ValueError("draw amount must be positive")
+        if not draw_reference:
+            raise ValueError("draw_reference is required")
+        if draw_reference in account.processed_draw_references:
+            return self.evaluate_account(
+                account_ref,
+                force_tick_event=True,
+                force=True,
+            )
+
+        applied_at = utc_now()
+        if account.last_interest_accrual_at is not None:
+            account.loan, _ = accrue_scheduled_periods(
+                account.loan,
+                account.interest_policy,
+                account.last_interest_accrual_at,
+                applied_at,
+            )
+        aggregation = self._normalize_market_data(account)
+        market_data = self.lifecycle_engine._market_data_with_pledged_cash(
+            aggregation.to_core_market_data(),
+            account.loan_currency,
+        )
+        holdings = self.lifecycle_engine._holdings_with_pledged_cash(
+            account.holdings,
+            account.pledged_cash_balance,
+            account.loan_currency,
+        )
+        decision = self.lifecycle_engine.check_draw(
+            account_ref,
+            account.loan,
+            amount,
+            holdings,
+            account.policy,
+            market_data,
+            loan_terms=account.interest_policy,
+        )
+        if decision.decision.value != "approved":
+            allowed = decision.max_approved_draw_amount or 0.0
+            raise ValueError(
+                "draw is outside the current CRI limit; "
+                f"maximum additional draw is {allowed:.2f}"
+            )
+
+        previous_balance = account.loan.balance
+        account.loan = Loan(
+            principal=account.loan.principal + amount,
+            accrued_interest=account.loan.accrued_interest,
+            fees=account.loan.fees,
+            currency=account.loan.currency,
+        )
+        account.last_interest_accrual_at = applied_at
+        account.processed_draw_references.add(draw_reference)
+        account.updated_at = applied_at
+        self.account_repo.update(account)
+        audit_id = self._audit(
+            "draw_applied",
+            account_ref,
+            {
+                "draw_reference": draw_reference,
+                "amount": amount,
+                "previous_balance": previous_balance,
+                "new_balance": account.loan.balance,
+            },
+        )
+        account, tick_events = self.evaluate_account(
+            account_ref,
+            force_tick_event=True,
+            force=True,
+        )
+        draw_event = self._append_event(
+            self._event(
+                account,
+                MonitoringEventType.DRAW_APPLIED,
+                MonitoringSeverity.INFO,
+                account.last_margin_state,
+                account.last_margin_state,
+                None,
+                account.last_available_credit,
+                (
+                    f"draw of {amount:.2f} applied; monitored obligation "
+                    f"is {account.loan.balance:.2f}"
+                ),
+                account.last_evaluation,
+                account.last_market_data_warnings,
+                account.last_missing_data,
+                audit_id,
+                f"{account_ref}:draw:{draw_reference}",
+            )
+        )
+        return account, [draw_event, *tick_events]
 
     def ingest_market_data_update(
         self,

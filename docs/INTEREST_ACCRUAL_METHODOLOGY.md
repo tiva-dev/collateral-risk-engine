@@ -1,15 +1,28 @@
-# INTEREST ACCRUAL METHODOLOGY
+# Interest and obligation methodology
 
-This document is part of the v0.5B official validation evidence package.
+CRI protects the full obligation, not principal alone:
 
-## Scope
+`total obligation = principal + accrued interest + fees`
 
-The validation framework replays cache-first historical datasets and applies deterministic synthetic stress overlays to compare flat LTV, static haircut, and dynamic collateral risk engine lending outcomes. It does not call live providers during normal CI, does not execute broker orders, and does not require production databases or real API keys.
+The policy accepts either an annual rate or an explicitly quoted daily,
+monthly, quarterly, or yearly rate. A quoted periodic rate is normalized before
+accrual. For example, 4% monthly is treated as a 48% simple annualized rate, not
+4% annually paid monthly.
 
-## Reproducibility
+Interest may accrue daily, monthly, quarterly, or yearly using actual/365,
+actual/360, or 30/360 day count and simple or compound treatment. Client-supplied
+interest remains available when the lender is the accounting source of truth.
 
-Runs record deterministic seeds, manifest checksums, simulation configuration version, model versions, interest settings, provider coverage metadata, warnings, and stress assumptions.
+At origination, CRI converts safe total-obligation capacity into principal
+capacity after reserving fixed fees and projected interest:
 
-## Outputs
+`safe principal = (safe obligation capacity - fixed fees) / projected obligation factor`
 
-The reporting layer produces official validation manifest JSON, metrics JSON, metrics CSV, validation report Markdown, provider coverage report, data methodology, interest accrual methodology, and simulation assumptions.
+For interest payable at maturity, the projection runs through maturity. For
+periodic interest payments, it runs through the next payment date plus any grace
+period, capped at maturity. Monitoring accrues interest from the last persisted
+accrual time before every risk decision, draw, repayment, or liquidation fill.
+
+Repayments and net liquidation proceeds are allocated to fees first, then
+accrued interest, then principal. Idempotency references prevent the same client
+transaction from being applied twice.

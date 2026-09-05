@@ -16,7 +16,13 @@ class OfficialPortfolioScenario:
     base_ltv_policy: float = 0.70
     risk_appetite: RiskAppetite = RiskAppetite.BALANCED
     initial_draw_assumption: float = 1.0
-    loan_terms: InterestPolicy = field(default_factory=lambda: InterestPolicy(0.10))
+    loan_terms: InterestPolicy = field(
+        default_factory=lambda: InterestPolicy(
+            annual_interest_rate=0.10,
+            payment_frequency="at_maturity",
+            term_days=365,
+        )
+    )
     conventional_flat_ltv: float | None = None
     execution_policy: LiquidationExecutionPolicy = field(
         default_factory=LiquidationExecutionPolicy
@@ -41,7 +47,8 @@ class OfficialPortfolioScenario:
 
 
 def _h(s, q, c="USD", t=AssetType.LISTED_EQUITY):
-    return Holding(s, t, q, c)
+    exchange = "NGX" if c.upper() == "NGN" else "US"
+    return Holding(s, t, q, c, exchange)
 
 
 def official_portfolio_scenarios() -> dict[str, OfficialPortfolioScenario]:
@@ -102,18 +109,29 @@ def official_portfolio_scenarios() -> dict[str, OfficialPortfolioScenario]:
             holdings,
             currency,
             loan_terms=(
-                InterestPolicy(0.48, accrual_frequency="monthly")
+                InterestPolicy(
+                    annual_interest_rate=0.48,
+                    quoted_interest_rate=0.04,
+                    rate_period="monthly",
+                    accrual_frequency="monthly",
+                    payment_frequency="at_maturity",
+                    term_days=365,
+                )
                 if nigeria_terms
-                else InterestPolicy(0.10)
+                else InterestPolicy(
+                    annual_interest_rate=0.10,
+                    payment_frequency="at_maturity",
+                    term_days=365,
+                )
             ),
             conventional_flat_ltv=0.30 if nigeria_terms else 0.50,
             methodology_notes=[
                 "Official provider-backed validation scenario",
                 "Policy-originated exposure draws 100% of the approved limit.",
                 (
-                    "NGN policy uses a 4% monthly nominal rate (48% annual simple)."
+                    "NGN policy uses a 4% monthly simple rate with a one-year term."
                     if nigeria_terms
-                    else "USD/EUR policy uses 10% annual simple interest."
+                    else "USD/EUR policy uses 10% annual simple interest with a one-year term."
                 ),
             ],
         )

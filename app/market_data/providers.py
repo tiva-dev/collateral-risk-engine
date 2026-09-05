@@ -27,7 +27,10 @@ class RawQuote:
     average_dollar_volume: float | None = None
     volatility_30d: float | None = None
     volatility_90d: float | None = None
+    volatility_252d: float | None = None
     intraday_volatility: float | None = None
+    max_drawdown_252d: float | None = None
+    max_gap_252d: float | None = None
     recent_return_1d: float | None = None
     order_book: OrderBook | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))

@@ -14,7 +14,7 @@ Runs record deterministic seeds, manifest checksums, simulation configuration ve
 
 The reporting layer produces official validation manifest JSON, metrics JSON, metrics CSV, validation report Markdown, provider coverage report, data methodology, interest accrual methodology, and simulation assumptions.
 
-## Canonical official replay cache (v0.6.1)
+## Canonical official replay cache (v0.7.0)
 Normalized equity caches are canonical `HistoricalSeries` objects containing `instrument`, optional `instrument_identity`, `bars`, `provider_name`, retrieval/date bounds, warnings, and a data-quality summary. FX caches use `HistoricalFXSeries` with `from_currency`, `to_currency`, and `rates`. Raw/provider-native responses remain useful audit inputs but are skipped, warned about, and are not official replay evidence.
 
 Scenario eligibility derives every holding currency and requires its exact direct or inverse conversion against the loan currency. An unrelated pair merely containing the loan currency does not qualify.

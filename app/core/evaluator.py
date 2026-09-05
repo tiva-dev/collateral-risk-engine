@@ -131,9 +131,13 @@ class CollateralRiskEngine:
             recovery_coverage_ratio=recovery_coverage_ratio,
             triggers=trigger_levels,
         )
-        target_cash = max(
-            trigger_levels.required_cure_amount,
-            max(0.0, projected_loan_balance - approved_credit_limit),
+        target_cash = (
+            projected_loan_balance
+            if margin_state == MarginState.LIQUIDATION
+            else max(
+                trigger_levels.required_cure_amount,
+                max(0.0, projected_loan_balance - approved_credit_limit),
+            )
         )
         liquidation_plan = build_liquidation_plan(
             account_ref=account_ref,
@@ -176,7 +180,7 @@ class CollateralRiskEngine:
                 "asset_ltv_caps": {
                     k.value: v for k, v in policy.asset_ltv_caps.items()
                 },
-                "max_participation_rate": policy.max_participation_rate,
+                "participation_rate_method": "cri_derived_per_instrument",
             },
         }
         audit_id = (
@@ -579,6 +583,7 @@ class CollateralRiskEngine:
         market_value = max(0.0, holding.quantity) * max(0.0, market.last_price)
         base_ltv = clamp(policy.base_ltv.get(holding.asset_type, 0.0), 0.0, 1.0)
         cap = clamp(policy.asset_ltv_caps.get(holding.asset_type, 1.0), 0.0, 1.0)
+        cap = min(cap, policy.security_ltv_caps.get(holding.asset_id.upper(), 1.0))
 
         breakdown, raw = all_adjustments(
             holding=holding,
@@ -590,12 +595,17 @@ class CollateralRiskEngine:
         eligible = (
             not (market.halted and not policy.allow_lending_on_stale_or_halted_assets)
             and market.data_quality_score >= policy.min_data_quality_score
+            and holding.asset_id.upper() not in policy.excluded_asset_ids
+            and (
+                policy.allowed_asset_types is None
+                or holding.asset_type in policy.allowed_asset_types
+            )
+            and (
+                policy.allowed_exchanges is None
+                or holding.exchange.upper() in policy.allowed_exchanges
+            )
         )
 
-        effective_ltv = clamp(base_ltv * breakdown.product, 0.0, cap)
-        if not eligible:
-            effective_ltv = 0.0
-        lendable_value = market_value * effective_ltv
         recovery = estimate_stressed_recovery(
             holding, market, policy, raw, market_value
         )
@@ -607,6 +617,27 @@ class CollateralRiskEngine:
                 per_unit_stressed_recovery=0.0,
                 method="ineligible_asset_zero_recovery",
             )
+        policy_ltv_limit = min(base_ltv, cap)
+        standalone_coverage = clamp(
+            1.08
+            + 0.22 * min(raw.annualized_volatility, 1.50)
+            + (0.12 if not raw.liquidity_observed else 0.0),
+            1.08,
+            1.55,
+        )
+        recovery_supported_ltv = (
+            recovery.stressed_liquidation_value
+            / max(market_value, 1e-9)
+            / standalone_coverage
+        )
+        effective_ltv = clamp(
+            min(policy_ltv_limit, recovery_supported_ltv),
+            0.0,
+            cap,
+        )
+        if not eligible:
+            effective_ltv = 0.0
+        lendable_value = market_value * effective_ltv
         drivers = risk_drivers_from_breakdown(breakdown)
         notes: list[str] = []
         if not eligible:
@@ -615,6 +646,14 @@ class CollateralRiskEngine:
             notes.append("order_book_used_for_recovery_estimate")
         else:
             notes.append("proxy_liquidity_model_used_for_recovery_estimate")
+        notes.append(
+            f"cri_derived_participation_rate={raw.safe_participation_rate:.4f}"
+        )
+        if not raw.liquidity_observed:
+            notes.append("liquidity_unavailable_uncertainty_cap_applied")
+        if raw.data_driven_high_risk:
+            notes.append("high_risk_detected_from_market_history")
+        notes.append(f"standalone_recovery_coverage={standalone_coverage:.4f}")
 
         product_adj = breakdown.product
         risk_score = clamp(1.0 - product_adj, 0.0, 1.0)
@@ -634,6 +673,9 @@ class CollateralRiskEngine:
             eligible=eligible,
             adjustments=breakdown,
             notes=notes,
+            safe_participation_rate=round(raw.safe_participation_rate, 4),
+            liquidity_observed=raw.liquidity_observed,
+            stable_key=holding.stable_key,
         )
 
     def _missing_market_result(self, holding: Holding) -> AssetRiskResult:
@@ -653,6 +695,9 @@ class CollateralRiskEngine:
             eligible=False,
             adjustments=self._zero_adjustments(),
             notes=["missing_market_data_zero_lendable_value"],
+            safe_participation_rate=None,
+            liquidity_observed=False,
+            stable_key=holding.stable_key,
         )
 
     def _zero_adjustments(self):
@@ -810,4 +855,7 @@ class CollateralRiskEngine:
             "risk_drivers": asset.risk_drivers,
             "eligible": asset.eligible,
             "notes": asset.notes,
+            "safe_participation_rate": asset.safe_participation_rate,
+            "liquidity_observed": asset.liquidity_observed,
+            "stable_key": asset.stable_key,
         }
