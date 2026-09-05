@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from tempfile import TemporaryDirectory
 
-from app.api.schemas import PolicyIn
+from app.api.schemas import LiquidationExecutionPolicyIn, PolicyIn
 from app.core.enums import AssetType
 from app.core.evaluator import CollateralRiskEngine
 from app.core.models import (
@@ -116,6 +116,7 @@ def test_missing_volume_is_unknown_not_zero_turnover() -> None:
 
 def test_client_does_not_supply_liquidation_participation_rate() -> None:
     assert "max_participation_rate" not in PolicyIn.model_fields
+    assert "max_participation_rate" not in LiquidationExecutionPolicyIn.model_fields
 
 
 def test_shorter_at_maturity_loan_reserves_less_interest() -> None:

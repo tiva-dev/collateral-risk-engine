@@ -286,11 +286,12 @@ class PolicyIn(BaseModel):
 
 
 class LiquidationExecutionPolicyIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     margin_call_grace_observations: int = Field(default=1, ge=0)
     liquidation_delay_observations: int = Field(default=0, ge=0)
     settlement_delay_observations: int = Field(default=1, ge=0)
     max_execution_observations: int = Field(default=5, ge=0)
-    max_participation_rate: float = Field(default=0.10, ge=0, le=1)
     execution_cost_rate: float = Field(default=0.0025, ge=0, le=1)
     maximum_price_slippage: float = Field(default=0.10, ge=0, le=1)
     maximum_quote_age_days: int = Field(default=3, ge=0)
@@ -298,6 +299,10 @@ class LiquidationExecutionPolicyIn(BaseModel):
 
     def to_domain(self) -> LiquidationExecutionPolicy:
         return LiquidationExecutionPolicy(**self.model_dump())
+
+
+class LiquidationExecutionPolicyOut(LiquidationExecutionPolicyIn):
+    max_participation_rate: float = Field(ge=0, le=1)
 
 
 class InstrumentIdentityIn(BaseModel):
@@ -744,7 +749,7 @@ class MonitoredAccountOut(BaseModel):
     loan_currency: str
     policy: PolicyIn
     interest_policy: InterestPolicyIn
-    liquidation_execution_policy: LiquidationExecutionPolicyIn
+    liquidation_execution_policy: LiquidationExecutionPolicyOut
     last_interest_accrual_at: datetime | None = None
     data_mode: DataMode
     monitoring_status: MonitoringStatus

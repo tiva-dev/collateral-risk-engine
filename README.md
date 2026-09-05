@@ -30,7 +30,8 @@ The API accepts:
   engine-calculated or client-supplied accruals;
 * loan currency;
 * margin-call grace, liquidation delay, settlement delay, execution horizon,
-  costs, maximum slippage, quote age, and forced-liquidation behavior.
+  costs, maximum slippage, quote age, and forced-liquidation behavior. CRI
+  derives safe market participation; the client does not supply it.
 
 CRI may approve less than the client's cap when concentration, volatility,
 liquidity, price stress, FX, or data quality makes the collateral less
@@ -68,6 +69,13 @@ The non-network suite is:
 ```bash
 python -m pytest -q
 ```
+
+## Manual client testing
+
+Run the API locally and open `http://127.0.0.1:8000/docs` to call every
+endpoint from the browser. The complete setup, recommended lender journey,
+authentication instructions, and runnable HTTP walkthrough are in
+[docs/CLIENT_API_SANDBOX.md](docs/CLIENT_API_SANDBOX.md).
 
 ## Operational API surface
 
