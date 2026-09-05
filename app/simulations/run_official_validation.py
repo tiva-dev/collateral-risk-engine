@@ -42,6 +42,7 @@ def _parse_timestamp(value):
 
 
 def _bar_from_payload(payload: dict) -> HistoricalBar:
+    raw_volume = payload.get("volume", payload.get("v"))
     return HistoricalBar(
         instrument=payload.get("instrument")
         or payload.get("symbol")
@@ -66,7 +67,7 @@ def _bar_from_payload(payload: dict) -> HistoricalBar:
         ),
         close=float(payload.get("close", payload.get("c", 0))),
         adjusted_close=payload.get("adjusted_close"),
-        volume=float(payload.get("volume", payload.get("v", 0)) or 0),
+        volume=None if raw_volume in (None, "") else float(raw_volume),
         value_traded=payload.get("value_traded"),
         currency=payload.get("currency", "USD"),
         source=payload.get("source", "historical_provider"),

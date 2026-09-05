@@ -25,6 +25,7 @@ from app.market_data.providers import FXRate
 from app.monitoring.repositories import SQLiteMonitoredAccountRepository
 from app.risk.features import calculate_historical_risk_features
 from app.simulations.replay import HistoricalReplayEngine, _conventional_ltv
+from app.simulations.run_official_validation import _bar_from_payload
 from app.simulations.scenarios.official_portfolios import OfficialPortfolioScenario
 from app.tests.test_monitoring_v04 import register, service
 
@@ -112,6 +113,34 @@ def test_missing_volume_is_unknown_not_zero_turnover() -> None:
     assert inconsistent_zero.volume_coverage_30d == 0.0
     assert observed_zero.average_daily_volume_30d == 0.0
     assert observed_zero.volume_coverage_30d == 1.0
+
+
+def test_official_replay_loader_preserves_missing_volume() -> None:
+    missing = _bar_from_payload(
+        {
+            "instrument": "GTCO",
+            "date": "2026-01-02",
+            "open": 100,
+            "high": 101,
+            "low": 99,
+            "close": 100,
+            "volume": None,
+        }
+    )
+    observed_zero = _bar_from_payload(
+        {
+            "instrument": "GTCO",
+            "date": "2026-01-03",
+            "open": 100,
+            "high": 100,
+            "low": 100,
+            "close": 100,
+            "volume": 0,
+        }
+    )
+
+    assert missing.volume is None
+    assert observed_zero.volume == 0.0
 
 
 def test_client_does_not_supply_liquidation_participation_rate() -> None:
