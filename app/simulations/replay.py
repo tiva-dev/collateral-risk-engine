@@ -25,14 +25,13 @@ from app.historical_data.models import (
 )
 from app.lifecycle.service import CreditLifecycleEngine
 from app.liquidation.execution import (
-    build_recovery_advisory,
     execute_recovery_advisory,
-    projected_interest_buffer,
 )
 from app.risk.features import (
     HistoricalRiskFeatures,
     calculate_historical_risk_features,
 )
+from app.liquidation.planning import advisory_from_plan, plan_recovery
 from app.risk.math_utils import round_money
 from app.simulations.scenarios.official_portfolios import OfficialPortfolioScenario
 from app.version import LIFECYCLE_MODEL_VERSION, RISK_MODEL_VERSION
@@ -963,45 +962,32 @@ class HistoricalReplayEngine:
                     if forced
                     else scenario.execution_policy.margin_call_grace_observations
                 )
-                settlement_delay = (
-                    scenario.execution_policy.settlement_delay_observations
-                )
-                if (
-                    forced
-                    and scenario.execution_policy.full_liquidation_on_forced_trigger
-                ):
-                    target = loans["dynamic"].balance
-                    action = "full_recovery"
-                else:
-                    target = max(
-                        (
-                            evaluation.trigger_levels.repayment_only_cure
-                            if evaluation is not None
-                            else 0.0
-                        ),
-                        loans["dynamic"].balance - safe_limit,
-                    )
-                    action = "restore_coverage"
-                target += projected_interest_buffer(
-                    loans["dynamic"],
-                    scenario.loan_terms.annual_interest_rate,
-                    delay + settlement_delay,
-                )
-                target = min(
-                    target,
-                    loans["dynamic"].balance
-                    + projected_interest_buffer(
-                        loans["dynamic"],
-                        scenario.loan_terms.annual_interest_rate,
-                        delay + settlement_delay,
-                    ),
-                )
-                daily_advisory = build_recovery_advisory(
+                # Same planner as the evaluator and monitoring: sized on the
+                # post-settlement account with the execution model, interest
+                # to settlement and residual holdings.
+                recovery_plan = plan_recovery(
+                    engine=self.risk_engine,
+                    account_ref=scenario.name,
                     holdings=current_holdings,
+                    loan=loans["dynamic"],
+                    balance=loans["dynamic"].balance,
+                    policy=policy,
                     market_data=market_data,
-                    target_net_recovery=target,
-                    policy=scenario.execution_policy,
-                    trigger_state=state,
+                    asset_results=evaluation.asset_results if evaluation else [],
+                    state=MarginState(state),
+                    execution_policy=scenario.execution_policy,
+                    interest_policy=scenario.loan_terms,
+                    as_of=current_time,
+                )
+                target = recovery_plan.target_net_recovery
+                action = (
+                    "full_recovery"
+                    if recovery_plan.action == "full_recovery"
+                    else "restore_coverage"
+                )
+                daily_advisory = advisory_from_plan(
+                    recovery_plan,
+                    execution_policy=scenario.execution_policy,
                     issued_date=observation_date,
                 )
                 active_episode = {

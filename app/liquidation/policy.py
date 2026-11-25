@@ -16,6 +16,13 @@ class LiquidationExecutionPolicy:
     maximum_price_slippage: float = 0.10
     maximum_quote_age_days: int = 3
     full_liquidation_on_forced_trigger: bool = True
+    # Audit C3 follow-up. While collateral data is unavailable the account is
+    # held in data review (no automated sale). After this many minutes the
+    # review is escalated to a person; it is re-escalated at the second
+    # interval (0 disables repeats). Escalation never forces a sale.
+    # Defaults are placeholders pending Tiva's risk-policy decision.
+    data_review_escalation_minutes: float = 1440.0
+    data_review_reescalation_minutes: float = 1440.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -25,6 +32,9 @@ class LiquidationExecutionPolicy:
             "max_execution_observations",
             "maximum_quote_age_days",
         ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be greater than or equal to zero")
+        for name in ("data_review_escalation_minutes", "data_review_reescalation_minutes"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be greater than or equal to zero")
         for name in (

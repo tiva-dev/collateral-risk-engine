@@ -36,6 +36,9 @@ class MonitoringEventType(str, Enum):
     FX_MISSING = "fx_missing"
     LOAN_BALANCE_UPDATED = "loan_balance_updated"
     MONITORING_ERROR = "monitoring_error"
+    DATA_REVIEW_REQUIRED = "data_review_required"
+    DATA_REVIEW_ESCALATED = "data_review_escalated"
+    DATA_REVIEW_CLEARED = "data_review_cleared"
 
 
 class MonitoringSeverity(str, Enum):
@@ -85,6 +88,11 @@ class MonitoredAccount:
     processed_execution_references: set[str] = field(default_factory=set)
     processed_draw_references: set[str] = field(default_factory=set)
     processed_repayment_references: set[str] = field(default_factory=set)
+    # Data-review state (audit C3): when it started, the affected assets and
+    # when it was last escalated.
+    data_review_since: datetime | None = None
+    data_review_assets: list[str] = field(default_factory=list)
+    data_review_last_escalated_at: datetime | None = None
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 
