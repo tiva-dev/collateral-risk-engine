@@ -10,7 +10,7 @@ on:
       source_run_id:
         description: "Official Provider Validation Run whose artifacts to use"
         required: true
-        default: "45673315376"
+        default: "45681534542"
   push:
     branches: ["research/**"]
     paths:
@@ -24,9 +24,13 @@ permissions:
 jobs:
   real-data:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        market: [NGX, US]
     env:
-      SOURCE_RUN: ${{ inputs.source_run_id || '45673315376' }}
+      SOURCE_RUN: ${{ inputs.source_run_id || '45681534542' }}
     steps:
       - uses: actions/checkout@v4
       - name: Check out v0.6.2 engine (main)
@@ -82,14 +86,14 @@ jobs:
       - name: Run real-data comparison
         run: |
           manifest=$(find data/simulation_results -name '*.manifest.json' | head -n 1)
-          python -m research.methodology_lab.real_data "$manifest" \
+          python -m research.methodology_lab.real_data "$manifest" --market ${{ matrix.market }} \
             --v062 "$PWD/engines/v062" --v070 "$PWD/engines/v070" --out research_out \
             | tee research_out.log
       - name: Upload results
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: research-real-data-results
+          name: research-real-data-results-${{ matrix.market }}
           path: |
             research_out/**
             research_out.log

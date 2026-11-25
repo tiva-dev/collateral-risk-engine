@@ -323,3 +323,50 @@ def approach_c(
         else:
             hi = mid
     return best, stats_best
+
+
+# --- Market-specific risk estimation (NGX research variants) ----------------
+#
+# NGX closes move in steps capped by the exchange's daily band and carry stale
+# prices on thin days, so one-day returns are positively autocorrelated and
+# one-day volatility understates multi-day risk. The variance ratio
+# VR(q) = Var(q-day return) / (q * Var(1-day return)) measures this; scaling
+# daily volatility by sqrt(VR(q)) gives a multi-session-consistent volatility.
+# These are research variants for comparison, not an approved methodology,
+# and they do not model exchange price limits.
+
+
+def variance_ratio(r: np.ndarray, q: int = 10) -> np.ndarray:
+    """Per-asset VR(q) from overlapping q-day sums, floored at 1, capped at 6."""
+    h, n = r.shape
+    if h < 3 * q:
+        return np.ones(n)
+    var1 = r.var(axis=0, ddof=1)
+    c = np.cumsum(np.vstack([np.zeros((1, n)), r]), axis=0)
+    sums = c[q:] - c[:-q]
+    varq = sums.var(axis=0, ddof=1)
+    vr = np.where(var1 > 0, varq / (q * np.maximum(var1, 1e-18)), 1.0)
+    return np.clip(vr, 1.0, 6.0)
+
+
+def multi_session_features(f: Features, q: int = 10) -> Features:
+    """Volatilities scaled by sqrt(VR(q)) estimated on the decision-date history."""
+    from dataclasses import replace
+
+    scale = np.sqrt(variance_ratio(f.r_hist, q))
+    return replace(
+        f,
+        ewma_sigma=f.ewma_sigma * scale,
+        long_sigma=f.long_sigma * scale,
+        engine_inputs=[dict(a) for a in f.engine_inputs],
+    )
+
+
+def stressed_liquidity_features(f: Features, adv_mult: float = 0.5, spread_mult: float = 1.5) -> Features:
+    """Liquidity halves and spreads widen in the recovery window."""
+    from dataclasses import replace
+
+    return replace(
+        f, adv=f.adv * adv_mult, spread_stress_mult=f.spread_stress_mult * spread_mult,
+        engine_inputs=[dict(a) for a in f.engine_inputs],
+    )
