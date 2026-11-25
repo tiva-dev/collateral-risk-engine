@@ -273,13 +273,27 @@ def monitor_loan(request: MonitorRequest) -> LifecycleResponse:
     return LifecycleResponse(result=jsonable_encoder(asdict(result)))
 
 
+def _loan_in_cents(loan):
+    from dataclasses import replace as _replace
+
+    return _replace(
+        loan,
+        principal=round(loan.principal, 2),
+        accrued_interest=round(loan.accrued_interest, 2),
+        fees=round(loan.fees, 2),
+    )
+
+
 def _monitoring_account_out(account):
     return jsonable_encoder(
         {
             "account_ref": account.account_ref,
             "holdings": account.holdings,
             "pledged_cash_balance": account.pledged_cash_balance,
-            "loan": account.loan,
+            # Audit H6: state keeps full precision; the API presents cents and
+            # exposes the exact stored values separately for reconciliation.
+            "loan": _loan_in_cents(account.loan),
+            "loan_exact": account.loan,
             "loan_currency": account.loan_currency,
             "policy": account.policy,
             "interest_policy": account.interest_policy,
