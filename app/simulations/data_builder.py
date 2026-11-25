@@ -16,7 +16,12 @@ from app.historical_data.calendars import (
     ngx_calendar,
     nyse_calendar,
 )
+from app.historical_data.cbn import CBNReferenceRateProvider
 from app.historical_data.config import load_config
+from app.historical_data.corporate_actions import (
+    VERIFIED_CORPORATE_ACTIONS,
+    screen_extreme_moves,
+)
 from app.historical_data.coverage import (
     CoverageReport,
     summarise,
@@ -51,6 +56,7 @@ DEFAULT_CALL_BUDGETS = {
     "ngnmarket": {"monthly": 3000, "max_per_run": 500},
     "alpha_vantage": {"monthly": None, "max_per_run": 100},
     "alpaca": {"monthly": None, "max_per_run": 500},
+    "cbn": {"monthly": None, "max_per_run": 5},
 }
 INDEPENDENT_FX_PAIRS = ("USD/NGN", "EUR/USD")
 # Pairs each provider is asked for directly. NGNMarket quotes naira pairs only
@@ -58,6 +64,16 @@ INDEPENDENT_FX_PAIRS = ("USD/NGN", "EUR/USD")
 PROVIDER_FX_PAIRS: dict[str, tuple[str, ...]] = {
     "ngnmarket": ("USD/NGN", "EUR/NGN"),
     "alpha_vantage": ("USD/NGN", "EUR/USD"),
+    "cbn": ("USD/NGN", "EUR/NGN"),
+}
+# What each provider's FX series is. Official reference rates and
+# market-indicative closes answer different questions (valuation reference
+# versus the rate at which proceeds could be converted); neither is an
+# executable dealer quote. See docs/governance/FX_SOURCES.md.
+FX_RATE_KIND: dict[str, str] = {
+    "cbn": "official_reference",
+    "ngnmarket": "market_indicative",
+    "alpha_vantage": "market_indicative",
 }
 # Provider precedence per pair when several providers supply it. Provisional:
 # which NGN reference rate governs valuation is a Tiva decision (see
@@ -65,14 +81,18 @@ PROVIDER_FX_PAIRS: dict[str, tuple[str, ...]] = {
 # coverage validation; otherwise the next one is tried. Both series are kept
 # and reconciled either way.
 FX_SOURCE_PRECEDENCE: dict[str, tuple[str, ...]] = {
-    "USD/NGN": ("ngnmarket", "alpha_vantage"),
-    "NGN/USD": ("ngnmarket", "alpha_vantage"),
-    "EUR/NGN": ("ngnmarket", "alpha_vantage"),
-    "NGN/EUR": ("ngnmarket", "alpha_vantage"),
-    "EUR/USD": ("alpha_vantage", "ngnmarket"),
-    "USD/EUR": ("alpha_vantage", "ngnmarket"),
+    "USD/NGN": ("ngnmarket", "alpha_vantage", "cbn"),
+    "NGN/USD": ("ngnmarket", "alpha_vantage", "cbn"),
+    "EUR/NGN": ("ngnmarket", "alpha_vantage", "cbn"),
+    "NGN/EUR": ("ngnmarket", "alpha_vantage", "cbn"),
+    "EUR/USD": ("alpha_vantage", "ngnmarket", "cbn"),
+    "USD/EUR": ("alpha_vantage", "ngnmarket", "cbn"),
 }
-FX_CALENDARS = {"ngnmarket": fx_daily_calendar, "alpha_vantage": fx_weekday_calendar}
+FX_CALENDARS = {
+    "ngnmarket": fx_daily_calendar,
+    "alpha_vantage": fx_weekday_calendar,
+    "cbn": fx_weekday_calendar,
+}
 
 
 def _inverse_fx_series(
@@ -287,6 +307,7 @@ def _coverage_for(
     start: date,
     end: date,
     symbol: str | None = None,
+    unconfirmed: dict[date, str] | None = None,
 ) -> CoverageReport:
     ref = reference_for(symbol) if symbol else None
     return validate_series_coverage(
@@ -298,6 +319,7 @@ def _coverage_for(
         listing_date=ref.listing_date if ref else None,
         listing_verified=ref.verified if ref else False,
         suspensions=[(s.start, s.end, s.reason) for s in ref.suspensions] if ref else (),
+        unconfirmed_closures=unconfirmed,
     )
 
 
@@ -340,7 +362,7 @@ class OfficialDatasetBuilder:
     def __init__(
         self, providers: Iterable[str] | None = None, output_dir: str | None = None
     ):
-        self.provider_names = set(providers or ["alpaca", "ngnmarket", "alpha_vantage"])
+        self.provider_names = set(providers or ["alpaca", "ngnmarket", "alpha_vantage", "cbn"])
         self.config = load_config()
         self.output_dir = output_dir or self.config.simulation_output_dir
         self.alpaca_feed = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower()
@@ -363,7 +385,7 @@ class OfficialDatasetBuilder:
                 }
                 for s in NGX_UNIVERSE
             ]
-        for provider in ("ngnmarket", "alpha_vantage"):
+        for provider in ("ngnmarket", "alpha_vantage", "cbn"):
             if provider not in self.provider_names:
                 continue
             for pair in PROVIDER_FX_PAIRS[provider]:
@@ -438,6 +460,7 @@ class OfficialDatasetBuilder:
         alternate_fx_paths: list[str] = []
         imputations: dict = {}
         inferred_closures: dict = {}
+        corporate_screen: dict = {}
         equity_series: dict[str, HistoricalSeries] = {}
         planned_counts = self.estimate_call_counts()
         budget_summary = (
@@ -462,6 +485,7 @@ class OfficialDatasetBuilder:
                 "alpaca": AlpacaTradingHistoricalProvider(),
                 "ngnmarket": NGNMarketHistoricalProvider(),
                 "alpha_vantage": AlphaVantageHistoricalProvider(),
+                "cbn": CBNReferenceRateProvider(),
             }
             if "ngnmarket" in self.provider_names:
                 try:
@@ -591,7 +615,7 @@ class OfficialDatasetBuilder:
                 if isinstance(series, HistoricalFXSeries) and series.rates:
                     fx_by_provider.setdefault(provider_name, {})[pair] = series
 
-            for provider_name in ("ngnmarket", "alpha_vantage"):
+            for provider_name in ("ngnmarket", "alpha_vantage", "cbn"):
                 if provider_name not in self.provider_names:
                     continue
                 for pair in PROVIDER_FX_PAIRS[provider_name]:
@@ -642,11 +666,20 @@ class OfficialDatasetBuilder:
                 if not observed:
                     continue
                 cal = base(start_date, end)
-                closures = infer_market_closures(cal, observed, start_date, end)
-                inferred_closures[market] = {d.isoformat(): why for d, why in closures.items()}
-                cal = cal.with_closures(closures)
+                # Confirmed closures are already in the calendar; inferred
+                # ones stay sessions and are labelled, not excused.
+                candidates = infer_market_closures(cal, observed, start_date, end)
+                inferred_closures[market] = {
+                    "unconfirmed": {d.isoformat(): why for d, why in candidates.items()},
+                    "confirmed_in_calendar": sorted(
+                        d.isoformat() for d in cal.holidays if start_date <= d <= end
+                        and "confirmed" in cal.holidays[d]
+                    ),
+                }
                 for s, dates in observed.items():
-                    coverage_reports[s] = _coverage_for(s, dates, cal, start_date, end, s)
+                    coverage_reports[s] = _coverage_for(
+                        s, dates, cal, start_date, end, s, unconfirmed=candidates
+                    )
             for provider_name, pairs in fx_by_provider.items():
                 cal = FX_CALENDARS[provider_name](start_date, end)
                 for pair, series in pairs.items():
@@ -689,11 +722,18 @@ class OfficialDatasetBuilder:
                     paths = fx_cache_path.get((pn, pair), [])
                     if pn != chosen:
                         alternate_fx_paths.extend(paths)
-                if len(candidates) > 1:
-                    fx_recon[pair] = reconcile_fx(
-                        fx_by_provider[candidates[0]][pair],
-                        fx_by_provider[candidates[1]][pair],
-                    )
+                fx_selection[pair]["rate_kind"] = FX_RATE_KIND.get(chosen, "unknown")
+                fx_selection[pair]["candidate_rate_kinds"] = {
+                    c: FX_RATE_KIND.get(c, "unknown") for c in candidates
+                }
+                comparisons = {}
+                for i, a in enumerate(candidates):
+                    for b in candidates[i + 1 :]:
+                        comparisons[f"{a} vs {b}"] = reconcile_fx(
+                            fx_by_provider[a][pair], fx_by_provider[b][pair]
+                        )
+                if comparisons:
+                    fx_recon[pair] = comparisons
             for k in list(earliest):
                 if "@" in k:
                     del earliest[k]
@@ -707,6 +747,32 @@ class OfficialDatasetBuilder:
             coverage_validation["inferred_market_closures"] = inferred_closures
             for s, series in equity_series.items():
                 imputations[s] = imputation_summary(series)
+            # Corporate-action screen for NGX names (NGNMarket prices are not
+            # adjusted). Disclosure titles are free on every plan.
+            if "ngnmarket" in self.provider_names:
+                for s in NGX_UNIVERSE:
+                    if s not in equity_series:
+                        continue
+                    try:
+                        disclosures = providers["ngnmarket"].fetch_disclosures(
+                            s, force_refresh=force_refresh
+                        )
+                    except Exception as exc:  # noqa: BLE001 - provider boundary
+                        disclosures = []
+                        warnings.append(f"NGNMarket disclosures unavailable for {s}: {exc}")
+                    moves = screen_extreme_moves(
+                        s, equity_series[s].bars,
+                        actions=VERIFIED_CORPORATE_ACTIONS.get(s, []),
+                        disclosures=disclosures,
+                    )
+                    corporate_screen[s] = {
+                        "disclosures_scanned": len(disclosures),
+                        "moves": [
+                            {"date": m.date.isoformat(), "return": round(m.simple_return, 4),
+                             "classification": m.classification, "explanation": m.explanation}
+                            for m in moves
+                        ],
+                    }
             for k, v in providers.items():
                 if k in self.provider_names:
                     meta = getattr(v, "quota_metadata", {}) or {}
@@ -765,6 +831,7 @@ class OfficialDatasetBuilder:
             fx_reconciliation=fx_recon,
             alternate_fx_cache_paths=alternate_fx_paths,
             imputation_summary=imputations,
+            corporate_action_screen=corporate_screen,
         )
 
     def write_manifest(self, manifest):

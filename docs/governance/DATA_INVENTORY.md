@@ -14,6 +14,7 @@ Hobby plan, Alpaca IEX feed, Alpha Vantage free key).
 | Artifact, run 34000523667 (6 Sep 2026, v0.7.0 branch) | 403 PLAN_REQUIRED responses only; inverted window | Expires 5 Dec 2026; no usable data |
 | Artifact, run 45665911547 (25 Nov 2026) | NGX 15 names x 38 sessions, USD/NGN 55 days | Expires 23 Feb 2027 |
 | Artifacts, run 45669690566 (25 Nov 2026) | Full window, all providers; snapshot `2cbfe971849c35fc11268ba941a8b66dc955022240b2d6d588bcaeab90716f58`, 70 files, 89.5 MB | Expires 23 Feb 2027 |
+| Artifacts, run 45673315376 (25 Nov 2026) | Same window with volume provenance; snapshot `4308c6ca57eb19c59247827574db842dca391e01b419b3491770dec78b109bcf`, 70 files, 92.1 MB, verified | Expires 23 Feb 2027; used by the research run |
 | Actions caches | One entry, 66 KB (`official-provider-cache-v1-2026-10-01-2026-11-24`) | Not a durable store |
 
 No historical data is committed to git, by design (licensing).
@@ -51,6 +52,18 @@ Tiva decision (ROADMAP); until it is made, FX precedence in
 
 ## 4. Other data-quality findings
 
+* **NGX liquidity history is short.** NGNMarket rows carry `volume`,
+  `value_traded` and `trade_count` keys, but the values are null before
+  2025-08-01 for 12 of the 15 names (SEPLAT before 2026-07-21, NB before
+  2026-03-23); 77%–96% of each series has no volume. Price history from
+  2018 is usable; liquidity (ADV, execution horizon) can be measured from
+  August 2025 only. The parser previously turned these nulls into a volume
+  of 0.0; it now records them as missing.
+* **US volume is IEX-only.** Alpaca's IEX feed reports volume on the IEX
+  venue only (SPY shows 200 shares on 2018-11-01), a small fraction of
+  consolidated volume. ADV from it is a lower bound; the SIP feed would fix
+  both this and the 2018–2020 gap.
+
 * **OHLC imputation (NGX).** NGNMarket leaves high/low empty on 25%–60% of
   bars for most names (NB 93%). Each imputed field is now labelled; range-based
   estimators must use `has_reported_range()`.
@@ -78,6 +91,8 @@ Tiva decision (ROADMAP); until it is made, FX precedence in
 | Alpha Vantage NGN gaps | 177 sessions | Second source for the same rate | Tiva |
 | NB | 20% of sessions | Exclude NB, or another NGX source | Engineering proposes exclusion |
 | Unverified listing dates | MTNN, AIRTELAFRI, BUACEMENT, FIRSTHOLDCO | Check NGX bulletins | Engineering |
+| NGX volume before 2025-08-01 | 77%–96% of bars per name | NGX daily official list (value and volume) or another vendor; NGNMarket support may know if older volume exists | Tiva (source/expenditure) |
+| US consolidated volume | all US bars | Alpaca SIP feed | Tiva (expenditure) |
 
 ## 6. Storage
 

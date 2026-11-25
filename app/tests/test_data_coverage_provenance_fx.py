@@ -458,7 +458,9 @@ def test_builder_selects_fx_sources_and_flags_truncated_equities(tmp_path, monke
     # The unselected provider's USD/NGN cache is kept aside, not replayed.
     assert "alpha_vantage:USD/NGN.json" in m.alternate_fx_cache_paths
     assert "alpha_vantage:USD/NGN.json" not in m.cache_paths
-    assert m.fx_reconciliation["USD/NGN"]["median_abs_rel_diff"] == pytest.approx(0.01)
+    recon = m.fx_reconciliation["USD/NGN"]["ngnmarket vs alpha_vantage"]
+    assert recon["median_abs_rel_diff"] == pytest.approx(0.01)
+    assert sel["USD/NGN"]["rate_kind"] == "market_indicative"
     cov = m.coverage_validation
     assert cov["series"]["DANGCEM"]["status"] == "fail"
     assert "DANGCEM" in cov["summary"]["failing_series"]
@@ -527,3 +529,95 @@ def test_null_volume_is_recorded_as_missing_not_zero(ngn):
     summary = imputation_summary(series)
     assert summary["volume_missing_bars"] == 1
     assert summary["first_reported_volume"] == "2026-11-24"
+
+
+def test_partial_suspension_overlap_does_not_excuse_unrelated_sessions():
+    cal = SessionCalendar("T", {})
+    start, end = date(2026, 1, 1), date(2026, 6, 30)
+    all_days = _weekdays(start, end)
+    gap = set(_weekdays(date(2026, 3, 2), date(2026, 3, 27)))  # 20 sessions missing
+    obs = [d for d in all_days if d not in gap]
+    # A two-day suspension at the start of the run must not excuse the other 18.
+    r = validate_series_coverage(
+        "X", obs, cal, start, end,
+        suspensions=[(date(2026, 3, 2), date(2026, 3, 3), "two-day suspension")],
+    )
+    kinds = [(g.classification, g.sessions) for g in r.gaps]
+    assert ("known_suspension", 2) in kinds
+    assert ("unexplained", 18) in kinds
+    assert r.status == "fail"
+    assert any("unexplained gap of 18 sessions" in f for f in r.failures)
+
+
+def test_unconfirmed_market_wide_absence_is_labelled_and_counted_missing():
+    cal = SessionCalendar("T", {})
+    start, end = date(2026, 1, 5), date(2026, 6, 30)
+    days = _weekdays(start, end)
+    outage = date(2026, 3, 10)
+    obs = [d for d in days if d != outage]
+    r = validate_series_coverage(
+        "X", obs, cal, start, end, unconfirmed_closures={outage: "inferred"}
+    )
+    assert r.gaps[0].classification == "unconfirmed_market_wide_absence"
+    assert r.observed_expected_sessions == len(days) - 1  # still counted missing
+    assert r.status == "warn" and not r.failures
+
+
+def test_confirmed_ngx_closures_are_in_the_calendar_and_inferred_ones_are_not():
+    from app.historical_data.calendars import ngx_calendar
+
+    cal = ngx_calendar(date(2024, 1, 1), date(2026, 12, 31))
+    assert not cal.is_session(date(2024, 4, 10))   # declared Eid-el-Fitr
+    assert not cal.is_session(date(2026, 3, 20))   # declared Eid-ul-Fitr
+    assert cal.is_session(date(2024, 6, 17))       # inferred only: stays a session
+
+
+def test_listing_references_verified():
+    from app.simulations.config.instrument_reference import INSTRUMENT_REFERENCE
+
+    assert INSTRUMENT_REFERENCE["AIRTELAFRI"].listing_date == date(2019, 7, 9)
+    assert all(r.verified for r in INSTRUMENT_REFERENCE.values())
+def test_cbn_official_rates_parse_and_normalise_currency_labels():
+    from app.historical_data.cbn import RATE_KIND, parse_cbn_rates
+
+    rows = [
+        {"id": 1, "currency": "US DOLLAR ", "ratedate": "2023-06-13",
+         "buyingrate": "463.88", "centralrate": "464.38", "sellingrate": "464.88"},
+        {"id": 2, "currency": "US DOLLAR", "ratedate": "2023-06-14",
+         "buyingrate": "471.17", "centralrate": "471.67", "sellingrate": "472.17"},
+        {"id": 3, "currency": "EURO\t", "ratedate": "2023-06-14",
+         "buyingrate": "500", "centralrate": "501", "sellingrate": "502"},
+    ]
+    usd = parse_cbn_rates(rows, "USD", date(2023, 1, 1), date(2023, 12, 31))
+    assert [r.rate for r in usd.rates] == [464.38, 471.67]
+    assert usd.data_quality_summary["rate_kind"] == RATE_KIND == "official_reference"
+    sell = parse_cbn_rates(rows, "USD", date(2023, 1, 1), date(2023, 12, 31), "selling")
+    assert sell.rates[0].rate == 464.88
+    assert len(parse_cbn_rates(rows, "EUR", date(2023, 1, 1), date(2023, 12, 31)).rates) == 1
+
+
+def test_corporate_action_screen_keeps_unexplained_moves_and_adjusts_verified_only():
+    from app.historical_data.corporate_actions import (
+        CorporateAction,
+        adjust_for_actions,
+        screen_extreme_moves,
+    )
+    from app.historical_data.models import HistoricalBar
+
+    closes = [100, 100, 83.4, 83, 70, 70, 50]  # day 2: 1-for-5 bonus; day 4: crash; day 6: news
+    d0 = date(2024, 3, 4)
+    bars = [HistoricalBar("X", d0 + timedelta(days=i), c, c, c, c, volume=1000.0)
+            for i, c in enumerate(closes)]
+    bonus = CorporateAction("X", d0 + timedelta(days=2), "bonus", 5 / 6, "test bulletin")
+    disclosures = [{"title": "Notice of rights issue qualification date",
+                    "disclosed_at": (d0 + timedelta(days=1)).isoformat()}]
+    moves = screen_extreme_moves("X", bars, actions=[bonus], disclosures=disclosures)
+    kinds = {m.date: m.classification for m in moves}
+    assert kinds[d0 + timedelta(days=2)] == "verified_corporate_action"
+    assert kinds[d0 + timedelta(days=4)] == "disclosure_candidate"  # flagged, not removed
+    adjusted = adjust_for_actions(bars, [bonus])
+    assert adjusted[0].close == pytest.approx(100 * 5 / 6)
+    assert adjusted[2].close == 83.4  # on and after the ex-date unchanged
+    assert len(adjusted) == len(bars)
+    # Without disclosures or actions every move is a genuine market move.
+    assert {m.classification for m in screen_extreme_moves("X", bars)} == {"market_move"}
