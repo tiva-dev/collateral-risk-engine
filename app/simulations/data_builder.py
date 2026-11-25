@@ -287,6 +287,7 @@ def _coverage_for(
     start: date,
     end: date,
     symbol: str | None = None,
+    unconfirmed: dict[date, str] | None = None,
 ) -> CoverageReport:
     ref = reference_for(symbol) if symbol else None
     return validate_series_coverage(
@@ -298,6 +299,7 @@ def _coverage_for(
         listing_date=ref.listing_date if ref else None,
         listing_verified=ref.verified if ref else False,
         suspensions=[(s.start, s.end, s.reason) for s in ref.suspensions] if ref else (),
+        unconfirmed_closures=unconfirmed,
     )
 
 
@@ -642,11 +644,20 @@ class OfficialDatasetBuilder:
                 if not observed:
                     continue
                 cal = base(start_date, end)
-                closures = infer_market_closures(cal, observed, start_date, end)
-                inferred_closures[market] = {d.isoformat(): why for d, why in closures.items()}
-                cal = cal.with_closures(closures)
+                # Confirmed closures are already in the calendar; inferred
+                # ones stay sessions and are labelled, not excused.
+                candidates = infer_market_closures(cal, observed, start_date, end)
+                inferred_closures[market] = {
+                    "unconfirmed": {d.isoformat(): why for d, why in candidates.items()},
+                    "confirmed_in_calendar": sorted(
+                        d.isoformat() for d in cal.holidays if start_date <= d <= end
+                        and "confirmed" in cal.holidays[d]
+                    ),
+                }
                 for s, dates in observed.items():
-                    coverage_reports[s] = _coverage_for(s, dates, cal, start_date, end, s)
+                    coverage_reports[s] = _coverage_for(
+                        s, dates, cal, start_date, end, s, unconfirmed=candidates
+                    )
             for provider_name, pairs in fx_by_provider.items():
                 cal = FX_CALENDARS[provider_name](start_date, end)
                 for pair, series in pairs.items():

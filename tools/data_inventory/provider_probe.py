@@ -45,34 +45,31 @@ def ngn(path: str) -> None:
 
 
 def main() -> None:
-    for sym in ("ZENITHBANK", "GTCO", "UBA", "ACCESSCORP", "DANGSUGAR", "MTNN", "SEPLAT"):
-        ngn(f"/companies/{sym}/dividends")
-    for path in ("/companies/ZENITHBANK/corporate-actions", "/companies/ZENITHBANK/actions",
-                 "/companies/ZENITHBANK/bonus", "/companies/ZENITHBANK/splits",
-                 "/companies/ZENITHBANK", "/forex/current"):
-        ngn(path)
-    for url in ("https://docs.ngnmarket.com/introduction", "https://docs.ngnmarket.com/llms.txt",
-                "https://docs.ngnmarket.com/llms-full.txt"):
+    ngn("/disclosures/categories")
+    ngn("/companies/GTCO/disclosures?category=rights_and_bonus&limit=5")
+    ngn("/companies/GTCO/disclosures?limit=3")
+    ngn("/market/holidays")
+    for url in ("https://www.cbn.gov.ng/api/GetAllNFEM_RatesGRAPH",
+                "https://www.cbn.gov.ng/api/GetAllExchangeRatesGRAPH"):
         code, body = get(url)
-        text = re.sub(r"<[^>]+>", " ", body)
-        text = re.sub(r"\s+", " ", text)
-        hits = [m.start() for m in re.finditer(
-            r"(?i)forex/history|exchange rate|rate_date|source:|official|nfem|nafem|parallel|cbn|dividend|bonus|split|adjust", text)]
-        print(f"\n### docs {url} -> HTTP {code}, {len(text)} chars, {len(hits)} mentions")
-        seen = -1000
-        for h in hits:
-            if h - seen < 300:
-                continue
-            seen = h
-            print("   ...", text[max(0, h - 200): h + 300])
-    for url in ("https://www.cbn.gov.ng/rates/ExchRateByCurrency.html",
-                "https://www.cbn.gov.ng/api/GetAllExchangeRates",
-                "https://www.cbn.gov.ng/api/GetAllNFEMRates"):
-        code, body = get(url)
-        refs = sorted(set(re.findall(r"""["'(]([^"'()\s]*(?:api|json|\.asp|ashx|getdata)[^"'()\s]*)["')]""", body, re.I)))
-        print(f"\n### CBN {url} -> HTTP {code}, {len(body)} bytes; data refs: {refs[:25]}")
-        print("   head:", re.sub(r"\s+", " ", body[:700]))
-    manifest = sys.argv[1] if len(sys.argv) > 1 else None
+        print(f"\n### CBN {url} -> HTTP {code}, {len(body)} bytes")
+        try:
+            data = json.loads(body)
+            rows = data if isinstance(data, list) else data.get("data", [])
+            print("   rows", len(rows), "first", rows[:2], "last", rows[-2:])
+        except Exception as exc:  # noqa: BLE001
+            print("   not json", exc, body[:300])
+    code, body = get("https://www.cbn.gov.ng/api/GetAllExchangeRates")
+    rows = json.loads(body)
+    usd = sorted((r for r in rows if "DOLLAR" in r["currency"] and "US" in r["currency"]),
+                 key=lambda r: r["ratedate"])
+    print("\n### CBN all rates: currencies", sorted({r["currency"] for r in rows}))
+    print("   US DOLLAR rows", len(usd), "first", usd[:2], "last", usd[-2:])
+    years = {}
+    for r in usd:
+        years[r["ratedate"][:4]] = years.get(r["ratedate"][:4], 0) + 1
+    print("   per year", years)
+    manifest = None
     if manifest:
         from app.simulations.run_official_validation import _load_replay_inputs
 

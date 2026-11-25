@@ -84,6 +84,24 @@ def nyse_holidays(year: int) -> dict[date, str]:
     return h
 
 
+# NGX closures confirmed by a Federal Government declaration (Ministry of
+# Interior press release). Lunar holidays are declared each year, so they can
+# only enter the calendar once confirmed. Inferred closures that are not in
+# this table are treated as unconfirmed market-wide absences (they may be
+# provider outages). Each entry: date -> (holiday, source).
+_FMI = "Federal Ministry of Interior press release"
+CONFIRMED_NGX_CLOSURES: dict[date, tuple[str, str]] = {
+    date(2024, 4, 9): ("Eid-el-Fitr", f"{_FMI}, 7 Apr 2024"),
+    date(2024, 4, 10): ("Eid-el-Fitr", f"{_FMI}, 7 Apr 2024"),
+    date(2024, 4, 11): ("Eid-el-Fitr (additional day)", f"{_FMI}, 9 Apr 2024"),
+    date(2025, 6, 6): ("Eid-ul-Adha", f"{_FMI}, 2025"),
+    date(2025, 6, 9): ("Eid-ul-Adha", f"{_FMI}, 2025"),
+    date(2025, 9, 5): ("Eid-ul-Mawlid", f"{_FMI}, 3 Sep 2025"),
+    date(2026, 3, 19): ("Eid-ul-Fitr", f"{_FMI}, 17 Mar 2026"),
+    date(2026, 3, 20): ("Eid-ul-Fitr", f"{_FMI}, 17 Mar 2026"),
+}
+
+
 def ngx_rule_holidays(year: int) -> dict[date, str]:
     """Nigerian public holidays fixed by rule.
 
@@ -158,6 +176,9 @@ def ngx_calendar(start: date, end: date) -> SessionCalendar:
     hol: dict[date, str] = {}
     for y in _years(start, end):
         hol.update(ngx_rule_holidays(y))
+    for d, (name, source) in CONFIRMED_NGX_CLOSURES.items():
+        if start.year <= d.year <= end.year:
+            hol[d] = f"{name} (confirmed: {source})"
     return SessionCalendar("XNSA", hol)
 
 
@@ -179,7 +200,11 @@ def infer_market_closures(
     max_fraction_trading: float = 0.2,
     min_instruments: int = 5,
 ) -> dict[date, str]:
-    """Rule-calendar sessions on which almost no instrument has data.
+    """Candidate closures: calendar sessions on which almost no instrument has data.
+
+    These are candidates only. A simultaneous provider outage looks the same
+    as an exchange closure, so callers must not remove these sessions from the
+    calendar unless a closure is independently confirmed.
 
     A date is inferred as a market-wide closure when at most
     ``max_fraction_trading`` of the instruments that were already observed
