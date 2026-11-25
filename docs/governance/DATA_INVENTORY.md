@@ -15,6 +15,7 @@ Hobby plan, Alpaca IEX feed, Alpha Vantage free key).
 | Artifact, run 45665911547 (25 Nov 2026) | NGX 15 names x 38 sessions, USD/NGN 55 days | Expires 23 Feb 2027 |
 | Artifacts, run 45669690566 (25 Nov 2026) | Full window, all providers; snapshot `2cbfe971849c35fc11268ba941a8b66dc955022240b2d6d588bcaeab90716f58`, 70 files, 89.5 MB | Expires 23 Feb 2027 |
 | Artifacts, run 45673315376 (25 Nov 2026) | Same window with volume provenance; snapshot `4308c6ca57eb19c59247827574db842dca391e01b419b3491770dec78b109bcf`, 70 files, 92.1 MB, verified | Expires 23 Feb 2027; used by the research run |
+| Artifacts, run 45681534542 (25 Nov 2026) | Full window plus CBN official rates and the corporate-action screen; snapshot `3410aba88472a047143e2c392f50071c387ba1914b033fba28c2e8de629c5205`, 112.7 MB, verified | Expires 23 Feb 2027; used by the reworked research run |
 | Actions caches | One entry, 66 KB (`official-provider-cache-v1-2026-10-01-2026-11-24`) | Not a durable store |
 
 No historical data is committed to git, by design (licensing).
@@ -39,6 +40,33 @@ is not needed for NGX equity depth.** NGNMarket's FX start date
 (2023-10-18) matches no plan depth (two years would be 2024-11, five years
 2021-11), so an upgrade is unlikely to extend FX history. Ask NGNMarket
 support before paying for one.
+
+## 3a. Official reference rate (CBN), added 25 Nov 2026
+
+The CBN's public JSON feed gives official buying/central/selling rates for
+USD from 2001 (about 245 days a year); 2018–2026 coverage on a weekday
+calendar is 93.7% (Nigerian holidays explain most gaps). Against it, on
+common dates (run 45681534542):
+
+| Pair | Comparison | Median diff | Days > 5% | Max diff | Daily-change correlation |
+|---|---|---|---|---|---|
+| USD/NGN | Alpha Vantage vs CBN | 0.44% | 596 of 2,017 | 34% (2024-01-30) | 0.21 |
+| USD/NGN | NGNMarket vs CBN | — | 106 of 766 | 51% (2024-01-31) | −0.09 |
+| USD/NGN | NGNMarket vs Alpha Vantage | 1.5% | 70 of 800 | 33% | 0.016 |
+
+See `FX_SOURCES.md` for what each rate is and why none is an executable
+conversion rate.
+
+## 3b. Corporate-action screen
+
+NGNMarket's dividend endpoint needs a Starter plan (not purchased). Its free
+disclosures feed is used instead: 0–618 disclosures per name. Of NGX one-day
+moves beyond 10% (most are exactly at the ±10% daily band), 11 fall within 30
+days after a dividend or similar disclosure and are flagged for
+verification (e.g. ZENITHBANK −23% on 2020-03-10, UBA −17.9% on 2020-03-16);
+the rest are treated as market moves. No action is verified yet, so no
+prices are adjusted. DANGSUGAR, NESTLE, OANDO, SEPLAT and NB returned no
+disclosures: a remaining corporate-action coverage gap.
 
 ## 3. Source disagreement: USD/NGN
 
