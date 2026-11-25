@@ -250,7 +250,13 @@ def imputation_summary(series: HistoricalSeries) -> dict[str, object]:
     with_provenance = 0
     no_trade = 0
     bars_with_imputed_range = 0
+    volume_missing = 0
+    first_reported_volume = None
     for bar in series.bars:
+        if bar.field_provenance.get("volume") == "missing":
+            volume_missing += 1
+        elif bar.field_provenance.get("volume") and first_reported_volume is None:
+            first_reported_volume = _day(bar.timestamp).isoformat()
         if bar.field_provenance:
             with_provenance += 1
         for f in bar.imputed_fields():
@@ -265,6 +271,8 @@ def imputation_summary(series: HistoricalSeries) -> dict[str, object]:
         "imputed_by_field": by_field,
         "bars_with_imputed_range": bars_with_imputed_range,
         "no_trade_bars": no_trade,
+        "volume_missing_bars": volume_missing,
+        "first_reported_volume": first_reported_volume,
         "provenance_values": sorted(
             {v for b in series.bars for v in b.field_provenance.values()}
             - {PROVENANCE_REPORTED}

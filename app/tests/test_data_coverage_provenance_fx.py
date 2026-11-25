@@ -507,3 +507,23 @@ def test_snapshot_round_trip_and_tamper_detection(tmp_path):
     victim.write_text("{}")
     bad = verify_snapshot(root)
     assert not bad["ok"] and "checksum mismatch" in bad["problems"][0]
+
+
+def test_null_volume_is_recorded_as_missing_not_zero(ngn):
+    rows = [
+        {"date": "2019-05-15", "open": 90, "high": 91, "low": 89, "close": 90,
+         "volume": None, "value_traded": None, "trade_count": None},
+        {"date": "2026-11-24", "open": 90, "high": 91, "low": 89, "close": 90,
+         "volume": 1000, "value_traded": 90000.0, "trade_count": 3},
+    ]
+    series = ngn.parse_company_chart("MTNN", _chart(rows), date(2019, 1, 1), date(2026, 12, 1))
+    old, new = series.bars
+    assert old.field_provenance["volume"] == "missing"
+    assert old.field_provenance["value_traded"] == "missing"
+    assert old.trade_status == "unknown"
+    assert new.field_provenance["volume"] == PROVENANCE_REPORTED
+    from app.simulations.data_builder import imputation_summary
+
+    summary = imputation_summary(series)
+    assert summary["volume_missing_bars"] == 1
+    assert summary["first_reported_volume"] == "2026-11-24"

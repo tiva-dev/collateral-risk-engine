@@ -139,6 +139,9 @@ class AlphaVantageHistoricalProvider(HistoricalDataProvider):
                                     if adjusted not in (None, "")
                                     else "missing"
                                 ),
+                                "volume": (
+                                    "reported" if volume not in (None, "") else "missing"
+                                ),
                             },
                             trade_status=(
                                 TRADE_STATUS_UNKNOWN

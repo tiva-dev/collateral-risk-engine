@@ -12,6 +12,7 @@ from app.market_data.identity import InstrumentIdentity
 from .cache import HistoricalDataCache
 from .config import load_config
 from .models import (
+    PROVENANCE_REPORTED,
     TRADE_STATUS_NO_TRADE,
     TRADE_STATUS_TRADED,
     TRADE_STATUS_UNKNOWN,
@@ -129,6 +130,11 @@ class AlpacaTradingHistoricalProvider(HistoricalDataProvider):
                     continue
                 values, provenance = parsed
                 volume = b.get("v")
+                # Volume is per feed: with the IEX feed it covers the IEX venue
+                # only (a few percent of consolidated volume).
+                provenance["volume"] = (
+                    PROVENANCE_REPORTED if volume not in (None, "") else "missing"
+                )
                 bars.append(
                     HistoricalBar(
                         instrument=instrument,

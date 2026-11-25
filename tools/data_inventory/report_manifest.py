@@ -22,8 +22,8 @@ def main(path: str) -> int:
         gaps = r.get("gaps") or []
         note = (r.get("failures") or r.get("warnings") or [""])[0]
         print(
-            f"{name:26} {r['status']:6} {str(r.get('first_observation')):10} "
-            f"{str(r.get('last_observation')):10} {r['expected_sessions']:>5} "
+            f"{name:26} {r['status']:6} {r.get('first_observation')!s:10} "
+            f"{r.get('last_observation')!s:10} {r['expected_sessions']:>5} "
             f"{r['observed_expected_sessions']:>5} {r['coverage_ratio']:>6.3f} "
             f"{r['start_lag_sessions']:>5} {len(gaps):>4} "
             f"{max((g['sessions'] for g in gaps), default=0):>6} {note[:110]}"
@@ -40,7 +40,8 @@ def main(path: str) -> int:
     print("== OHLC imputation")
     for sym, s in sorted((m.get("imputation_summary") or {}).items()):
         print(f"  {sym:12} bars={s['bars']:>5} imputed={s['imputed_by_field']} "
-              f"imputed_range_bars={s['bars_with_imputed_range']} no_trade={s['no_trade_bars']}")
+              f"imputed_range_bars={s['bars_with_imputed_range']} no_trade={s['no_trade_bars']} "
+              f"volume_missing={s.get('volume_missing_bars')} first_volume={s.get('first_reported_volume')}")
     print("== missing", m.get("missing_symbols"))
     for k, v in sorted((m.get("missing_symbol_reasons") or {}).items()):
         print(f"  {k}: {v}")
