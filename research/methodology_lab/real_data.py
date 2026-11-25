@@ -292,10 +292,12 @@ def run_book(
         ratios["flat"] = flat
         exec_days = float(methods.execution_days(f, pol).max())
         if exec_days > MAX_EXEC_DAYS:
-            # Position cannot be sold within a year at the participation cap:
-            # the risk-based methods lend nothing. Maintenance uses A's form.
-            ratios["A"] = ratios["B"] = ratios["B_gap"] = 0.0
-            h_b = 0.99
+            # Position cannot be sold within MAX_EXEC_DAYS at the participation
+            # cap. The risk-based methods lend nothing and there is no common
+            # maintenance standard to monitor the others against, so the
+            # cohort is recorded as unlendable and excluded from all methods.
+            info["unlendable_cohorts"] = info.get("unlendable_cohorts", 0) + 1
+            continue
         else:
             ratios["A"], _ = methods.approach_a(f, pol, ALPHA, cap)
             ell_b, h_b = methods.approach_b(f, pol, ALPHA, cap, rng, n_paths=2000)
@@ -313,6 +315,7 @@ def run_book(
                         "t0": panel["dates"][t0].isoformat(), "method": method, "ltv0": 0.0,
                         "loss": 0.0, "loss_rate": 0.0, "liquidated": False,
                         "unnecessary": False, "cf_loss": 0.0, "exec_days": exec_days,
+                        "symbol": syms[0] if n == 1 else "portfolio",
                     }
                 )
                 continue
@@ -334,7 +337,7 @@ def run_book(
                     "liquidated": first_sale >= 0,
                     "unnecessary": bool(first_sale >= 0 and cushion_cf[first_sale:].min() >= 0),
                     "cf_loss": float(cf["loss"][0]),
-                    "exec_days": exec_days,
+                    "exec_days": exec_days, "symbol": "+".join(syms) if n == 1 else "portfolio",
                 }
             )
     return rows, info
@@ -450,6 +453,40 @@ def main() -> None:
     print("\t".join(cols))
     for s in summary:
         print("\t".join(str(s[c]) for c in cols))
+    # Where losses come from: by origination year and by instrument.
+    print("LOSS BREAKDOWN (loss events / loss per principal %)")
+    for kind in ("single", "single_advbackfill"):
+        for market in ("NGX", "US"):
+            for size in ("retail", "institutional"):
+                sel = [r for r in rows if r["book_kind"] == kind and r["market"] == market
+                       and r["size"] == size]
+                if not sel:
+                    continue
+                for method in ("v070", "flat", "A", "B", "B_gap"):
+                    rs = [r for r in sel if r["method"] == method]
+                    by_year: dict[str, list] = defaultdict(lambda: [0, 0.0, 0.0])
+                    by_sym: dict[str, list] = defaultdict(lambda: [0, 0.0])
+                    for r in rs:
+                        y = by_year[r["t0"][:4]]
+                        y[0] += r["loss"] > 1e-9
+                        y[1] += r["loss"]
+                        y[2] += r["ltv0"]
+                        if r["loss"] > 1e-9:
+                            by_sym[r["symbol"]][0] += 1
+                            by_sym[r["symbol"]][1] += r["loss_rate"]
+                    years = " ".join(
+                        f"{k}:{v[0]}/{100 * v[1] / max(v[2], 1e-12):.2f}"
+                        for k, v in sorted(by_year.items()) if v[0]
+                    )
+                    syms_txt = " ".join(
+                        f"{k}:{v[0]}(max {100 * v[1] / v[0]:.1f}% avg)"
+                        for k, v in sorted(by_sym.items(), key=lambda kv: -kv[1][0])[:5]
+                    )
+                    print(f"  {market} {kind} {size} {method}: years[{years}] names[{syms_txt}]")
+    unl = [b for b in meta["books"] if b.get("unlendable_cohorts")]
+    print("UNLENDABLE COHORTS (excluded from all methods):",
+          json.dumps([{k: b[k] for k in ("book", "size", "adv_mode", "unlendable_cohorts")}
+                      for b in unl]))
 
 
 if __name__ == "__main__":
