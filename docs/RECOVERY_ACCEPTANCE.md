@@ -1,5 +1,7 @@
 # Recovery acceptance record
 
+> **Evidence scope (added 25 Nov 2026).** Everything in this record describes **v0.6.2** (`main` 5898756; `app/` identical to the code of GitHub Actions run 30455533912). It is not evidence for v0.7.0, which has not completed provider-backed financial validation. The forced-liquidation result tests replay mechanics, not lender protection: the scenario sets collateral value to 1.08 × the drawn loan. See `docs/governance/VALIDATION_RECORD.md`.
+
 ## Economic definitions
 
 All monetary outputs use the engine's two-decimal `round_money` boundary policy. Holdings are aggregated before valuation by asset identifier, exchange, currency, asset type, and provider identifier.

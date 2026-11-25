@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  quality-gates:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -14,9 +14,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Run unit tests
-        run: python -m unittest discover -s app/tests
-      - name: Compile app
-        run: python -m compileall app
+      - name: Install runtime and pinned development dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run the full test suite (pytest collects unittest and pytest tests)
+        run: python -m pytest -q -rxX
+      - name: Fail if pytest collected fewer tests than unittest would
+        run: |
+          collected=$(python -m pytest --collect-only -q | grep -c '::')
+          echo "pytest collected ${collected} tests"
+          test "${collected}" -ge 195
+      - name: Ruff
+        run: python -m ruff check app research
+      - name: mypy
+        run: python -m mypy app
+      - name: Bandit (fail on medium or high severity)
+        run: python -m bandit -q -r app -x app/tests --severity-level medium
+      - name: Dependency vulnerability audit
+        run: python -m pip_audit -r requirements.txt
+      - name: Byte-compile
+        run: python -m compileall -q app research
+      - name: Build package
+        run: python -m build
