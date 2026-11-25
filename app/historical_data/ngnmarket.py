@@ -474,6 +474,27 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
             companies.extend(self._rows(self.parse_envelope(page)))
         return companies
 
+    def fetch_disclosures(self, symbol: str, force_refresh: bool = False) -> list[dict]:
+        """Every corporate disclosure for a company (free on all plans).
+
+        Used to screen extreme price moves for corporate actions; titles and
+        dates only, no document contents.
+        """
+        key = {"provider": self.provider_name, "symbol": symbol, "disclosures": True}
+        if not force_refresh and (c := self.cache.read("raw", **key)):
+            pages = c["data"]
+        else:
+            pages = self._request_pages(f"/companies/{symbol}/disclosures", {}, page_limit=100)
+            self.raw_response_paths.append(str(self.cache.write("raw", pages, **key)))
+        rows: list[dict] = []
+        for page in pages:
+            rows.extend(self._rows(self.parse_envelope(page)))
+        return [
+            {k: r.get(k) for k in ("title", "disclosed_at", "submission_type", "category", "document_url")}
+            for r in rows
+            if isinstance(r, dict)
+        ]
+
     def fetch_equity_history(
         self, instrument, start_date, end_date, interval="1d", force_refresh=False
     ):

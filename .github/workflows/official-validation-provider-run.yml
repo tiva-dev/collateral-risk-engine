@@ -20,7 +20,7 @@ on:
         required: true
         default: "all"
         type: choice
-        options: ["alpaca", "ngnmarket", "alpha_vantage", "all"]
+        options: ["alpaca", "ngnmarket", "alpha_vantage", "cbn", "all"]
       start_date:
         description: "Dataset start date"
         required: true

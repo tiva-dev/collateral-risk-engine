@@ -458,7 +458,9 @@ def test_builder_selects_fx_sources_and_flags_truncated_equities(tmp_path, monke
     # The unselected provider's USD/NGN cache is kept aside, not replayed.
     assert "alpha_vantage:USD/NGN.json" in m.alternate_fx_cache_paths
     assert "alpha_vantage:USD/NGN.json" not in m.cache_paths
-    assert m.fx_reconciliation["USD/NGN"]["median_abs_rel_diff"] == pytest.approx(0.01)
+    recon = m.fx_reconciliation["USD/NGN"]["ngnmarket vs alpha_vantage"]
+    assert recon["median_abs_rel_diff"] == pytest.approx(0.01)
+    assert sel["USD/NGN"]["rate_kind"] == "market_indicative"
     cov = m.coverage_validation
     assert cov["series"]["DANGCEM"]["status"] == "fail"
     assert "DANGCEM" in cov["summary"]["failing_series"]
@@ -575,3 +577,47 @@ def test_listing_references_verified():
 
     assert INSTRUMENT_REFERENCE["AIRTELAFRI"].listing_date == date(2019, 7, 9)
     assert all(r.verified for r in INSTRUMENT_REFERENCE.values())
+def test_cbn_official_rates_parse_and_normalise_currency_labels():
+    from app.historical_data.cbn import RATE_KIND, parse_cbn_rates
+
+    rows = [
+        {"id": 1, "currency": "US DOLLAR ", "ratedate": "2023-06-13",
+         "buyingrate": "463.88", "centralrate": "464.38", "sellingrate": "464.88"},
+        {"id": 2, "currency": "US DOLLAR", "ratedate": "2023-06-14",
+         "buyingrate": "471.17", "centralrate": "471.67", "sellingrate": "472.17"},
+        {"id": 3, "currency": "EURO\t", "ratedate": "2023-06-14",
+         "buyingrate": "500", "centralrate": "501", "sellingrate": "502"},
+    ]
+    usd = parse_cbn_rates(rows, "USD", date(2023, 1, 1), date(2023, 12, 31))
+    assert [r.rate for r in usd.rates] == [464.38, 471.67]
+    assert usd.data_quality_summary["rate_kind"] == RATE_KIND == "official_reference"
+    sell = parse_cbn_rates(rows, "USD", date(2023, 1, 1), date(2023, 12, 31), "selling")
+    assert sell.rates[0].rate == 464.88
+    assert len(parse_cbn_rates(rows, "EUR", date(2023, 1, 1), date(2023, 12, 31)).rates) == 1
+
+
+def test_corporate_action_screen_keeps_unexplained_moves_and_adjusts_verified_only():
+    from app.historical_data.corporate_actions import (
+        CorporateAction,
+        adjust_for_actions,
+        screen_extreme_moves,
+    )
+    from app.historical_data.models import HistoricalBar
+
+    closes = [100, 100, 83.4, 83, 70, 70, 50]  # day 2: 1-for-5 bonus; day 4: crash; day 6: news
+    d0 = date(2024, 3, 4)
+    bars = [HistoricalBar("X", d0 + timedelta(days=i), c, c, c, c, volume=1000.0)
+            for i, c in enumerate(closes)]
+    bonus = CorporateAction("X", d0 + timedelta(days=2), "bonus", 5 / 6, "test bulletin")
+    disclosures = [{"title": "Notice of rights issue qualification date",
+                    "disclosed_at": (d0 + timedelta(days=1)).isoformat()}]
+    moves = screen_extreme_moves("X", bars, actions=[bonus], disclosures=disclosures)
+    kinds = {m.date: m.classification for m in moves}
+    assert kinds[d0 + timedelta(days=2)] == "verified_corporate_action"
+    assert kinds[d0 + timedelta(days=4)] == "disclosure_candidate"  # flagged, not removed
+    adjusted = adjust_for_actions(bars, [bonus])
+    assert adjusted[0].close == pytest.approx(100 * 5 / 6)
+    assert adjusted[2].close == 83.4  # on and after the ex-date unchanged
+    assert len(adjusted) == len(bars)
+    # Without disclosures or actions every move is a genuine market move.
+    assert {m.classification for m in screen_extreme_moves("X", bars)} == {"market_move"}

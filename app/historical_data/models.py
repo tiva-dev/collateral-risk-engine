@@ -148,6 +148,8 @@ class HistoricalDatasetManifest:
     alternate_fx_cache_paths: list[str] = field(default_factory=list)
     # Per-series OHLC imputation counts.
     imputation_summary: dict[str, Any] = field(default_factory=dict)
+    # Extreme one-day moves and what explains them (corporate_actions.py).
+    corporate_action_screen: dict[str, Any] = field(default_factory=dict)
 
 
 def ohlc_with_provenance(

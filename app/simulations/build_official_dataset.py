@@ -24,7 +24,7 @@ def main():
     p.add_argument("--max-provider-calls", type=int)
     a = p.parse_args()
     providers = (
-        ["alpaca", "ngnmarket", "alpha_vantage"]
+        ["alpaca", "ngnmarket", "alpha_vantage", "cbn"]
         if a.providers == "all"
         else [x.strip() for x in a.providers.split(",") if x.strip()]
     )

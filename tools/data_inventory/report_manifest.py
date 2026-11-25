@@ -45,6 +45,16 @@ def main(path: str) -> int:
         print(f"  {sym:12} bars={s['bars']:>5} imputed={s['imputed_by_field']} "
               f"imputed_range_bars={s['bars_with_imputed_range']} no_trade={s['no_trade_bars']} "
               f"volume_missing={s.get('volume_missing_bars')} first_volume={s.get('first_reported_volume')}")
+    print("== corporate-action screen (moves beyond 10%)")
+    for sym, info in sorted((m.get("corporate_action_screen") or {}).items()):
+        moves = info.get("moves", [])
+        kinds = {}
+        for mv in moves:
+            kinds[mv["classification"]] = kinds.get(mv["classification"], 0) + 1
+        print(f"  {sym:12} disclosures={info.get('disclosures_scanned')} {kinds}")
+        for mv in moves:
+            if mv["classification"] != "market_move" or abs(mv["return"]) > 0.105:
+                print(f"      {mv['date']} {mv['return']:+.3f} {mv['classification']} {mv['explanation'][:100]}")
     print("== missing", m.get("missing_symbols"))
     for k, v in sorted((m.get("missing_symbol_reasons") or {}).items()):
         print(f"  {k}: {v}")
