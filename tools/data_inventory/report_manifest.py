@@ -29,8 +29,11 @@ def main(path: str) -> int:
             f"{max((g['sessions'] for g in gaps), default=0):>6} {note[:110]}"
         )
     closures = cov.get("inferred_market_closures") or {}
-    for market, days in closures.items():
-        print(f"== inferred {market} closures ({len(days)}):", ", ".join(sorted(days)))
+    for market, info in closures.items():
+        unconf = info.get("unconfirmed", info) if isinstance(info, dict) else {}
+        conf = info.get("confirmed_in_calendar", []) if isinstance(info, dict) else []
+        print(f"== {market} confirmed closures in calendar ({len(conf)}):", ", ".join(conf))
+        print(f"== {market} unconfirmed market-wide absences ({len(unconf)}):", ", ".join(sorted(unconf)))
     print("== fx source selection")
     for pair, s in sorted((m.get("fx_source_selection") or {}).items()):
         print(f"  {pair}: {s.get('selected_provider')} ({s.get('reason')}); candidates={s.get('candidates')}")

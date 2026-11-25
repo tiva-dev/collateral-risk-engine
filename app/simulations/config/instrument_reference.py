@@ -69,29 +69,34 @@ INSTRUMENT_REFERENCE: dict[str, InstrumentReference] = {
     "MTNN": InstrumentReference(
         "MTNN",
         listing_date=date(2019, 5, 16),
-        verified=False,
-        source="listing by introduction, May 2019 (to verify against NGX bulletin)",
+        verified=True,
+        source="NSE listing by introduction on the Premium Board, 16 May 2019 (NSE/MTN announcements)",
     ),
     "AIRTELAFRI": InstrumentReference(
         "AIRTELAFRI",
-        listing_date=date(2019, 7, 4),
-        verified=False,
-        source="NGX listing following June 2019 LSE IPO (to verify against NGX bulletin)",
+        # Previously recorded as 4 July 2019 (unverified). The NSE postponed
+        # the 5 July listing; shares listed on Tuesday 9 July 2019.
+        listing_date=date(2019, 7, 9),
+        verified=True,
+        source="NSE cross-border secondary listing, 9 July 2019 (NSE announcement)",
     ),
     "BUACEMENT": InstrumentReference(
         "BUACEMENT",
         listing_date=date(2020, 1, 9),
-        verified=False,
-        source="listing after CCNN merger, January 2020 (to verify against NGX bulletin)",
+        verified=True,
+        source="CCNN delisted and BUA Cement (formerly Obu Cement) listed, 9 January 2020",
         predecessor="CCNN",
+        predecessor_last_session=date(2020, 1, 8),
     ),
     "FIRSTHOLDCO": InstrumentReference(
         "FIRSTHOLDCO",
+        # Listed before 2018 as FBN Holdings; a name and ticker change only,
+        # so the series is continuous across the change.
         listing_date=None,
-        verified=False,
+        verified=True,
         source=(
-            "FBN Holdings renamed First HoldCo; ticker changed from FBNH. Whether "
-            "the provider carries pre-rename history under FIRSTHOLDCO is unverified"
+            "NGX Regulation market bulletin NGXREG/IRD/MB15/25/03/5, 5 March 2025: "
+            "FBN Holdings renamed First HoldCo, symbol FBNH -> FirstHoldCo"
         ),
         predecessor="FBNH",
     ),

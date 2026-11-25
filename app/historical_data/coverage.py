@@ -112,8 +112,19 @@ def validate_series_coverage(
     listing_date: date | None = None,
     listing_verified: bool = False,
     suspensions: Iterable[tuple[date, date, str]] = (),
+    unconfirmed_closures: Mapping[date, str] | None = None,
     policy: CoveragePolicy | None = None,
 ) -> CoverageReport:
+    """Judge one series against its calendar.
+
+    ``unconfirmed_closures`` are calendar sessions on which (almost) the whole
+    cross-section is missing but no exchange notice confirms a closure. They
+    could be holidays or a simultaneous provider outage, so they stay in the
+    expected sessions (they count as missing), are labelled
+    ``unconfirmed_market_wide_absence`` and are not counted towards the
+    unexplained-gap failure threshold.
+    """
+    unconfirmed = dict(unconfirmed_closures or {})
     policy = policy or CoveragePolicy()
     obs = sorted({_as_date(d) for d in observed})
     effective_start = max(requested_start, listing_date) if listing_date else requested_start
@@ -184,38 +195,56 @@ def validate_series_coverage(
             f"{report.end_lag_sessions} sessions before {requested_end.isoformat()}"
         )
 
-    # Internal gaps between first and last observation.
-    run: list[date] = []
+    # Internal gaps between first and last observation. A run of missing
+    # sessions is split wherever its explanation changes, so a run that only
+    # partly overlaps a suspension cannot excuse its unrelated sessions.
+    def label(d: date) -> tuple[str, str]:
+        why = suspended(d)
+        if why:
+            return "known_suspension", why
+        if d in unconfirmed:
+            return "unconfirmed_market_wide_absence", unconfirmed[d]
+        return "unexplained", ""
 
-    def close_run() -> None:
-        if not run:
+    segment: list[date] = []
+    segment_label: tuple[str, str] | None = None
+
+    def close_segment() -> None:
+        if not segment or segment_label is None:
             return
-        reasons = {suspended(d) for d in run} - {None}
-        classification = "known_suspension" if reasons else "unexplained"
-        countable = [d for d in run if not suspended(d)]
-        gap = CoverageGap(
-            run[0],
-            run[-1],
-            len(run),
-            classification,
-            "; ".join(sorted(r for r in reasons if r)),
+        classification, note = segment_label
+        report.gaps.append(
+            CoverageGap(segment[0], segment[-1], len(segment), classification, note)
         )
-        report.gaps.append(gap)
-        if classification == "unexplained" and len(countable) > policy.max_internal_gap_sessions:
+        if (
+            classification == "unexplained"
+            and len(segment) > policy.max_internal_gap_sessions
+        ):
             report.failures.append(
-                f"unexplained gap of {len(countable)} sessions "
-                f"{run[0].isoformat()}..{run[-1].isoformat()}"
+                f"unexplained gap of {len(segment)} sessions "
+                f"{segment[0].isoformat()}..{segment[-1].isoformat()}"
             )
-        run.clear()
+        segment.clear()
 
+    previous_missing = False
     for d in sessions:
         if d < obs[0] or d > obs[-1]:
             continue
         if d in obs_set:
-            close_run()
-        else:
-            run.append(d)
-    close_run()
+            close_segment()
+            segment_label = None
+            previous_missing = False
+            continue
+        lab = label(d)
+        if previous_missing and lab != segment_label:
+            close_segment()
+        segment_label = lab
+        segment.append(d)
+        previous_missing = True
+    close_segment()
+    # An unexplained gap can be interrupted only by a labelled day; adjacent
+    # unexplained segments split around a suspension are still reported
+    # separately, each against the threshold on its own.
 
     if report.coverage_ratio < policy.min_coverage_ratio:
         report.failures.append(
@@ -227,13 +256,19 @@ def validate_series_coverage(
             f"{off_calendar} observation(s) on dates the {calendar.name} calendar "
             "marks closed"
         )
-    unexplained_small = [
-        g for g in report.gaps if g.classification == "unexplained"
-    ]
+    unexplained_small = [g for g in report.gaps if g.classification == "unexplained"]
     if unexplained_small and not report.failures:
         report.warnings.append(
             f"{len(unexplained_small)} short unexplained gap(s), "
             f"{sum(g.sessions for g in unexplained_small)} session(s) in total"
+        )
+    market_wide = [
+        g for g in report.gaps if g.classification == "unconfirmed_market_wide_absence"
+    ]
+    if market_wide:
+        report.warnings.append(
+            f"{sum(g.sessions for g in market_wide)} session(s) missing across the "
+            "whole market without a confirmed closure (holiday or provider outage)"
         )
     report.status = (
         STATUS_FAIL if report.failures else STATUS_WARN if report.warnings else STATUS_PASS

@@ -527,3 +527,51 @@ def test_null_volume_is_recorded_as_missing_not_zero(ngn):
     summary = imputation_summary(series)
     assert summary["volume_missing_bars"] == 1
     assert summary["first_reported_volume"] == "2026-11-24"
+
+
+def test_partial_suspension_overlap_does_not_excuse_unrelated_sessions():
+    cal = SessionCalendar("T", {})
+    start, end = date(2026, 1, 1), date(2026, 6, 30)
+    all_days = _weekdays(start, end)
+    gap = set(_weekdays(date(2026, 3, 2), date(2026, 3, 27)))  # 20 sessions missing
+    obs = [d for d in all_days if d not in gap]
+    # A two-day suspension at the start of the run must not excuse the other 18.
+    r = validate_series_coverage(
+        "X", obs, cal, start, end,
+        suspensions=[(date(2026, 3, 2), date(2026, 3, 3), "two-day suspension")],
+    )
+    kinds = [(g.classification, g.sessions) for g in r.gaps]
+    assert ("known_suspension", 2) in kinds
+    assert ("unexplained", 18) in kinds
+    assert r.status == "fail"
+    assert any("unexplained gap of 18 sessions" in f for f in r.failures)
+
+
+def test_unconfirmed_market_wide_absence_is_labelled_and_counted_missing():
+    cal = SessionCalendar("T", {})
+    start, end = date(2026, 1, 5), date(2026, 6, 30)
+    days = _weekdays(start, end)
+    outage = date(2026, 3, 10)
+    obs = [d for d in days if d != outage]
+    r = validate_series_coverage(
+        "X", obs, cal, start, end, unconfirmed_closures={outage: "inferred"}
+    )
+    assert r.gaps[0].classification == "unconfirmed_market_wide_absence"
+    assert r.observed_expected_sessions == len(days) - 1  # still counted missing
+    assert r.status == "warn" and not r.failures
+
+
+def test_confirmed_ngx_closures_are_in_the_calendar_and_inferred_ones_are_not():
+    from app.historical_data.calendars import ngx_calendar
+
+    cal = ngx_calendar(date(2024, 1, 1), date(2026, 12, 31))
+    assert not cal.is_session(date(2024, 4, 10))   # declared Eid-el-Fitr
+    assert not cal.is_session(date(2026, 3, 20))   # declared Eid-ul-Fitr
+    assert cal.is_session(date(2024, 6, 17))       # inferred only: stays a session
+
+
+def test_listing_references_verified():
+    from app.simulations.config.instrument_reference import INSTRUMENT_REFERENCE
+
+    assert INSTRUMENT_REFERENCE["AIRTELAFRI"].listing_date == date(2019, 7, 9)
+    assert all(r.verified for r in INSTRUMENT_REFERENCE.values())
