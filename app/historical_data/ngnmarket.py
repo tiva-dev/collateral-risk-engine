@@ -277,6 +277,17 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                     )
                     trade_count = b.get("trade_count")
                     volume = b.get("volume", b.get("v"))
+                    # Older NGNMarket rows carry volume/value_traded/trade_count
+                    # keys with null values. Record that instead of letting
+                    # the bar's volume default to 0.0.
+                    provenance["volume"] = (
+                        PROVENANCE_REPORTED if volume not in (None, "") else "missing"
+                    )
+                    provenance["value_traded"] = (
+                        PROVENANCE_REPORTED
+                        if b.get("value_traded") not in (None, "")
+                        else "missing"
+                    )
                     if trade_count is not None or volume is not None:
                         traded = bool(trade_count) or bool(volume)
                         trade_status = (
