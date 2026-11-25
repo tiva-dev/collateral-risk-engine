@@ -22,7 +22,7 @@ jobs:
         run: |
           collected=$(python -m pytest --collect-only -q | grep -c '::')
           echo "pytest collected ${collected} tests"
-          test "${collected}" -ge 180
+          test "${collected}" -ge 195
       - name: Ruff
         run: python -m ruff check app research
       - name: mypy

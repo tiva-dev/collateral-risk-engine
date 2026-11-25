@@ -13,7 +13,7 @@ v0.6.2), h liquidation horizon in trading days, α confidence by risk appetite
 DQ data-quality score, s relative bid-ask spread, ADV average daily dollar
 volume.
 
-## v0.6.2 (this branch, `main`)
+## v0.6.2 (`main`)
 
 1. Stressed liquidation value, proxy branch (`liquidation/recovery.py`):
    SLV_i = q_i P_i (1 − min(0.95, s_i/2 + 0.08√(MV_i/ADV_i) + ES_α(σ_i, max(h_i,1)) + 0.25(1 − DQ_i))).
@@ -33,7 +33,7 @@ volume.
    advisories use cash-cure amounts as sale targets (known defect, see
    characterization tests).
 
-## v0.7.0 (PR #21, not merged, not validated)
+## v0.7.0 (this branch, PR #21: not merged, not validated)
 
 Differences from v0.6.2:
 

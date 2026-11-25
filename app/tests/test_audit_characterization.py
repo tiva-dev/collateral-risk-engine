@@ -161,3 +161,50 @@ def test_frequent_monitoring_ticks_preserve_interest() -> None:
     accrued = service.account_repo.get("interest").loan.accrued_interest
     expected = 10_000.0 * 0.10 * ticks * 30 / (365 * 86_400)
     assert accrued == pytest.approx(expected, abs=0.01)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="Audit H7: the recovery interest buffer ignores quoted periodic rates",
+)
+def test_interest_buffer_uses_normalized_rate() -> None:
+    from app.credit.interest import InterestPolicy
+    from app.liquidation.execution import projected_interest_buffer
+
+    terms = InterestPolicy(quoted_interest_rate=0.04, rate_period="monthly")
+    # The monitoring service passes ``annual_interest_rate`` to the buffer.
+    buffer = projected_interest_buffer(
+        Loan(principal=1_000_000.0), terms.annual_interest_rate, 5
+    )
+    expected = 1_000_000.0 * terms.normalized_annual_rate * 5 / 365
+    assert buffer == pytest.approx(expected, abs=0.01)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="Audit C4: execution caps fills at a fixed policy participation, not the CRI-derived rate",
+)
+def test_execution_participation_matches_cri_derived_rate() -> None:
+    from app.liquidation.execution import (
+        build_recovery_advisory,
+        execute_recovery_advisory,
+    )
+    from app.liquidation.policy import LiquidationExecutionPolicy
+    from app.risk.adjustments import derive_safe_participation_rate
+
+    holding = Holding("X", AssetType.LISTED_EQUITY, 1_000_000.0, "USD", "US")
+    market = _market(volatility_30d=0.9, volatility_90d=0.9, bid=97.0, ask=103.0)
+    derived = derive_safe_participation_rate(holding, market, 1_000_000.0 * 100.0)
+    policy = LiquidationExecutionPolicy()
+    advisory = build_recovery_advisory(
+        holdings=[holding], market_data={"X": market}, target_net_recovery=1e9,
+        policy=policy, trigger_state="liquidation", issued_date=market.timestamp.date(),
+    )
+    _, execution = execute_recovery_advisory(
+        holdings=[holding], market_data={"X": market}, advisory=advisory,
+        remaining_target=1e9, policy=policy, observation_date=market.timestamp.date(),
+    )
+    cap = execution["fills"][0]["participation_quantity_cap"]
+    assert cap == pytest.approx(market.average_daily_volume * derived, rel=1e-6)
