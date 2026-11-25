@@ -8,17 +8,37 @@ from datetime import UTC, date, datetime
 from app.historical_data.alpaca import AlpacaTradingHistoricalProvider
 from app.historical_data.alpha_vantage import AlphaVantageHistoricalProvider
 from app.historical_data.cache import HistoricalDataCache
+from app.historical_data.calendars import (
+    SessionCalendar,
+    fx_daily_calendar,
+    fx_weekday_calendar,
+    infer_market_closures,
+    ngx_calendar,
+    nyse_calendar,
+)
 from app.historical_data.config import load_config
+from app.historical_data.coverage import (
+    CoverageReport,
+    summarise,
+    validate_series_coverage,
+)
 from app.historical_data.manifest import write_manifest
 from app.historical_data.models import (
+    OHLC_FIELDS,
+    PROVENANCE_REPORTED,
+    TRADE_STATUS_NO_TRADE,
     HistoricalDatasetManifest,
     HistoricalFXRate,
     HistoricalFXSeries,
     HistoricalSeries,
     canonical_series_payload,
 )
-from app.historical_data.ngnmarket import NGNMarketHistoricalProvider
+from app.historical_data.ngnmarket import (
+    NGNMarketHistoricalProvider,
+    ngnmarket_supports_fx_pair,
+)
 from app.historical_data.providers import ProviderError
+from app.simulations.config.instrument_reference import reference_for
 from app.simulations.config.official_validation_universe import (
     FX_PAIRS,
     NGX_UNIVERSE,
@@ -33,6 +53,26 @@ DEFAULT_CALL_BUDGETS = {
     "alpaca": {"monthly": None, "max_per_run": 500},
 }
 INDEPENDENT_FX_PAIRS = ("USD/NGN", "EUR/USD")
+# Pairs each provider is asked for directly. NGNMarket quotes naira pairs only
+# (EUR/USD comes back empty), so it supplies EUR/NGN and EUR/USD is derived.
+PROVIDER_FX_PAIRS: dict[str, tuple[str, ...]] = {
+    "ngnmarket": ("USD/NGN", "EUR/NGN"),
+    "alpha_vantage": ("USD/NGN", "EUR/USD"),
+}
+# Provider precedence per pair when several providers supply it. Provisional:
+# which NGN reference rate governs valuation is a Tiva decision (see
+# docs/governance/ROADMAP.md). A provider is used only if its series passes
+# coverage validation; otherwise the next one is tried. Both series are kept
+# and reconciled either way.
+FX_SOURCE_PRECEDENCE: dict[str, tuple[str, ...]] = {
+    "USD/NGN": ("ngnmarket", "alpha_vantage"),
+    "NGN/USD": ("ngnmarket", "alpha_vantage"),
+    "EUR/NGN": ("ngnmarket", "alpha_vantage"),
+    "NGN/EUR": ("ngnmarket", "alpha_vantage"),
+    "EUR/USD": ("alpha_vantage", "ngnmarket"),
+    "USD/EUR": ("alpha_vantage", "ngnmarket"),
+}
+FX_CALENDARS = {"ngnmarket": fx_daily_calendar, "alpha_vantage": fx_weekday_calendar}
 
 
 def _inverse_fx_series(
@@ -130,6 +170,129 @@ def _cross_fx_series(
     )
 
 
+def derive_fx_set(
+    independent: dict[str, HistoricalFXSeries], targets: Iterable[str] = FX_PAIRS
+) -> dict[str, HistoricalFXSeries]:
+    """Derive every target pair from one provider's independent series.
+
+    Uses inverses and single-hop crosses only, so each derived rate traces to
+    at most two provider observations on the same date.
+    """
+    have = dict(independent)
+    targets = list(targets)
+    progress = True
+    while progress:
+        progress = False
+        for pair in targets:
+            if pair in have:
+                continue
+            fc, tc = pair.split("/")
+            inverse = have.get(f"{tc}/{fc}")
+            if inverse is not None:
+                have[pair] = _inverse_fx_series(inverse, fc, tc)
+                progress = True
+                continue
+            for mid_pair, first in list(have.items()):
+                a, mid = mid_pair.split("/")
+                second = have.get(f"{mid}/{tc}")
+                if a == fc and second is not None and mid not in (fc, tc):
+                    have[pair] = _cross_fx_series(first, second, fc, tc)
+                    progress = True
+                    break
+    return {k: v for k, v in have.items() if k not in independent}
+
+
+def reconcile_fx(
+    a: HistoricalFXSeries, b: HistoricalFXSeries
+) -> dict[str, object]:
+    """Compare two providers' series for the same pair on common dates."""
+    import math
+    from itertools import pairwise
+
+    ra = {_day(r.timestamp): r.rate for r in a.rates}
+    rb = {_day(r.timestamp): r.rate for r in b.rates}
+    common = sorted(set(ra) & set(rb))
+    out: dict[str, object] = {
+        "providers": [a.provider_name, b.provider_name],
+        "common_dates": len(common),
+        "only_first": len(set(ra) - set(rb)),
+        "only_second": len(set(rb) - set(ra)),
+    }
+    if not common:
+        return out
+    diffs = sorted(abs(rb[d] / ra[d] - 1.0) for d in common)
+    out["median_abs_rel_diff"] = round(diffs[len(diffs) // 2], 6)
+    out["p95_abs_rel_diff"] = round(diffs[min(len(diffs) - 1, int(0.95 * len(diffs)))], 6)
+    out["max_abs_rel_diff"] = round(diffs[-1], 6)
+    worst = max(common, key=lambda d: abs(rb[d] / ra[d] - 1.0))
+    out["max_diff_date"] = worst.isoformat()
+    out["days_diff_over_1pct"] = sum(x > 0.01 for x in diffs)
+    out["days_diff_over_5pct"] = sum(x > 0.05 for x in diffs)
+    rets_a = [math.log(ra[y] / ra[x]) for x, y in pairwise(common)]
+    rets_b = [math.log(rb[y] / rb[x]) for x, y in pairwise(common)]
+    if len(rets_a) > 2:
+        ma, mb = sum(rets_a) / len(rets_a), sum(rets_b) / len(rets_b)
+        cov = sum((x - ma) * (y - mb) for x, y in zip(rets_a, rets_b, strict=True))
+        va = sum((x - ma) ** 2 for x in rets_a)
+        vb = sum((y - mb) ** 2 for y in rets_b)
+        out["log_return_correlation"] = (
+            round(cov / math.sqrt(va * vb), 6) if va > 0 and vb > 0 else None
+        )
+    return out
+
+
+def _day(ts: date | datetime) -> date:
+    return ts.date() if isinstance(ts, datetime) else ts
+
+
+def imputation_summary(series: HistoricalSeries) -> dict[str, object]:
+    by_field = {f: 0 for f in OHLC_FIELDS}
+    with_provenance = 0
+    no_trade = 0
+    bars_with_imputed_range = 0
+    for bar in series.bars:
+        if bar.field_provenance:
+            with_provenance += 1
+        for f in bar.imputed_fields():
+            by_field[f] += 1
+        if bar.field_provenance and not bar.has_reported_range():
+            bars_with_imputed_range += 1
+        if bar.trade_status == TRADE_STATUS_NO_TRADE:
+            no_trade += 1
+    return {
+        "bars": len(series.bars),
+        "bars_with_field_provenance": with_provenance,
+        "imputed_by_field": by_field,
+        "bars_with_imputed_range": bars_with_imputed_range,
+        "no_trade_bars": no_trade,
+        "provenance_values": sorted(
+            {v for b in series.bars for v in b.field_provenance.values()}
+            - {PROVENANCE_REPORTED}
+        ),
+    }
+
+
+def _coverage_for(
+    name: str,
+    dates: list[date],
+    calendar: SessionCalendar,
+    start: date,
+    end: date,
+    symbol: str | None = None,
+) -> CoverageReport:
+    ref = reference_for(symbol) if symbol else None
+    return validate_series_coverage(
+        name,
+        dates,
+        calendar,
+        start,
+        end,
+        listing_date=ref.listing_date if ref else None,
+        listing_verified=ref.verified if ref else False,
+        suspensions=[(s.start, s.end, s.reason) for s in ref.suspensions] if ref else (),
+    )
+
+
 def _cache_derived_fx(
     cache: HistoricalDataCache,
     series: HistoricalFXSeries,
@@ -192,22 +355,12 @@ class OfficialDatasetBuilder:
                 }
                 for s in NGX_UNIVERSE
             ]
-        for pair in INDEPENDENT_FX_PAIRS:
-            if "ngnmarket" in self.provider_names:
+        for provider in ("ngnmarket", "alpha_vantage"):
+            if provider not in self.provider_names:
+                continue
+            for pair in PROVIDER_FX_PAIRS[provider]:
                 calls.append(
-                    {
-                        "provider": "ngnmarket",
-                        "operation": "fetch_fx_history",
-                        "pair": pair,
-                    }
-                )
-            if "alpha_vantage" in self.provider_names:
-                calls.append(
-                    {
-                        "provider": "alpha_vantage",
-                        "operation": "fetch_fx_history",
-                        "pair": pair,
-                    }
+                    {"provider": provider, "operation": "fetch_fx_history", "pair": pair}
                 )
         return calls
 
@@ -271,6 +424,13 @@ class OfficialDatasetBuilder:
         earliest = {}
         identities = {}
         coverage = {}
+        coverage_validation: dict = {}
+        fx_selection: dict = {}
+        fx_recon: dict = {}
+        alternate_fx_paths: list[str] = []
+        imputations: dict = {}
+        inferred_closures: dict = {}
+        equity_series: dict[str, HistoricalSeries] = {}
         planned_counts = self.estimate_call_counts()
         budget_summary = (
             self.enforce_call_budgets(override_quota, max_provider_calls)
@@ -368,6 +528,7 @@ class OfficialDatasetBuilder:
                         identities[symbol] = asdict(series.instrument_identity)
                     if isinstance(series, HistoricalSeries) and series.bars:
                         earliest[symbol] = min(b.timestamp for b in series.bars)
+                        equity_series[symbol] = series
                     if isinstance(series, HistoricalFXSeries) and series.rates:
                         earliest[symbol] = min(r.timestamp for r in series.rates)
                     return series
@@ -411,87 +572,133 @@ class OfficialDatasetBuilder:
                         s, start_date, end, force_refresh=force_refresh
                     ),
                 )
-            provider_fx: dict[tuple[str, str], HistoricalFXSeries] = {}
-            for pair in INDEPENDENT_FX_PAIRS:
-                fc, tc = pair.split("/")
-                if "ngnmarket" in self.provider_names:
-                    series = record(
-                        "ngnmarket",
-                        pair,
-                        lambda fc=fc, tc=tc: providers["ngnmarket"].fetch_fx_history(
-                            fc, tc, start_date, end, force_refresh=force_refresh
-                        ),
-                    )
-                    if isinstance(series, HistoricalFXSeries):
-                        provider_fx[("ngnmarket", pair)] = series
-                if "alpha_vantage" in self.provider_names:
-                    series = record(
-                        "alpha_vantage",
-                        pair,
-                        lambda fc=fc, tc=tc: providers[
-                            "alpha_vantage"
-                        ].fetch_fx_history(
-                            fc, tc, start_date, end, force_refresh=force_refresh
-                        ),
-                    )
-                    if isinstance(series, HistoricalFXSeries):
-                        provider_fx[("alpha_vantage", pair)] = series
+            fx_by_provider: dict[str, dict[str, HistoricalFXSeries]] = {}
+            fx_cache_path: dict[tuple[str, str], list[str]] = {}
+
+            def fetch_fx(provider_name: str, pair: str, fn, derived=False):
+                prov = providers[provider_name]
+                before = len(prov.cache_paths)
+                series = record(provider_name, f"{pair}@{provider_name}", fn, derived=derived)
+                fx_cache_path[(provider_name, pair)] = prov.cache_paths[before:]
+                if isinstance(series, HistoricalFXSeries) and series.rates:
+                    fx_by_provider.setdefault(provider_name, {})[pair] = series
 
             for provider_name in ("ngnmarket", "alpha_vantage"):
                 if provider_name not in self.provider_names:
                     continue
-                usd_ngn = provider_fx.get((provider_name, "USD/NGN"))
-                eur_usd = provider_fx.get((provider_name, "EUR/USD"))
-                derived_series: list[HistoricalFXSeries] = []
-                if usd_ngn:
-                    derived_series.append(
-                        _inverse_fx_series(usd_ngn, "NGN", "USD")
+                for pair in PROVIDER_FX_PAIRS[provider_name]:
+                    fc, tc = pair.split("/")
+                    if provider_name == "ngnmarket" and not ngnmarket_supports_fx_pair(fc, tc):
+                        continue
+                    fetch_fx(
+                        provider_name,
+                        pair,
+                        lambda fc=fc, tc=tc, pn=provider_name: providers[
+                            pn
+                        ].fetch_fx_history(
+                            fc, tc, start_date, end, force_refresh=force_refresh
+                        ),
                     )
-                if eur_usd:
-                    derived_series.append(
-                        _inverse_fx_series(eur_usd, "USD", "EUR")
-                    )
-                if usd_ngn and eur_usd:
-                    eur_ngn = _cross_fx_series(
-                        eur_usd, usd_ngn, "EUR", "NGN"
-                    )
-                    derived_series.extend(
-                        [
-                            eur_ngn,
-                            _inverse_fx_series(eur_ngn, "NGN", "EUR"),
-                        ]
-                    )
-                derived_by_pair = {
-                    f"{series.from_currency}/{series.to_currency}": series
-                    for series in derived_series
-                }
-                for pair in (
-                    "NGN/USD",
-                    "USD/EUR",
-                    "EUR/NGN",
-                    "NGN/EUR",
-                ):
-                    series = derived_by_pair.get(pair)
+                independent = dict(fx_by_provider.get(provider_name, {}))
+                derived_set = derive_fx_set(independent)
+                for pair in FX_PAIRS:
+                    if pair in independent or pair in PROVIDER_FX_PAIRS[provider_name]:
+                        continue
+                    series = derived_set.get(pair)
                     if series is None:
-                        record(
+                        fetch_fx(
                             provider_name,
                             pair,
-                            lambda pair=pair, provider_name=provider_name: (
-                                _raise_missing_derived_fx(pair, provider_name)
+                            lambda pair=pair, pn=provider_name: (
+                                _raise_missing_derived_fx(pair, pn)
                             ),
                             derived=True,
                         )
                         continue
                     provider = providers[provider_name]
-                    provider.cache_paths.append(
-                        _cache_derived_fx(provider.cache, series)
+                    provider.cache_paths.append(_cache_derived_fx(provider.cache, series))
+                    fetch_fx(provider_name, pair, lambda series=series: series, derived=True)
+
+            # Coverage validation. NGX and NYSE calendars are extended with
+            # market-wide closures inferred from the cross-section.
+            coverage_reports: dict[str, CoverageReport] = {}
+            for market, universe, base in (
+                ("ngx", NGX_UNIVERSE, ngx_calendar),
+                ("us", US_UNIVERSE, nyse_calendar),
+            ):
+                observed = {
+                    s: [_day(b.timestamp) for b in equity_series[s].bars]
+                    for s in universe
+                    if s in equity_series
+                }
+                if not observed:
+                    continue
+                cal = base(start_date, end)
+                closures = infer_market_closures(cal, observed, start_date, end)
+                inferred_closures[market] = {d.isoformat(): why for d, why in closures.items()}
+                cal = cal.with_closures(closures)
+                for s, dates in observed.items():
+                    coverage_reports[s] = _coverage_for(s, dates, cal, start_date, end, s)
+            for provider_name, pairs in fx_by_provider.items():
+                cal = FX_CALENDARS[provider_name](start_date, end)
+                for pair, series in pairs.items():
+                    key = f"{pair}@{provider_name}"
+                    coverage_reports[key] = _coverage_for(
+                        key, [_day(r.timestamp) for r in series.rates], cal, start_date, end
                     )
-                    record(
-                        provider_name,
-                        pair,
-                        lambda series=series: series,
-                        derived=True,
+
+            # FX source selection and reconciliation.
+            for pair in FX_PAIRS:
+                candidates = [
+                    pn for pn in FX_SOURCE_PRECEDENCE.get(pair, ())
+                    if pair in fx_by_provider.get(pn, {})
+                ]
+                passing = [
+                    pn for pn in candidates
+                    if coverage_reports[f"{pair}@{pn}"].status != "fail"
+                ]
+                chosen = passing[0] if passing else (candidates[0] if candidates else None)
+                fx_selection[pair] = {
+                    "selected_provider": chosen,
+                    "candidates": candidates,
+                    "reason": (
+                        "first provider in precedence passing coverage"
+                        if passing
+                        else "no candidate passes coverage; first available used"
+                        if candidates
+                        else "no provider supplied this pair"
+                    ),
+                    "precedence": list(FX_SOURCE_PRECEDENCE.get(pair, ())),
+                }
+                if chosen is None:
+                    missing.append(pair)
+                    reasons[pair] = "no provider supplied this pair"
+                    continue
+                selected_series = fx_by_provider[chosen][pair]
+                earliest[pair] = min(r.timestamp for r in selected_series.rates)
+                coverage_reports[pair] = coverage_reports[f"{pair}@{chosen}"]
+                for pn in candidates:
+                    paths = fx_cache_path.get((pn, pair), [])
+                    if pn != chosen:
+                        alternate_fx_paths.extend(paths)
+                if len(candidates) > 1:
+                    fx_recon[pair] = reconcile_fx(
+                        fx_by_provider[candidates[0]][pair],
+                        fx_by_provider[candidates[1]][pair],
                     )
+            for k in list(earliest):
+                if "@" in k:
+                    del earliest[k]
+            missing[:] = [m for m in missing if "@" not in m or m.split("@")[0] not in earliest]
+            coverage_validation["series"] = {
+                k: r.to_dict() for k, r in sorted(coverage_reports.items())
+            }
+            coverage_validation["summary"] = summarise(
+                {k: r for k, r in coverage_reports.items() if "@" not in k}
+            )
+            coverage_validation["inferred_market_closures"] = inferred_closures
+            for s, series in equity_series.items():
+                imputations[s] = imputation_summary(series)
             for k, v in providers.items():
                 if k in self.provider_names:
                     meta = getattr(v, "quota_metadata", {}) or {}
@@ -500,7 +707,10 @@ class OfficialDatasetBuilder:
                         "actual_calls": int(getattr(v, "total_api_call_count", 0)),
                         "provider_metadata": meta,
                     }
-                    cache_paths += getattr(v, "cache_paths", [])
+                    cache_paths += [
+                        cp for cp in getattr(v, "cache_paths", [])
+                        if cp not in alternate_fx_paths
+                    ]
                     raw_paths += getattr(v, "raw_response_paths", [])
         else:
             quota = {
@@ -542,6 +752,11 @@ class OfficialDatasetBuilder:
             missing_symbol_reasons=reasons,
             provider_coverage_summary=coverage,
             instrument_identities=identities,
+            coverage_validation=coverage_validation,
+            fx_source_selection=fx_selection,
+            fx_reconciliation=fx_recon,
+            alternate_fx_cache_paths=alternate_fx_paths,
+            imputation_summary=imputations,
         )
 
     def write_manifest(self, manifest):

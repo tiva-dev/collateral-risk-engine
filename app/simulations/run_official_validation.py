@@ -7,7 +7,11 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from app.historical_data.cache import content_hash
-from app.historical_data.models import HistoricalBar, HistoricalFXRate
+from app.historical_data.models import (
+    TRADE_STATUS_UNKNOWN,
+    HistoricalBar,
+    HistoricalFXRate,
+)
 from app.simulations.calibration import generate_calibration_diagnostics
 from app.simulations.evidence_quality import (
     required_fx_pairs_for_scenarios,
@@ -74,6 +78,8 @@ def _bar_from_payload(payload: dict) -> HistoricalBar:
         data_quality_score=float(payload.get("data_quality_score", 1.0)),
         warnings=list(payload.get("warnings", [])),
         raw_metadata=dict(payload.get("raw_metadata", {})),
+        field_provenance=dict(payload.get("field_provenance") or {}),
+        trade_status=str(payload.get("trade_status") or TRADE_STATUS_UNKNOWN),
     )
 
 
