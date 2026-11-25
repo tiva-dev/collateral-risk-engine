@@ -254,6 +254,14 @@ class OfficialDatasetBuilder:
         max_provider_calls: int | None = None,
     ) -> HistoricalDatasetManifest:
         end = end_date or datetime.now(UTC).date()
+        if end <= start_date:
+            # Run 34000523667 was dispatched with start 2025-09-05 and end
+            # 2025-09-04; every provider then returned nothing and the failure
+            # surfaced only as "no usable equity histories". Fail fast instead.
+            raise ValueError(
+                f"Invalid dataset window: end date {end.isoformat()} must be after "
+                f"start date {start_date.isoformat()}"
+            )
         missing = []
         reasons = {}
         warnings = []

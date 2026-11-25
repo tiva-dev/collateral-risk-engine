@@ -9,7 +9,7 @@ validation.
 | Version | Code | Provider-backed financial validation | Status |
 |---|---|---|---|
 | v0.6.2 | `main` 5898756 (`app/` identical to f7cce7f and 3e14b49) | GitHub Actions run 30455533912, 29 Jul 2026, 260 replays, 10 portfolios | Completed. Evidence limitations below. |
-| v0.7.0 | PR #21 head 2b47314 | None completed. Run 34000523667 (6 Sep 2026) failed during dataset build. | **Not validated.** v0.6.2 results must not be cited for v0.7.0. |
+| v0.7.0 | PR #21 head 2b47314 | None completed. Run 34000523667 (6 Sep 2026) failed during dataset build: inverted date inputs and a lapsed NGNMarket plan. | **Not validated.** v0.6.2 results must not be cited for v0.7.0. |
 
 ## v0.6.2 evidence (run 30455533912)
 
@@ -33,27 +33,30 @@ validation.
   * Zero observed losses in a finite sample do not establish zero loss
     probability.
 
-## v0.7.0 failed run (34000523667)
+## v0.7.0 failed run (34000523667) — cause confirmed
 
 * Trigger: `workflow_dispatch` on `agent/cri-v070-recoverability` at 2b47314,
-  6 Sep 2026. Total duration about 20 seconds. Failing step: 7,
-  "Build or plan official provider dataset", exit code 1.
-* The only fast non-zero exit in `build_official_dataset.py` is
-  `SystemExit("Provider dataset build produced no usable equity histories")`,
-  raised when every equity fetch fails. A 20-second run is too short to have
-  fetched 26 equity histories, so the fetches most likely failed immediately.
-  Candidate causes, in order of likelihood:
-  1. Provider credential or entitlement failures (expired or rotated
-     `ALPACA_*`, `NGNMARKET_API_KEY` secrets), combined with the July cache
-     having been evicted (GitHub evicts caches unused for 7 days).
-  2. An NGNMarket pre-flight failure, combined with Alpaca failures.
-  3. Workflow inputs left at `dry_run=true` cannot produce this error; a
-     dry run exits 0 (reproduced locally).
-* Logs require GitHub sign-in and were not available to the auditor. The run
-  uploaded a 126 KB artifact (`official-provider-validation-evidence`,
-  digest `sha256:b9e22f2f…98e4`) that should contain `dataset_build.log` and
-  the manifest's sanitized `missing_symbol_reasons`. **It expires around
-  5 Dec 2026 under default retention and must be downloaded before then.**
+  6 Sep 2026, about 20 seconds. Failing step 7, "Build or plan official
+  provider dataset", exit code 1 ("Provider dataset build produced no usable
+  equity histories"). Job logs read through the GitHub API on 25 Nov 2026.
+* **Cause 1, inverted date window (operator input).** The run was dispatched
+  with `START_DATE=2025-09-05` and `END_DATE=2025-09-04`. Alpaca therefore
+  returned no bars for all 11 US symbols and Alpha Vantage returned no FX.
+  The builder did not validate the window, so the error surfaced only as
+  "no usable equity histories". Fixed: `OfficialDatasetBuilder.build` now
+  rejects an end date that is not after the start date
+  (`app/tests/test_dataset_window_validation.py`).
+* **Cause 2, NGNMarket plan.** Every NGNMarket request returned
+  `HTTP 403 PLAN_REQUIRED: This endpoint requires a hobby plan or higher`
+  (15 NGX equities and the FX endpoints). This is independent of the dates:
+  NGX data cannot be rebuilt until the NGNMarket subscription is restored or
+  upgraded.
+* Not the cause: Alpaca and Alpha Vantage credentials (no auth errors were
+  reported), dry-run inputs, or the v0.7.0 data-building changes.
+* The run's evidence artifact (ID 9979342512, digest
+  `sha256:b9e22f2f4eb2730b4e6d5d4576302190e47dc16e3d385e37a122397f8ecd98e4`)
+  expires on 5 Dec 2026. Its content (manifest and build log) is the same as
+  the job log summarised above.
 
 ## Acceptance requirements for any future version
 
