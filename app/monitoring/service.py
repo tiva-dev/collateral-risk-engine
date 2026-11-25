@@ -13,7 +13,6 @@ from app.core.evaluator import RiskEvaluationError
 from app.core.models import Holding, Loan, Policy
 from app.credit.interest import (
     InterestPolicy,
-    accrue_interest,
     accrue_scheduled_periods,
     apply_repayment,
 )
@@ -184,7 +183,12 @@ class MonitoringService:
         account = self.account_repo.get(account_ref)
         if account is None:
             raise KeyError(account_ref)
-        if event_reference in account.processed_loan_event_references:
+        # Audit H5: one ledger of client event references across the /loan and
+        # /draws paths, so one draw cannot be applied twice through two routes.
+        if (
+            event_reference in account.processed_loan_event_references
+            or event_reference in account.processed_draw_references
+        ):
             return account, []
 
         # Audit H5: accrue interest to now before applying a draw or
@@ -232,6 +236,7 @@ class MonitoringService:
                 holdings=holdings,
                 policy=account.policy,
                 market_data=market_data,
+                loan_terms=account.interest_policy,
             )
             if draw_decision.decision != LifecycleDecisionValue.APPROVED:
                 raise ValueError(
@@ -248,6 +253,8 @@ class MonitoringService:
             *account.processed_loan_event_references[-999:],
             event_reference,
         ]
+        if draw_amount > 0:
+            account.processed_draw_references.add(event_reference)
         account.updated_at = utc_now()
         account = self.account_repo.update(account)
         snapshot = {
@@ -638,7 +645,10 @@ class MonitoringService:
             raise ValueError("draw amount must be positive")
         if not draw_reference:
             raise ValueError("draw_reference is required")
-        if draw_reference in account.processed_draw_references:
+        if (
+            draw_reference in account.processed_draw_references
+            or draw_reference in account.processed_loan_event_references
+        ):
             return self.evaluate_account(
                 account_ref,
                 force_tick_event=True,
@@ -688,6 +698,10 @@ class MonitoringService:
         )
         account.last_interest_accrual_at = applied_at
         account.processed_draw_references.add(draw_reference)
+        account.processed_loan_event_references = [
+            *account.processed_loan_event_references[-999:],
+            draw_reference,
+        ]
         account.updated_at = applied_at
         self.account_repo.update(account)
         audit_id = self._audit(

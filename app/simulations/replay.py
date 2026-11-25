@@ -27,11 +27,11 @@ from app.lifecycle.service import CreditLifecycleEngine
 from app.liquidation.execution import (
     execute_recovery_advisory,
 )
+from app.liquidation.planning import advisory_from_plan, plan_recovery
 from app.risk.features import (
     HistoricalRiskFeatures,
     calculate_historical_risk_features,
 )
-from app.liquidation.planning import advisory_from_plan, plan_recovery
 from app.risk.math_utils import round_money
 from app.simulations.scenarios.official_portfolios import OfficialPortfolioScenario
 from app.version import LIFECYCLE_MODEL_VERSION, RISK_MODEL_VERSION

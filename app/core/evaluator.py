@@ -723,7 +723,7 @@ class CollateralRiskEngine:
             stable_key=holding.stable_key,
             data_unavailable_reason=data_unavailable_reason,
             instrument_key=holding.stable_key,
-            participation_rate=clamp(policy.max_participation_rate, 0.01, 0.25),
+            participation_rate=round(raw.safe_participation_rate, 4),
         )
 
     def _missing_market_result(self, holding: Holding) -> AssetRiskResult:

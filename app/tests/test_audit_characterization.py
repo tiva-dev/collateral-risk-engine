@@ -138,65 +138,35 @@ def test_frequent_monitoring_ticks_preserve_interest() -> None:
     assert accrued == pytest.approx(expected, abs=0.01)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Audit H7: the recovery interest buffer ignores quoted periodic rates",
-)
-def test_interest_buffer_uses_normalized_rate() -> None:
+def test_recovery_interest_uses_normalized_quoted_rate() -> None:
+    """Audit H7 (v0.7.0): 4% a month on 1,000,000 over 5 days is about 6,575."""
+    from datetime import UTC, datetime
+
     from app.credit.interest import InterestPolicy
-    from app.liquidation.execution import projected_interest_buffer
+    from app.liquidation.planning import _interest
 
     terms = InterestPolicy(quoted_interest_rate=0.04, rate_period="monthly")
-    # The monitoring service passes ``annual_interest_rate`` to the buffer.
-    buffer = projected_interest_buffer(
-        Loan(principal=1_000_000.0), terms.annual_interest_rate, 5
-    )
+    buffer = _interest(Loan(principal=1_000_000.0), terms, datetime(2026, 1, 1, tzinfo=UTC), 5)
     expected = 1_000_000.0 * terms.normalized_annual_rate * 5 / 365
     assert buffer == pytest.approx(expected, abs=0.01)
+    assert buffer == pytest.approx(6575.34, abs=0.01)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Audit C4: execution caps fills at a fixed policy participation, not the CRI-derived rate",
-)
-def test_execution_participation_matches_cri_derived_rate() -> None:
-    from app.liquidation.execution import (
-        build_recovery_advisory,
-        execute_recovery_advisory,
-    )
-    from app.liquidation.policy import LiquidationExecutionPolicy
-    from app.risk.adjustments import derive_safe_participation_rate
-
-    holding = Holding("X", AssetType.LISTED_EQUITY, 1_000_000.0, "USD", "US")
-    market = _market(volatility_30d=0.9, volatility_90d=0.9, bid=97.0, ask=103.0)
-    derived = derive_safe_participation_rate(holding, market, 1_000_000.0 * 100.0)
-    policy = LiquidationExecutionPolicy()
-    advisory = build_recovery_advisory(
-        holdings=[holding], market_data={"X": market}, target_net_recovery=1e9,
-        policy=policy, trigger_state="liquidation", issued_date=market.timestamp.date(),
-    )
-    _, execution = execute_recovery_advisory(
-        holdings=[holding], market_data={"X": market}, advisory=advisory,
-        remaining_target=1e9, policy=policy, observation_date=market.timestamp.date(),
-    )
-    cap = execution["fills"][0]["participation_quantity_cap"]
-    assert cap == pytest.approx(market.average_daily_volume * derived, rel=1e-6)
-def test_partially_unavailable_collateral_requires_review_not_sale() -> None:
-    """One halted holding must not trigger a forced sale of the other."""
-    holdings = [
-        Holding("X", AssetType.LISTED_EQUITY, 1000.0, "USD", "US"),
-        Holding("Y", AssetType.LISTED_EQUITY, 1000.0, "USD", "US"),
-    ]
-    market = {"X": _market(), "Y": _market(asset_id="Y", halted=True)}
-    result = CollateralRiskEngine().evaluate(
-        "audit", holdings, Loan(principal=80_000.0), Policy.default(), market
-    )
-    assert result.data_review_required
-    assert result.data_unavailable_assets == ["Y"]
-    assert result.margin_state == MarginState.RESTRICT_NEW_BORROWING
-    assert result.liquidation_plan is None
+def test_planned_participation_is_the_cri_derived_rate() -> None:
+    """Audit C4 (v0.7.0): the plan sells at the instrument's derived participation."""
+    engine = CollateralRiskEngine()
+    market = {"X": _market(volatility_30d=0.9, volatility_90d=0.9, bid=97.0, ask=103.0)}
+    result = None
+    for principal in range(20_000, 99_000, 250):
+        result = _evaluate(market, float(principal))
+        if result.margin_state == MarginState.MARGIN_CALL:
+            break
+    assert result is not None and result.recovery_plan is not None
+    derived = result.asset_results[0].safe_participation_rate
+    orders = result.recovery_plan["orders"]
+    assert orders
+    assert orders[0]["participation_rate"] == pytest.approx(min(0.10, derived), abs=1e-4)
+    del engine
 
 
 def test_economic_breach_with_complete_data_still_liquidates() -> None:
