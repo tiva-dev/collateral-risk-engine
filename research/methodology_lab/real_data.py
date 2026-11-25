@@ -348,6 +348,11 @@ def main() -> None:
     # Alternate FX caches are kept out of replay; load them separately here.
     alt_manifest = dict(manifest, cache_paths=manifest.get("alternate_fx_cache_paths", []))
     _, alt_fx = _load_replay_inputs(alt_manifest)
+    for sym in ("MTNN", "DANGSUGAR", "SPY"):
+        series = bars.get(sym) or []
+        for b in (series[:1] + series[len(series) // 2 : len(series) // 2 + 1] + series[-1:]):
+            print("BARDIAG", sym, _day(b.timestamp), "vol", b.volume, "vt", b.value_traded,
+                  "status", b.trade_status, "raw_keys", sorted(b.raw_metadata)[:20], flush=True)
     for market, syms in (("NGX", NGX), ("US", US)):
         panel = build_panel(syms, bars, market)
         meta["data"][market] = {
