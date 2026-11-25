@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import asdict, is_dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -303,12 +303,11 @@ class MonitoringService:
                     account.last_interest_accrual_at,
                     now,
                 )
-                account.loan = replace(
-                    accrued_loan,
-                    principal=round(accrued_loan.principal, 2),
-                    accrued_interest=round(accrued_loan.accrued_interest, 2),
-                    fees=round(accrued_loan.fees, 2),
-                )
+                # Audit H6: rounding the stored balance to cents on every
+                # monitoring tick discarded each sub-cent increment, so a
+                # 30-second cadence accrued almost nothing. Keep full
+                # precision in state; round at presentation and settlement.
+                account.loan = accrued_loan
             account.last_interest_accrual_at = now
             aggregation = self._normalize_market_data(account)
             market_data = self.lifecycle_engine._market_data_with_pledged_cash(

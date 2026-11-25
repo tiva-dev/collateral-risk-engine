@@ -304,6 +304,9 @@ class AssetRiskResult:
     safe_participation_rate: float | None = None
     liquidity_observed: bool = False
     stable_key: str | None = None
+    # Set when the asset is ineligible because its data cannot be trusted
+    # (missing, halted, low quality) rather than for an economic reason.
+    data_unavailable_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -372,6 +375,10 @@ class PortfolioEvaluation:
     audit_id: str
     model_version: str
     created_at: datetime
+    # True when a forced-sale state was suppressed because collateral data is
+    # unavailable; the account needs manual review (audit finding C3).
+    data_review_required: bool = False
+    data_unavailable_assets: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

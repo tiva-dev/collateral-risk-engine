@@ -1,10 +1,9 @@
 """Characterization tests for defects found in the November 2026 audit.
 
 Each test states the behaviour the engine *should* have. Tests for known
-defects are marked ``xfail(strict=True)``: they currently fail, which pytest
-reports as an expected failure. When a reviewed methodology fix lands, the
-test passes, strict mode turns that into a failure, and the marker must be
-removed deliberately (ADR-004). These tests do not change engine behaviour.
+defects were marked ``xfail(strict=True)`` until the fix landed (ADR-004).
+The C3, H6 and margin-call sizing fixes removed their markers in
+fix/financial-correctness; see docs/governance/DECISIONS.md ADR-007.
 """
 
 from __future__ import annotations
@@ -44,21 +43,11 @@ def _evaluate(market_data, principal: float, quantity: float = 1000.0):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Audit C3: missing data sets the approved limit to 0, which maps to LIQUIDATION",
-)
 def test_missing_market_data_is_not_treated_as_insolvency() -> None:
     result = _evaluate({}, principal=30_000.0)
     assert result.margin_state != MarginState.LIQUIDATION
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Audit C3: a trading halt maps a 30% LTV loan to LIQUIDATION",
-)
 def test_halted_collateral_is_not_treated_as_insolvency() -> None:
     result = _evaluate({"X": _market(halted=True)}, principal=30_000.0)
     assert result.margin_state != MarginState.LIQUIDATION
@@ -70,15 +59,6 @@ def test_low_data_quality_blocks_new_lending() -> None:
     assert result.approved_credit_limit == 0.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "Audit/challenger finding: margin-call liquidation plans are sized with "
-        "cash-cure or limit-breach amounts, which ignore that selling collateral "
-        "also reduces collateral value"
-    ),
-)
 def test_executing_margin_call_plan_leaves_margin_call() -> None:
     engine_market = {"X": _market()}
     result = None
@@ -117,11 +97,6 @@ def _monitoring_service():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Audit H6: each monitoring tick rounds accrued interest to 2 dp, so small increments vanish",
-)
 def test_frequent_monitoring_ticks_preserve_interest() -> None:
     from datetime import UTC, datetime
 
@@ -208,3 +183,60 @@ def test_execution_participation_matches_cri_derived_rate() -> None:
     )
     cap = execution["fills"][0]["participation_quantity_cap"]
     assert cap == pytest.approx(market.average_daily_volume * derived, rel=1e-6)
+def test_partially_unavailable_collateral_requires_review_not_sale() -> None:
+    """One halted holding must not trigger a forced sale of the other."""
+    holdings = [
+        Holding("X", AssetType.LISTED_EQUITY, 1000.0, "USD", "US"),
+        Holding("Y", AssetType.LISTED_EQUITY, 1000.0, "USD", "US"),
+    ]
+    market = {"X": _market(), "Y": _market(asset_id="Y", halted=True)}
+    result = CollateralRiskEngine().evaluate(
+        "audit", holdings, Loan(principal=80_000.0), Policy.default(), market
+    )
+    assert result.data_review_required
+    assert result.data_unavailable_assets == ["Y"]
+    assert result.margin_state == MarginState.RESTRICT_NEW_BORROWING
+    assert result.liquidation_plan is None
+
+
+def test_economic_breach_with_complete_data_still_liquidates() -> None:
+    """The C3 rule must not suppress a breach that the data does show."""
+    result = _evaluate({"X": _market()}, principal=99_000.0)
+    assert not result.data_review_required
+    assert result.margin_state == MarginState.LIQUIDATION
+    assert result.liquidation_plan is not None
+
+
+def test_two_asset_margin_call_plan_restores_coverage() -> None:
+    holdings = [
+        Holding("X", AssetType.LISTED_EQUITY, 1000.0, "USD", "US"),
+        Holding("Y", AssetType.HIGH_VOLATILITY_EQUITY, 1000.0, "USD", "US"),
+    ]
+    market = {
+        "X": _market(),
+        "Y": _market(asset_id="Y", volatility_30d=0.8, volatility_90d=0.8,
+                     average_dollar_volume=5_000_000),
+    }
+    engine = CollateralRiskEngine()
+    result = None
+    for principal in range(40_000, 190_000, 100):
+        result = engine.evaluate(
+            "audit", holdings, Loan(principal=float(principal)), Policy.default(), market
+        )
+        if result.margin_state == MarginState.MARGIN_CALL:
+            break
+    assert result is not None and result.margin_state == MarginState.MARGIN_CALL
+    plan = result.liquidation_plan
+    assert plan is not None and plan.plan_complete
+    sold = {o.asset_id: o.quantity for o in plan.orders}
+    after = engine.evaluate(
+        "audit",
+        [Holding(h.asset_id, h.asset_type, h.quantity - sold.get(h.asset_id, 0.0),
+                 "USD", "US") for h in holdings if h.quantity - sold.get(h.asset_id, 0.0) > 0],
+        Loan(principal=result.loan_balance - plan.estimated_total_recovery),
+        Policy.default(),
+        market,
+    )
+    assert after.margin_state not in {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}
+    # The restoring sale is larger than the repayment cure it replaces.
+    assert plan.target_cash_recovery > result.trigger_levels.required_cure_amount

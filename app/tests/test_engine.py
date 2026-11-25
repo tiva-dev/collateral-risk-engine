@@ -96,7 +96,13 @@ class CollateralRiskEngineTests(unittest.TestCase):
         )
         self.assertEqual(result.asset_results[0].lendable_value, 0.0)
         self.assertEqual(result.asset_results[0].stressed_liquidation_value, 0.0)
-        self.assertEqual(result.margin_state, MarginState.LIQUIDATION)
+        # Audit C3: a halt is not insolvency. New lending stays blocked, no
+        # automated forced sale is planned, and the account goes to review.
+        self.assertEqual(result.approved_credit_limit, 0.0)
+        self.assertEqual(result.margin_state, MarginState.RESTRICT_NEW_BORROWING)
+        self.assertTrue(result.data_review_required)
+        self.assertEqual(result.data_unavailable_assets, ["HALT"])
+        self.assertIsNone(result.liquidation_plan)
 
     def test_loan_above_dynamic_credit_limit_triggers_margin_call_or_liquidation(
         self,

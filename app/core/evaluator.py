@@ -53,6 +53,8 @@ class CollateralRiskEngine:
         policy: Policy,
         market_data: Mapping[str, MarketData],
         requested_draw_amount: float = 0.0,
+        *,
+        _size_plan: bool = True,
     ) -> PortfolioEvaluation:
         if not account_ref:
             raise RiskEvaluationError("account_ref is required")
@@ -131,14 +133,44 @@ class CollateralRiskEngine:
             recovery_coverage_ratio=recovery_coverage_ratio,
             triggers=trigger_levels,
         )
-        target_cash = (
-            projected_loan_balance
-            if margin_state == MarginState.LIQUIDATION
-            else max(
-                trigger_levels.required_cure_amount,
-                max(0.0, projected_loan_balance - approved_credit_limit),
-            )
+        # Audit C3: missing, halted or low-quality data makes an asset's
+        # stressed value zero, which on its own drove a funded loan into
+        # LIQUIDATION and an automated forced-sale plan. Unavailable data is
+        # not evidence of insolvency. New lending stays fail-closed (the
+        # approved limit is unchanged), but no automated sale is planned and
+        # the account is flagged for manual review.
+        data_unavailable_assets = sorted(
+            {a.asset_id for a in asset_results if a.data_unavailable_reason}
         )
+        data_review_required = (
+            bool(data_unavailable_assets)
+            and projected_loan_balance > 0
+            and margin_state in {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}
+        )
+        if data_review_required:
+            margin_state = MarginState.RESTRICT_NEW_BORROWING
+        target_cash = max(
+            trigger_levels.required_cure_amount,
+            max(0.0, projected_loan_balance - approved_credit_limit),
+        )
+        if _size_plan and margin_state in {
+            MarginState.MARGIN_CALL,
+            MarginState.LIQUIDATION,
+        }:
+            # The repayment cure assumes collateral is unchanged. A sale also
+            # removes stressed value and lendable value, so that amount does
+            # not restore coverage. Size the sale on the post-sale portfolio.
+            target_cash = self._restoring_sale_target(
+                account_ref=account_ref,
+                holdings=holdings,
+                loan=loan,
+                balance=projected_loan_balance,
+                policy=policy,
+                market_data=market_data,
+                asset_results=asset_results,
+                margin_state=margin_state,
+                lower_bound=target_cash,
+            )
         liquidation_plan = build_liquidation_plan(
             account_ref=account_ref,
             asset_results=asset_results,
@@ -171,6 +203,8 @@ class CollateralRiskEngine:
             ),
             "portfolio_risk_score": portfolio_risk_score,
             "margin_state": margin_state.value,
+            "data_review_required": data_review_required,
+            "data_unavailable_assets": data_unavailable_assets,
             "trigger_levels": asdict(trigger_levels),
             "asset_results": [self._asset_result_audit(a) for a in asset_results],
             "liquidation_plan": asdict(liquidation_plan) if liquidation_plan else None,
@@ -217,6 +251,8 @@ class CollateralRiskEngine:
             trigger_levels=trigger_levels,
             asset_results=asset_results,
             liquidation_plan=liquidation_plan,
+            data_review_required=data_review_required,
+            data_unavailable_assets=data_unavailable_assets,
             audit_id=audit_id,
             model_version=MODEL_VERSION,
             created_at=datetime.now(UTC),
@@ -640,8 +676,14 @@ class CollateralRiskEngine:
         lendable_value = market_value * effective_ltv
         drivers = risk_drivers_from_breakdown(breakdown)
         notes: list[str] = []
+        data_unavailable_reason = None
         if not eligible:
             notes.append("asset_ineligible_due_to_halt_or_data_quality")
+            data_unavailable_reason = (
+                "halted"
+                if market.halted and not policy.allow_lending_on_stale_or_halted_assets
+                else "low_data_quality"
+            )
         if recovery.method.startswith("order_book"):
             notes.append("order_book_used_for_recovery_estimate")
         else:
@@ -676,6 +718,7 @@ class CollateralRiskEngine:
             safe_participation_rate=round(raw.safe_participation_rate, 4),
             liquidity_observed=raw.liquidity_observed,
             stable_key=holding.stable_key,
+            data_unavailable_reason=data_unavailable_reason,
         )
 
     def _missing_market_result(self, holding: Holding) -> AssetRiskResult:
@@ -698,6 +741,7 @@ class CollateralRiskEngine:
             safe_participation_rate=None,
             liquidity_observed=False,
             stable_key=holding.stable_key,
+            data_unavailable_reason="missing_market_data",
         )
 
     def _zero_adjustments(self):
@@ -814,6 +858,89 @@ class CollateralRiskEngine:
             if market is not None:
                 resolved[holding.stable_identity] = market
         return resolved
+
+    def _restoring_sale_target(
+        self,
+        *,
+        account_ref: str,
+        holdings: list[Holding],
+        loan: Loan,
+        balance: float,
+        policy: Policy,
+        market_data: Mapping[str, MarketData],
+        asset_results: list[AssetRiskResult],
+        margin_state: MarginState,
+        lower_bound: float,
+    ) -> float:
+        """Smallest stressed sale whose post-sale portfolio leaves margin call.
+
+        Executes the plan the builder would produce for a candidate target,
+        re-evaluates the remaining holdings against the reduced balance with
+        this engine, and bisects on the target. Falls back to selling all
+        eligible collateral when even that does not restore the account.
+        """
+        inner = CollateralRiskEngine(audit_logger=None)
+        by_asset: dict[str, list[Holding]] = {}
+        for h in holdings:
+            by_asset.setdefault(h.asset_id, []).append(h)
+        if any(len(v) > 1 for v in by_asset.values()):
+            # Orders are keyed by asset_id; ambiguous ids cannot be mapped back.
+            return lower_bound
+        bad = {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}
+
+        def restored(target: float) -> bool:
+            plan = build_liquidation_plan(
+                account_ref, asset_results, margin_state, target
+            )
+            if plan is None or not plan.orders:
+                return False
+            remaining_balance = balance - plan.estimated_total_recovery
+            if remaining_balance <= 0.005:
+                return True
+            sold = {o.asset_id: o.quantity for o in plan.orders}
+            left = [
+                replace(h, quantity=h.quantity - sold.get(h.asset_id, 0.0))
+                for h in holdings
+            ]
+            left = [h for h in left if h.quantity > QUANTITY_TOLERANCE]
+            if not left:
+                return False
+            # Orders round recovery to cents; test against a balance two cents
+            # higher so the executed plan clears the boundary after rounding.
+            after = inner.evaluate(
+                account_ref,
+                left,
+                replace(
+                    loan,
+                    principal=remaining_balance + 0.02,
+                    accrued_interest=0.0,
+                    fees=0.0,
+                ),
+                policy,
+                market_data,
+                _size_plan=False,
+            )
+            return after.margin_state not in bad
+
+        hi = sum(
+            a.stressed_liquidation_value
+            for a in asset_results
+            if a.eligible and a.quantity > 0
+        )
+        lo = max(0.0, lower_bound)
+        if hi <= lo or restored(lo):
+            return lo
+        if not restored(hi):
+            return hi
+        for _ in range(60):
+            if hi - lo <= 0.01:
+                break
+            mid = (lo + hi) / 2
+            if restored(mid):
+                hi = mid
+            else:
+                lo = mid
+        return round_money(hi + 0.01)
 
     def _margin_state(
         self,
