@@ -1,0 +1,33 @@
+name: Provider Probe
+
+# Read-only probe of provider endpoints and reference-rate sources.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["diag/provider-probe"]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      NGNMARKET_API_KEY: ${{ secrets.NGNMARKET_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: official-provider-validation-evidence
+          run-id: 45673315376
+          github-token: ${{ github.token }}
+          path: data
+      - name: Probe
+        run: |
+          manifest=$(find data/simulation_results -name '*.manifest.json' | head -n 1)
+          python tools/data_inventory/provider_probe.py "$manifest"
