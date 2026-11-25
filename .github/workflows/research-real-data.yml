@@ -10,7 +10,7 @@ on:
       source_run_id:
         description: "Official Provider Validation Run whose artifacts to use"
         required: true
-        default: "45669690566"
+        default: "45673315376"
   push:
     branches: ["research/**"]
     paths:
@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
-      SOURCE_RUN: ${{ inputs.source_run_id || '45669690566' }}
+      SOURCE_RUN: ${{ inputs.source_run_id || '45673315376' }}
     steps:
       - uses: actions/checkout@v4
       - name: Check out v0.6.2 engine (main)

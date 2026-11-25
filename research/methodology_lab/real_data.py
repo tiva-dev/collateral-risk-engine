@@ -20,7 +20,12 @@ Data handling, all reported in the output:
   are treated as non-tradable (halted) and carry the last price.
 * Spreads come from the Corwin-Schultz high-low estimator using only bars
   whose high and low were reported (field provenance), with floors.
-* ADV is the trailing 21-session median of value traded.
+* ADV is the trailing 21-session median of *reported* value traded (NGX) or
+  volume x close (US), needing MIN_ADV_OBS reported sessions. NGNMarket
+  leaves volume null for most of its history, so NGX cohorts start only once
+  liquidity is observable at the decision date; within a cohort's window,
+  missing ADV is carried forward as-of (share reported per book). Alpaca's
+  IEX feed reports IEX-venue volume only, so US ADV is a lower bound.
 
 Usage:
     python -m research.methodology_lab.real_data MANIFEST --v062 DIR --v070 DIR --out DIR
@@ -48,6 +53,7 @@ STEP = 21
 ALPHA = 0.99
 SUSPECT_MOVE = 0.25
 MAX_EXEC_DAYS = 250
+MIN_ADV_OBS = 10
 ENGINE_V = 1_000_000.0
 PRICE = 100.0
 
@@ -97,7 +103,7 @@ def build_panel(symbols: list[str], bars_by_symbol: dict, market: str) -> dict:
     high = np.full((n, m), np.nan)
     low = np.full((n, m), np.nan)
     rng_ok = np.zeros((n, m), bool)
-    value = np.zeros((n, m))
+    value = np.full((n, m), np.nan)
     halted = np.zeros((n, m), bool)
     for j, s in enumerate(present):
         last = np.nan
@@ -111,8 +117,13 @@ def build_panel(symbols: list[str], bars_by_symbol: dict, market: str) -> dict:
             close[i, j] = b.close
             high[i, j], low[i, j] = b.high, b.low
             rng_ok[i, j] = b.has_reported_range()
-            vt = b.value_traded if b.value_traded else b.volume * b.close
-            value[i, j] = float(vt or 0.0)
+            prov = b.field_provenance
+            if prov.get("value_traded") == "reported" and b.value_traded:
+                value[i, j] = float(b.value_traded)
+            elif prov.get("volume", "reported") == "reported" and b.volume > 0:
+                value[i, j] = b.volume * b.close
+            else:
+                value[i, j] = np.nan  # liquidity not reported for this bar
             if b.trade_status == "no_trade":
                 halted[i, j] = True
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -132,8 +143,9 @@ def build_panel(symbols: list[str], bars_by_symbol: dict, market: str) -> dict:
                 else SPREAD_DEFAULT[market]
             )
             v = value[max(0, i - 20) : i + 1, j]
-            v = v[v > 0]
-            adv[i, j] = float(np.median(v)) if v.size else 0.0
+            v = v[~np.isnan(v)]
+            # ADV needs at least MIN_ADV_OBS reported sessions in the window.
+            adv[i, j] = float(np.median(v)) if v.size >= MIN_ADV_OBS else np.nan
     sig = np.zeros((n, m))
     var = np.nanvar(r[1:61], axis=0) + 1e-8
     for i in range(n):
@@ -143,6 +155,12 @@ def build_panel(symbols: list[str], bars_by_symbol: dict, market: str) -> dict:
         "symbols": present, "dates": dates, "r": r, "listed": listed, "suspect": suspect,
         "halted": halted, "spread": spread, "adv": adv, "sigma": sig,
         "range_reported_share": float(rng_ok[listed].mean()) if listed.any() else 0.0,
+        "liquidity_reported_share": float((~np.isnan(value))[listed].mean()) if listed.any() else 0.0,
+        "first_adv": {
+            s: (dates[int(np.argmax(~np.isnan(adv[:, j])))].isoformat()
+                if (~np.isnan(adv[:, j])).any() else None)
+            for j, s in enumerate(present)
+        },
     }
 
 
@@ -182,7 +200,9 @@ def engine_request(rid: str, f: methods.Features, types: list[str], rate: float)
     return {"id": rid, "assets": assets, "term_days": TERM_CALENDAR, "rate": rate}
 
 
-def cohorts(panel: dict, cols: list[int], fx_ret: np.ndarray | None) -> list[int]:
+def cohorts(
+    panel: dict, cols: list[int], fx_ret: np.ndarray | None, require_adv: bool = True
+) -> list[int]:
     n = len(panel["dates"])
     out = []
     for t0 in range(HISTORY, n - TERM, STEP):
@@ -193,6 +213,8 @@ def cohorts(panel: dict, cols: list[int], fx_ret: np.ndarray | None) -> list[int
             continue
         if fx_ret is not None and np.isnan(fx_ret[t0 - HISTORY + 1 : t0 + TERM]).any():
             continue
+        if require_adv and np.isnan(panel["adv"][t0 - 1, cols]).any():
+            continue  # liquidity unobservable at the decision date
         out.append(t0)
     return out
 
@@ -200,7 +222,11 @@ def cohorts(panel: dict, cols: list[int], fx_ret: np.ndarray | None) -> list[int
 def run_book(
     label: str, market: str, panel: dict, cols: list[int], size: str, loan_ccy: str,
     fx_ret: np.ndarray | None, v062: str, v070: str, seed: int,
+    adv_mode: str = "strict",
 ) -> tuple[list[dict], dict]:
+    """adv_mode: "strict" uses only ADV observable at the decision date;
+    "backfill" sets ADV before its first observation to that first observed
+    value. Backfill uses future information and is labelled as such."""
     syms = [panel["symbols"][c] for c in cols]
     n = len(cols)
     weights = np.full(n, 1.0 / n)
@@ -212,9 +238,29 @@ def run_book(
     pol = lifecycle.Policy(rate=RATE[loan_ccy])
     r_local = panel["r"][:, cols]
     r_loan = r_local - (fx_ret[:, None] if fx_ret is not None else 0.0)
-    adv_units = panel["adv"][:, cols] / position
-    starts = cohorts(panel, cols, fx_ret)
-    info = {"book": label, "cohorts": len(starts), "symbols": syms}
+    adv_raw = panel["adv"][:, cols]
+    adv_filled = adv_raw.copy()
+    if adv_mode == "backfill":
+        for j in range(adv_filled.shape[1]):
+            ok = ~np.isnan(adv_filled[:, j])
+            if ok.any():
+                first = int(np.argmax(ok))
+                adv_filled[:first, j] = adv_filled[first, j]
+    for j in range(adv_filled.shape[1]):
+        last = np.nan
+        for i in range(adv_filled.shape[0]):
+            if np.isnan(adv_filled[i, j]):
+                adv_filled[i, j] = last
+            else:
+                last = adv_filled[i, j]
+    adv_units = np.nan_to_num(adv_filled, nan=0.0) / position
+    starts = cohorts(panel, cols, fx_ret, require_adv=adv_mode == "strict")
+    info = {"book": label, "cohorts": len(starts), "symbols": syms, "adv_mode": adv_mode}
+    if starts:
+        windows = np.concatenate(
+            [adv_raw[t0 - HISTORY + 1 : t0 + TERM] for t0 in starts]
+        )
+        info["adv_as_of_filled_share"] = round(float(np.isnan(windows).mean()), 4)
     if not starts:
         return [], info
     feats, reqs = [], []
@@ -245,16 +291,6 @@ def run_book(
             ratios[lbl] = res["principal"] / res["mv"] if res["mv"] else 0.0
         ratios["flat"] = flat
         exec_days = float(methods.execution_days(f, pol).max())
-        if k == 0 or k == len(starts) // 2:
-            print(
-                "DIAG", label, size, panel["dates"][t0].isoformat(),
-                "adv_units", np.round(f.adv, 4).tolist()[:4],
-                "spread", np.round(f.spread, 4).tolist()[:4],
-                "ewma_sig", np.round(f.ewma_sigma, 4).tolist()[:4],
-                "exec_days", exec_days,
-                "rec_days", methods.recovery_days(f, pol),
-                flush=True,
-            )
         if exec_days > MAX_EXEC_DAYS:
             # Position cannot be sold within a year at the participation cap:
             # the risk-based methods lend nothing. Maintenance uses A's form.
@@ -348,11 +384,6 @@ def main() -> None:
     # Alternate FX caches are kept out of replay; load them separately here.
     alt_manifest = dict(manifest, cache_paths=manifest.get("alternate_fx_cache_paths", []))
     _, alt_fx = _load_replay_inputs(alt_manifest)
-    for sym in ("MTNN", "DANGSUGAR", "SPY"):
-        series = bars.get(sym) or []
-        for b in (series[:1] + series[len(series) // 2 : len(series) // 2 + 1] + series[-1:]):
-            print("BARDIAG", sym, _day(b.timestamp), "vol", b.volume, "vt", b.value_traded,
-                  "status", b.trade_status, "raw_keys", sorted(b.raw_metadata)[:20], flush=True)
     for market, syms in (("NGX", NGX), ("US", US)):
         panel = build_panel(syms, bars, market)
         meta["data"][market] = {
@@ -363,19 +394,24 @@ def main() -> None:
             },
             "halted_share": round(float(panel["halted"][panel["listed"]].mean()), 4),
             "range_reported_share": round(panel["range_reported_share"], 4),
+            "liquidity_reported_share": round(panel["liquidity_reported_share"], 4),
+            "first_adv": panel["first_adv"],
             "median_spread": round(float(np.median(panel["spread"][panel["listed"]])), 5),
         }
         books = [([j], f"{market}:{s}", "single") for j, s in enumerate(panel["symbols"])]
         books.append((list(range(len(panel["symbols"]))), f"{market}:portfolio", "portfolio"))
-        for cols, label, kind in books:
-            for size in ("retail", "institutional"):
-                ccy = "NGN" if market == "NGX" else "USD"
-                rws, info = run_book(label, market, panel, cols, size, ccy, None,
-                                     a.v062, a.v070, a.seed)
-                for r in rws:
-                    r["book_kind"] = kind
-                rows += rws
-                meta["books"].append({**info, "size": size, "loan_ccy": ccy})
+        modes = ("strict", "backfill") if market == "NGX" else ("strict",)
+        for mode in modes:
+            suffix = "" if mode == "strict" else "_advbackfill"
+            for cols, label, kind in books:
+                for size in ("retail", "institutional"):
+                    ccy = "NGN" if market == "NGX" else "USD"
+                    rws, info = run_book(label, market, panel, cols, size, ccy, None,
+                                         a.v062, a.v070, a.seed, adv_mode=mode)
+                    for r in rws:
+                        r["book_kind"] = kind + suffix
+                    rows += rws
+                    meta["books"].append({**info, "size": size, "loan_ccy": ccy})
         if market == "NGX":
             cols = list(range(len(panel["symbols"])))
             selected = (manifest.get("fx_source_selection") or {}).get("USD/NGN", {})
@@ -390,9 +426,10 @@ def main() -> None:
                 meta["data"][f"USD/NGN@{source}"] = {"max_staleness_days": stale}
                 for size in ("retail", "institutional"):
                     rws, info = run_book(f"NGX:portfolio:USD@{source}", market, panel, cols,
-                                         size, "USD", fx_ret, a.v062, a.v070, a.seed)
+                                         size, "USD", fx_ret, a.v062, a.v070, a.seed,
+                                         adv_mode="backfill")
                     for r in rws:
-                        r["book_kind"] = f"portfolio_usd_{source}"
+                        r["book_kind"] = f"portfolio_usd_{source}_advbackfill"
                     rows += rws
                     meta["books"].append({**info, "size": size, "loan_ccy": f"USD@{source}"})
     with (out / "real_data_rows.csv").open("w", newline="") as fh:
@@ -406,6 +443,7 @@ def main() -> None:
         w.writerows(summary)
     (out / "real_data_meta.json").write_text(json.dumps(meta, indent=2, default=str))
     print(json.dumps(meta["data"], indent=2))
+    print(json.dumps([b for b in meta["books"] if "portfolio" in b["book"]], indent=2))
     cols = ["market", "book", "size", "loan_ccy", "method", "loans", "median_ltv",
             "loss_events", "loss_per_principal_pct", "worst_loss_rate_pct", "liquidations",
             "unnecessary_share"]
