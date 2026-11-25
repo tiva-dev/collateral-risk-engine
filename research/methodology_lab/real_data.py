@@ -245,6 +245,16 @@ def run_book(
             ratios[lbl] = res["principal"] / res["mv"] if res["mv"] else 0.0
         ratios["flat"] = flat
         exec_days = float(methods.execution_days(f, pol).max())
+        if k == 0 or k == len(starts) // 2:
+            print(
+                "DIAG", label, size, panel["dates"][t0].isoformat(),
+                "adv_units", np.round(f.adv, 4).tolist()[:4],
+                "spread", np.round(f.spread, 4).tolist()[:4],
+                "ewma_sig", np.round(f.ewma_sigma, 4).tolist()[:4],
+                "exec_days", exec_days,
+                "rec_days", methods.recovery_days(f, pol),
+                flush=True,
+            )
         if exec_days > MAX_EXEC_DAYS:
             # Position cannot be sold within a year at the participation cap:
             # the risk-based methods lend nothing. Maintenance uses A's form.
