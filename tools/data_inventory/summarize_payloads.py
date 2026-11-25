@@ -28,7 +28,7 @@ def _date_of(row: Any) -> str | None:
     return None
 
 
-def outline(value: Any, depth: int = 0, max_depth: int = 4) -> list[str]:
+def outline(value: Any, depth: int = 0, max_depth: int = 7) -> list[str]:
     pad = "  " * depth
     out: list[str] = []
     if isinstance(value, dict):
