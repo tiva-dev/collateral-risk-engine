@@ -1,0 +1,46 @@
+name: Data Inventory
+
+# Read-only inventory of Actions artifacts and caches. Downloads every
+# unexpired artifact, prints file checksums and payload structure (no bulk
+# data), and lists caches. Nothing is uploaded or modified.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["diag/**"]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: List caches
+        run: |
+          gh api "repos/$REPO/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | "\(.key)\t\(.size_in_bytes)\t\(.ref)\t\(.created_at)\t\(.last_accessed_at)"' || true
+          gh api "repos/$REPO/actions/cache/usage" || true
+      - name: Download and summarise artifacts
+        run: |
+          mkdir -p inv
+          gh api "repos/$REPO/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | "\(.id) \(.workflow_run.id) \(.name)"' > inv/list.txt
+          cat inv/list.txt
+          while read -r id run name; do
+            mkdir -p "inv/$run"
+            gh api "repos/$REPO/actions/artifacts/$id/zip" > "inv/$run.zip"
+            sha256sum "inv/$run.zip"
+            unzip -q -o "inv/$run.zip" -d "inv/$run"
+          done < inv/list.txt
+          for d in inv/*/; do
+            echo "################ RUN $d"
+            python tools/data_inventory/summarize_payloads.py "$d"
+          done
