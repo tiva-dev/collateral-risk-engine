@@ -92,6 +92,8 @@ controls; `/risk/pre-trade-check` is the legacy endpoint. Requests use
 
 ## Provider-backed validation
 
+> Validation status by version is maintained in [docs/governance/VALIDATION_RECORD.md](docs/governance/VALIDATION_RECORD.md). The evidence below applies to v0.6.2 only.
+
 The official validation uses real historical provider data, draws 100% of each
 policy's approved day-zero limit, accrues interest, monitors the obligation,
 and replays margin and liquidation execution through settlement. It compares
