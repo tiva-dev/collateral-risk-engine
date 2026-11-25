@@ -195,3 +195,29 @@ def test_two_asset_margin_call_plan_restores_coverage() -> None:
     assert after.margin_state not in {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}
     # The restoring sale is larger than the repayment cure it replaces.
     assert plan.target_cash_recovery > result.trigger_levels.required_cure_amount
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "Found 25 Nov 2026 (M7 follow-up): compound accrual capitalises interest on "
+        "every call, so splitting a monthly period into monitoring ticks compounds "
+        "more often than the contract's accrual frequency"
+    ),
+)
+def test_compound_interest_capitalises_only_at_period_boundaries() -> None:
+    from datetime import UTC, datetime
+
+    from app.credit.interest import InterestPolicy, accrue_scheduled_periods
+
+    terms = InterestPolicy(
+        annual_interest_rate=0.36, accrual_frequency="monthly", compounding="compound"
+    )
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    mid = datetime(2026, 1, 16, tzinfo=UTC)
+    end = datetime(2026, 1, 31, tzinfo=UTC)
+    one, _ = accrue_scheduled_periods(Loan(100_000.0), terms, start, end)
+    half, _ = accrue_scheduled_periods(Loan(100_000.0), terms, start, mid)
+    two, _ = accrue_scheduled_periods(half, terms, mid, end)
+    assert two.balance == pytest.approx(one.balance, abs=0.01)

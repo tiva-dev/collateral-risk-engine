@@ -291,6 +291,10 @@ class AssetRiskResult:
     # Set when the asset is ineligible because its data cannot be trusted
     # (missing, halted, low quality) rather than for an economic reason.
     data_unavailable_reason: str | None = None
+    # Stable identity of the holding this result describes (Holding.stable_key)
+    # and the participation rate the risk model assumed when sizing its exit.
+    instrument_key: str = ""
+    participation_rate: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -312,6 +316,7 @@ class LiquidationOrder:
     order_type: str
     estimated_cash_recovery: float
     reason: str
+    instrument_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -355,6 +360,8 @@ class PortfolioEvaluation:
     # unavailable; the account needs manual review (audit finding C3).
     data_review_required: bool = False
     data_unavailable_assets: list[str] = field(default_factory=list)
+    # Full output of app.liquidation.planning.plan_recovery (dict form).
+    recovery_plan: dict | None = None
 
 
 @dataclass(frozen=True)
