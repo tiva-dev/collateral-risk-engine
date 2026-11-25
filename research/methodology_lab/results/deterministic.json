@@ -1,0 +1,339 @@
+{
+  "factors_v062": [
+    {
+      "vol": 0.15,
+      "volatility": 0.9412,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 0.545,
+      "stress": 0.8596,
+      "data_quality": 1.0,
+      "product": 0.424,
+      "effective_ltv": 0.2756,
+      "slv_ratio": 0.9385,
+      "horizon_days": 1.0
+    },
+    {
+      "vol": 0.25,
+      "volatility": 0.9412,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 0.545,
+      "stress": 0.8596,
+      "data_quality": 1.0,
+      "product": 0.424,
+      "effective_ltv": 0.2756,
+      "slv_ratio": 0.9385,
+      "horizon_days": 1.0
+    },
+    {
+      "vol": 0.35,
+      "volatility": 0.9412,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 0.545,
+      "stress": 0.8596,
+      "data_quality": 1.0,
+      "product": 0.424,
+      "effective_ltv": 0.2756,
+      "slv_ratio": 0.9385,
+      "horizon_days": 1.0
+    },
+    {
+      "vol": 0.5,
+      "volatility": 0.9161,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 0.545,
+      "stress": 0.8596,
+      "data_quality": 1.0,
+      "product": 0.4127,
+      "effective_ltv": 0.2682,
+      "slv_ratio": 0.9133,
+      "horizon_days": 1.0
+    },
+    {
+      "vol": 0.75,
+      "volatility": 0.8741,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 0.545,
+      "stress": 0.8493,
+      "data_quality": 1.0,
+      "product": 0.3891,
+      "effective_ltv": 0.2529,
+      "slv_ratio": 0.8713,
+      "horizon_days": 1.0
+    },
+    {
+      "vol": 1.0,
+      "volatility": 0.8321,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 0.545,
+      "stress": 0.799,
+      "data_quality": 1.0,
+      "product": 0.3485,
+      "effective_ltv": 0.2265,
+      "slv_ratio": 0.8293,
+      "horizon_days": 1.0
+    }
+  ],
+  "factors_v070": [
+    {
+      "vol": 0.15,
+      "volatility": 0.9748,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 1.0,
+      "stress": 0.8596,
+      "data_quality": 1.0,
+      "product": 0.8058,
+      "effective_ltv": 0.65,
+      "slv_ratio": 0.972,
+      "horizon_days": 1.0
+    },
+    {
+      "vol": 0.25,
+      "volatility": 0.958,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 1.0,
+      "stress": 0.8596,
+      "data_quality": 1.0,
+      "product": 0.7919,
+      "effective_ltv": 0.65,
+      "slv_ratio": 0.9552,
+      "horizon_days": 1.0
+    },
+    {
+      "vol": 0.35,
+      "volatility": 0.9412,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 1.0,
+      "stress": 0.8596,
+      "data_quality": 1.0,
+      "product": 0.778,
+      "effective_ltv": 0.65,
+      "slv_ratio": 0.9385,
+      "horizon_days": 1.0
+    },
+    {
+      "vol": 0.5,
+      "volatility": 0.9161,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 1.0,
+      "stress": 0.8596,
+      "data_quality": 1.0,
+      "product": 0.7572,
+      "effective_ltv": 0.65,
+      "slv_ratio": 0.9133,
+      "horizon_days": 1.0
+    },
+    {
+      "vol": 0.75,
+      "volatility": 0.7991,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 1.0,
+      "stress": 0.7426,
+      "data_quality": 1.0,
+      "product": 0.5706,
+      "effective_ltv": 0.65,
+      "slv_ratio": 0.8713,
+      "horizon_days": 1.0
+    },
+    {
+      "vol": 1.0,
+      "volatility": 0.7321,
+      "liquidity": 0.9625,
+      "spread": 0.9991,
+      "concentration": 1.0,
+      "stress": 0.7426,
+      "data_quality": 1.0,
+      "product": 0.5228,
+      "effective_ltv": 0.6379,
+      "slv_ratio": 0.8293,
+      "horizon_days": 1.0
+    }
+  ],
+  "volatility": [
+    {
+      "vol": 0.15,
+      "v062": 0.27472571999999995,
+      "v070": 0.6189668666840596,
+      "A_uncapped": 0.936291421020008,
+      "A_alpha995_uncapped": 0.9263257380839259
+    },
+    {
+      "vol": 0.25,
+      "v062": 0.27472571999999995,
+      "v070": 0.6189668666840596,
+      "A_uncapped": 0.8983446519921031,
+      "A_alpha995_uncapped": 0.8824375872671926
+    },
+    {
+      "vol": 0.35,
+      "v062": 0.27472571999999995,
+      "v070": 0.6189668666840596,
+      "A_uncapped": 0.8618194962253861,
+      "A_alpha995_uncapped": 0.8404912992017105
+    },
+    {
+      "vol": 0.5,
+      "v062": 0.26737510999999997,
+      "v070": 0.5968551704930865,
+      "A_uncapped": 0.8095769413822751,
+      "A_alpha995_uncapped": 0.7810198730893296
+    },
+    {
+      "vol": 0.75,
+      "v062": 0.25206219,
+      "v070": 0.5604909527785026,
+      "A_uncapped": 0.7288610542468695,
+      "A_alpha995_uncapped": 0.6904098562636332
+    },
+    {
+      "vol": 1.0,
+      "v062": 0.22576362,
+      "v070": 0.5252386090529613,
+      "A_uncapped": 0.6554368553829044,
+      "A_alpha995_uncapped": 0.6094149042810036
+    }
+  ],
+  "correlation": [
+    {
+      "rho": 0.0,
+      "v062": 0.5028527,
+      "v070": 0.6189668666840596,
+      "A_uncapped": 0.9549872333363921,
+      "single_name_A_uncapped": 0.8799078791654978
+    },
+    {
+      "rho": 0.2,
+      "v062": 0.5028527,
+      "v070": 0.6189668666840596,
+      "A_uncapped": 0.9309497470651135,
+      "single_name_A_uncapped": 0.8799078791654978
+    },
+    {
+      "rho": 0.5,
+      "v062": 0.5028527,
+      "v070": 0.6189668666840596,
+      "A_uncapped": 0.9075628704886857,
+      "single_name_A_uncapped": 0.8799078791654978
+    },
+    {
+      "rho": 0.8,
+      "v062": 0.5028527,
+      "v070": 0.6189668666840596,
+      "A_uncapped": 0.8899198303873337,
+      "single_name_A_uncapped": 0.8799078791654978
+    },
+    {
+      "rho": 0.95,
+      "v062": 0.5028527,
+      "v070": 0.6189668666840596,
+      "A_uncapped": 0.8823098179235336,
+      "single_name_A_uncapped": 0.8799078791654978
+    }
+  ],
+  "size": [
+    {
+      "position_over_adv": 0.01,
+      "v062": 0.27405471000000003,
+      "v070": 0.6189668666840596,
+      "A_uncapped": 0.8799078791654978,
+      "A_recovery_days": 6.0
+    },
+    {
+      "position_over_adv": 0.1,
+      "v062": 0.26910105,
+      "v070": 0.6189668666840596,
+      "A_uncapped": 0.8799078791654978,
+      "A_recovery_days": 6.0
+    },
+    {
+      "position_over_adv": 0.5,
+      "v062": 0.22415025,
+      "v070": 0.5733348485520481,
+      "A_uncapped": 0.8594458161940511,
+      "A_recovery_days": 10.0
+    },
+    {
+      "position_over_adv": 1.0,
+      "v062": 0.18134918,
+      "v070": 0.5165885470910515,
+      "A_uncapped": 0.8379249352092947,
+      "A_recovery_days": 15.0
+    },
+    {
+      "position_over_adv": 3.0,
+      "v062": 0.09882372,
+      "v070": 0.37705935050873995,
+      "A_uncapped": 0.7740134589365869,
+      "A_recovery_days": 35.0
+    },
+    {
+      "position_over_adv": 10.0,
+      "v062": 0.02162795,
+      "v070": 0.15510024132533268,
+      "A_uncapped": 0.6425374159001829,
+      "A_recovery_days": 105.0
+    }
+  ],
+  "cure": [
+    {
+      "S": 110000,
+      "O": 100000,
+      "c": 1.2,
+      "theta": 1.0,
+      "external_repayment": 8333.33,
+      "collateral_injection": 10000.0,
+      "coverage_if_cash_amount_sold": 1.1091,
+      "collateral_funded_sale": 50000.0
+    },
+    {
+      "S": 110000,
+      "O": 100000,
+      "c": 1.2,
+      "theta": 1.05,
+      "external_repayment": 8333.33,
+      "collateral_injection": 10000.0,
+      "coverage_if_cash_amount_sold": 1.1142,
+      "collateral_funded_sale": 38461.54
+    },
+    {
+      "S": 110000,
+      "O": 100000,
+      "c": 1.2,
+      "theta": 0.95,
+      "external_repayment": 8333.33,
+      "collateral_injection": 10000.0,
+      "coverage_if_cash_amount_sold": 1.1041,
+      "collateral_funded_sale": 71428.57
+    },
+    {
+      "S": 115000,
+      "O": 100000,
+      "c": 1.3,
+      "theta": 1.0,
+      "external_repayment": 11538.46,
+      "collateral_injection": 15000.0,
+      "coverage_if_cash_amount_sold": 1.1696,
+      "collateral_funded_sale": 50000.0
+    },
+    {
+      "S": 95000,
+      "O": 100000,
+      "c": 1.2,
+      "theta": 1.0,
+      "external_repayment": 20833.33,
+      "collateral_injection": 25000.0,
+      "coverage_if_cash_amount_sold": 0.9368,
+      "collateral_funded_sale": "infeasible: full liquidation"
+    }
+  ]
+}
