@@ -35,6 +35,12 @@ SNAPSHOT_SCHEMA = "cri-historical-snapshot/v1"
 # engineering notes, not legal advice; "review_required" means Tiva must
 # confirm the plan in use permits this use before evidence relies on it.
 PROVIDER_LICENCES: dict[str, dict[str, str]] = {
+    "cbn": {
+        "status": "public",
+        "storage": "public official statistics",
+        "redistribution": "attribute the Central Bank of Nigeria",
+        "note": "Official CBN exchange rates from the public JSON feed.",
+    },
     "ngnmarket": {
         "status": "review_required",
         "storage": "internal storage of retrieved data for validation",
