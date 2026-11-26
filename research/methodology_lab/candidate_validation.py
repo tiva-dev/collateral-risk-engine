@@ -308,8 +308,27 @@ def main() -> None:
                       "skipped_reasons": sorted({x.get("skipped", "") for x in rows if "skipped" in x})[:5]}
     (out / f"{a.part}_summary.json").write_text(json.dumps({"info": info, "groups": summary}, default=str, indent=1))
     (out / f"{a.part}_cohorts.json").write_text(json.dumps(results, default=str))
-    print(json.dumps({g: {k: v for k, v in s.items() if k in ("cohorts", "skipped", "window")}
-                      for g, s in summary.items()}, default=str)[:6000])
+    # One compact line per group (artifact storage may be unreachable for readers).
+    keep = ("loans", "mean_capacity_share_of_principal", "loss_probability", "loss_probability_ci95", "expected_loss",
+            "expected_loss_ci95", "es99_loss", "worst_loss", "margin_calls_per_loan", "liquidation_frequency",
+            "liquidation_frequency_ci95", "unnecessary_liquidation_share", "borrower_execution_cost_share",
+            "liquidated_share_of_principal", "cure_payments_share", "recovery_sessions_median",
+            "recovery_sessions_p95", "residual_after_recovery_share", "time_restricted",
+            "time_margin_call_or_forced", "data_review_sessions", "no_fill_sessions", "censored")
+
+    def rnd(x: Any) -> Any:
+        if isinstance(x, float):
+            return round(x, 5)
+        if isinstance(x, list):
+            return [rnd(v) for v in x]
+        return x
+
+    for g, sm in summary.items():
+        line = {"group": g, "labels": sm["labels"], "cohorts": sm["cohorts"], "skipped": sm["skipped"],
+                "eff": round(sm["effective_independent_cohorts"], 1), "window": sm["window"],
+                "skipped_reasons": sm["skipped_reasons"][:2],
+                "v": {n: {k: rnd(m[k]) for k in keep if k in m} for n, m in sm["variants"].items()}}
+        print("RESULT " + json.dumps(line, default=str), flush=True)
 
 
 if __name__ == "__main__":
