@@ -90,11 +90,22 @@ if ! gcloud iam workload-identity-pools providers describe cri-repo --project "$
   gcloud iam workload-identity-pools providers create-oidc cri-repo --project "$OPS" --location global \
     --workload-identity-pool github --display-name "tiva-dev/collateral-risk-engine" \
     --issuer-uri "https://token.actions.githubusercontent.com" \
-    --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref,attribute.environment=assertion.environment,attribute.actor=assertion.actor" \
+    --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref,attribute.environment=assertion.environment,attribute.actor=assertion.actor,attribute.env_ref=assertion.environment + '@' + assertion.ref" \
     --attribute-condition "assertion.repository == '${REPO}'"
 fi
+# Keep the mapping current on an existing provider (adds env_ref).
+gcloud iam workload-identity-pools providers update-oidc cri-repo --project "$OPS" --location global \
+  --workload-identity-pool github --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref,attribute.environment=assertion.environment,attribute.actor=assertion.actor,attribute.env_ref=assertion.environment + '@' + assertion.ref" >/dev/null
 POOL="projects/${OPS_NUMBER}/locations/global/workloadIdentityPools/github"
-for env in terraform-dev terraform-staging terraform-production; do
+# Production Terraform only from the main branch: the binding requires both
+# the GitHub environment and the ref, so a feature branch cannot use it.
+gcloud iam service-accounts remove-iam-policy-binding "$TF_SA" --project "$OPS" \
+  --role roles/iam.workloadIdentityUser \
+  --member "principalSet://iam.googleapis.com/${POOL}/attribute.environment/terraform-production" >/dev/null 2>&1 || true
+gcloud iam service-accounts add-iam-policy-binding "$TF_SA" --project "$OPS" \
+  --role roles/iam.workloadIdentityUser \
+  --member "principalSet://iam.googleapis.com/${POOL}/attribute.env_ref/terraform-production@refs/heads/main" >/dev/null
+for env in terraform-dev terraform-staging; do
   gcloud iam service-accounts add-iam-policy-binding "$TF_SA" --project "$OPS" \
     --role roles/iam.workloadIdentityUser \
     --member "principalSet://iam.googleapis.com/${POOL}/attribute.environment/${env}" >/dev/null

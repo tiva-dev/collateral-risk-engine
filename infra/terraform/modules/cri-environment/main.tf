@@ -99,10 +99,15 @@ resource "google_service_account" "deployer" {
 
 # GitHub jobs running in the GitHub environment named after this environment
 # (dev, staging, production) can impersonate the deployer, and only those.
+locals {
+  # Production deploys are accepted only from the main branch.
+  deployer_principal = local.is_prod ? "principalSet://iam.googleapis.com/${var.wif_pool_name}/attribute.env_ref/production@refs/heads/main" : "principalSet://iam.googleapis.com/${var.wif_pool_name}/attribute.environment/${var.environment}"
+}
+
 resource "google_service_account_iam_member" "deployer_wif" {
   service_account_id = google_service_account.deployer.name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "principalSet://iam.googleapis.com/${var.wif_pool_name}/attribute.environment/${var.environment}"
+  member             = local.deployer_principal
 }
 
 resource "google_project_iam_member" "deployer_roles" {
