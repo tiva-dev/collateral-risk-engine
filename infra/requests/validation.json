@@ -1,1 +1,1 @@
-{"note": "candidate-2026.11.5 extended validation", "source_run_id": "45681534542"}
+{"note": "US on the SIP dataset 2018-2026 (includes March 2020)", "source_run_id": "45873299276", "parts": ["hist-US", "sim-US", "frontier-US", "repay-US", "sens-US"]}
