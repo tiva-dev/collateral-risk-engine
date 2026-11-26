@@ -23,6 +23,7 @@ PREFIX="${PREFIX:-tiva-cri}"
 SUFFIX="${SUFFIX:-$(echo -n "$BILLING_ACCOUNT" | sha256sum | cut -c1-4)}"
 REGION="${REGION:-europe-west1}"
 REPO="${GITHUB_REPO:-tiva-dev/collateral-risk-engine}"
+ORG="${ORG:-930851692765}"
 
 OPS="${PREFIX}-ops-${SUFFIX}"
 DEV="${PREFIX}-dev-${SUFFIX}"
@@ -30,23 +31,28 @@ STG="${PREFIX}-stg-${SUFFIX}"
 PRD="${PREFIX}-prd-${SUFFIX}"
 
 ensure_project () {
-  local id="$1" name="$2"
+  local id="$1" name="$2" link="$3"
   if ! gcloud projects describe "$id" >/dev/null 2>&1; then
-    gcloud projects create "$id" --name="$name" --labels=system=cri,owner=tiva
+    gcloud projects create "$id" --name="$name" --organization="$ORG" --labels=system=cri,owner=tiva
   fi
-  gcloud billing projects link "$id" --billing-account="$BILLING_ACCOUNT" >/dev/null
+  if [ "$link" = "link" ]; then
+    gcloud billing projects link "$id" --billing-account="$BILLING_ACCOUNT" >/dev/null
+  fi
 }
 
-ensure_project "$OPS" "CRI ops"
-ensure_project "$DEV" "CRI dev"
-ensure_project "$STG" "CRI staging"
-ensure_project "$PRD" "CRI production"
+ensure_project "$OPS" "CRI ops" link
+ensure_project "$DEV" "CRI dev" link
+ensure_project "$STG" "CRI staging" link
+# Production is created but NOT linked to billing: nothing billable can run in
+# it until Tiva approves production spend and links it (LINK_PRODUCTION=1).
+ensure_project "$PRD" "CRI production" "${LINK_PRODUCTION:+link}"
 
 gcloud services enable --project "$OPS" \
   iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com \
   serviceusage.googleapis.com storage.googleapis.com artifactregistry.googleapis.com \
   cloudbilling.googleapis.com billingbudgets.googleapis.com
-for p in "$DEV" "$STG" "$PRD"; do
+gcloud services enable --project "$OPS" orgpolicy.googleapis.com
+for p in "$DEV" "$STG" ${LINK_PRODUCTION:+"$PRD"}; do
   gcloud services enable --project "$p" serviceusage.googleapis.com cloudresourcemanager.googleapis.com \
     iam.googleapis.com cloudbilling.googleapis.com billingbudgets.googleapis.com
 done
@@ -92,6 +98,15 @@ for env in terraform-dev terraform-staging terraform-production; do
   gcloud iam service-accounts add-iam-policy-binding "$TF_SA" --project "$OPS" \
     --role roles/iam.workloadIdentityUser \
     --member "principalSet://iam.googleapis.com/${POOL}/attribute.environment/${env}" >/dev/null
+done
+
+echo "--- effective org policies that affect CRI (read-only)"
+for c in iam.allowedPolicyMemberDomains sql.restrictPublicIp sql.restrictAuthorizedNetworks \
+         iam.workloadIdentityPoolProviders run.allowedIngress gcp.resourceLocations \
+         iam.automaticIamGrantsForDefaultServiceAccounts storage.publicAccessPrevention; do
+  printf '%s => ' "$c"
+  gcloud org-policies describe "$c" --project "$OPS" --effective --billing-project "$OPS" \
+    --format='value(spec.rules)' 2>&1 | tr '\n' ' ' | cut -c1-120; echo
 done
 
 cat <<OUT
