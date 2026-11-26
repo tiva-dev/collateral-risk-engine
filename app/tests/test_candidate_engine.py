@@ -213,3 +213,11 @@ def test_lifecycle_aggregate_metrics() -> None:
 def test_candidate_config_marked_unapproved() -> None:
     assert "not approved" in CFG.to_dict()["status"]
     assert replace(CFG, restoration="early_warning").restoration == "early_warning"
+
+
+def test_daily_bar_quotes_without_bid_are_usable_and_flagged() -> None:
+    hs, md, bars, asof = setup()
+    nobid = {k: replace(v, bid=None, ask=None) for k, v in md.items()}
+    r = ev(hs, nobid, bars, asof)
+    assert r.approved_credit_limit > 0
+    assert all(any("bid not observed" in x for x in i["reasons"]) for i in r.instruments)

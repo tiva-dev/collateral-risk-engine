@@ -260,6 +260,7 @@ class CandidateEngine:
         legs: list[tuple[Holding, MarketData, InstrumentEstimate, Any, float]] = []
         assets: list[CandidateAsset] = []
         ceiling_value = 0.0
+        all_est: list[InstrumentEstimate] = []
         for h in holdings:
             if h.quantity <= 0:
                 continue
@@ -299,7 +300,20 @@ class CandidateEngine:
                 est.eligible = est.sessions >= cfg.min_sessions and est.data_quality >= cfg.min_data_quality
             participation = min(prof.max_participation_rate, ex.max_participation_rate)
             mv = h.quantity * md.last_price
-            sellable = bool(md.bid and md.bid > 0 and est.adv_shares and not md.halted and est.residuals.size >= 10)
+            all_est.append(est)
+            if not (md.bid and md.bid > 0):
+                # Daily-bar quotes carry no observed bid: the reference bid is the
+                # last price less the estimated half-spread, and it is flagged.
+                md = replace(md, bid=md.last_price * (1 - est.spread / 2))
+                market[h.stable_key] = md
+                est.reasons.append("bid not observed: reference bid = last price less estimated half-spread")
+            sellable = bool(est.adv_shares and not md.halted and est.residuals.size >= 10)
+            if not sellable:
+                why = ("halted" if md.halted else "no reported volume" if not est.adv_shares
+                       else f"only {est.residuals.size} residuals")
+                reasons.append(f"{h.asset_id}: not sellable in the model ({why}); no lending value")
+            elif not est.eligible:
+                reasons.append(f"{h.asset_id}: no lending value ({'; '.join(est.reasons[:2])})")
             lend_ok = est.eligible and sellable and not (md.halted and not policy.allow_lending_on_stale_or_halted_assets)
             leg_cost = est.spread * cfg.spread_stress_multiplier / 2 + ex.execution_cost_rate
             assets.append(CandidateAsset(
@@ -383,7 +397,7 @@ class CandidateEngine:
         plan_dict = None
         if plan and sim is not None and not data_review and not restriction and state in {
                 MarginState.MARGIN_CALL, MarginState.LIQUIDATION}:
-            plan_dict = self._plan(account_ref, holdings, loan, policy, market_data, assets, state, ex,
+            plan_dict = self._plan(account_ref, holdings, loan, policy, market, assets, state, ex,
                                    interest_policy, as_of, sim, cash, growth, grace, delay, settle)
             reasons.append(f"recovery: {plan_dict['action']} to the restoration target; expected net "
                            f"{plan_dict['expected_net_recovery']:,.2f} over "
@@ -403,7 +417,7 @@ class CandidateEngine:
             | {"current": ratio(balance)},
             approved_credit_limit=b0, current_available_credit=max(0.0, b0 - balance), margin_state=state,
             data_review_required=data_review, restriction=restriction, cure_amount=cure, asset_results=assets,
-            instruments=[e.summary() for e in est_list], recovery_plan=plan_dict, reasons=reasons,
+            instruments=[e.summary() for e in all_est], recovery_plan=plan_dict, reasons=reasons,
             parameters={"config": cfg.to_dict(), "grace_sessions": grace, "delay_sessions": delay,
                         "settlement_sessions": settle, "interest_rate": rate, "joint_scenarios": bool(sim and sim.joint),
                         "seed": seed, "priors": {k: vars(p) for k, p in self.priors.items()}},
