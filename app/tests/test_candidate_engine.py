@@ -503,3 +503,17 @@ def test_suspended_instrument_delayed_value_not_lendable_not_sellable() -> None:
     imp = ev(hs, md3, old, asof, cfg=replace(CFG, suspension_value="delayed"))
     assert "impaired" in next(a for a in imp.asset_results if a.asset_id == "AAA").notes
     assert imp.thresholds["delayed_recovery_value"] == 0
+
+
+def test_origination_capacity_ignores_normalised_balance_and_data_holds() -> None:
+    hs, bars, dates = _cohort_inputs()
+    c = run_cohort(holdings=hs, bars=bars, origination=dates[400], term_sessions=40, seed=2,
+                   config=CandidateConfig(n_paths=200), workout_sessions=20)
+    assert c["principal"] > 1000          # not the normalised test balance
+    for v in c["variants"].values():
+        assert v["mean_capacity"] is None or v["mean_capacity"] < 5 * c["principal"]
+    stale = {k: [b for b in v if b["bar_date"] != dates[400] and b["bar_date"] != dates[399]
+                 and b["bar_date"] != dates[398]] for k, v in bars.items()}
+    s2 = run_cohort(holdings=hs, bars=stale, origination=dates[400], term_sessions=40, seed=2,
+                    config=CandidateConfig(n_paths=200), workout_sessions=20)
+    assert "skipped" in s2 and "data" in s2["skipped"]

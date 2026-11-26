@@ -292,7 +292,12 @@ def run_cohort(
     cash0 = sum(h.quantity for h in holdings if h.asset_type == AssetType.CASH)
     v0 = sum(q0[k] * md0[k].last_price for k in md0) + cash0
     base = evaluate((), q0, Loan(1.0, currency=ccy), origination, md0)
-    p0 = float(principal if principal is not None else base.approved_credit_limit * principal_scale)
+    if principal is None and base.data_status != "ok":
+        # No new borrowing while material data is missing, stale or unreliable.
+        return {"origination": origination.isoformat(), "skipped": f"data {base.data_status} at origination",
+                "reasons": base.reasons[:6]}
+    cap0 = min(base.thresholds["initial_capacity_uncapped"], base.thresholds["client_ceiling"])
+    p0 = float(principal if principal is not None else cap0 * principal_scale)
     if p0 <= 0:
         return {"origination": origination.isoformat(), "skipped": "no lending capacity at origination",
                 "reasons": base.reasons[:6]}
@@ -402,8 +407,9 @@ def run_cohort(
                     elif maturity.startswith("partial:"):
                         pay = bal * float(maturity.split(":")[1])
                     elif maturity == "refinance":
-                        cap_m = (evaluate(v.engine, qty, loan, d, md).thresholds["initial_capacity"]
-                                 if v.kind == "adaptive" else ltv0 * value)
+                        th_m = evaluate(v.engine, qty, loan, d, md).thresholds if v.kind == "adaptive" else None
+                        cap_m = (min(th_m["initial_capacity_uncapped"], th_m["client_ceiling"]) if th_m
+                                 else ltv0 * value)
                         pay = bal if net_bal <= cap_m else 0.0
                 if pay > 0:
                     loan, _ = apply_repayment(loan, pay)
@@ -426,8 +432,12 @@ def run_cohort(
             if v.kind == "adaptive":
                 ev = evaluate(v.engine, qty, loan, d, md)
                 th = ev.thresholds
-                b0, b_ew, b_mc, b_f = (th["initial_capacity"], th["early_warning"], th["margin_call"],
-                                       th["forced_recovery"])
+                # Capacity from the collateral, not from the normalised loan used for caching;
+                # no additional borrowing while data is deteriorated.
+                b0 = min(th["initial_capacity_uncapped"], th["client_ceiling"])
+                if ev.data_status != "ok":
+                    b0 = min(b0, net_bal)
+                b_ew, b_mc, b_f = th["early_warning"], th["margin_call"], th["forced_recovery"]
                 target = th["restoration_target"] if v.restoration == "initial_capacity" else b_ew
                 te = ev.thresholds_economic
                 data_hold = ev.data_status == "missing" or (ev.data_status == "degraded"
