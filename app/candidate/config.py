@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-VERSION = "candidate-2026.11.4"
+VERSION = "candidate-2026.11.5"
 
 
 @dataclass(frozen=True)
@@ -59,6 +59,13 @@ class CandidateConfig:
     material_share: float = 0.02
     max_quote_lag_business_days: int = 1
     max_bar_lag_business_days: int = 2
+    # Research switches (27 Nov review). Defaults keep the authorised baseline.
+    headroom_mode: str = "fixed"              # fixed | adaptive (price-adjustment speed, liquidity, gaps, uncertainty)
+    max_headroom_sessions: int = 30
+    restoration_volatility: str = "current"   # current | long_run (restoration target on pre-shock volatility)
+    concentration_control: bool = False       # single-name jump add-on on capacity and restoration
+    suspension_value: str = "zero"            # zero | delayed (time- and uncertainty-adjusted recovery value)
+    permanent_impairment_sessions: int = 60   # no trades for longer: treated as impaired (value 0)
     # Simulation.
     n_paths: int = 2000
     history: int = 500

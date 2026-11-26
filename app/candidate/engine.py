@@ -283,33 +283,96 @@ class CandidateEngine:
 
     def _first_passage_level(self, sim: _Sim, q: np.ndarray, cash: float, b_mc: float, sessions: int,
                              conf: float) -> float:
-        """Largest B with P(B * G(t) > B_mc(t) for some t <= sessions) <= 1 - conf, where the
-        margin-call level moves with the lendable collateral value along each path."""
+        """Largest B with P(B * G(t) > B_mc(t) for some t <= sessions) <= 1 - conf.
+
+        The margin-call level evolves along each path: the lendable collateral
+        value moves with prices, and its recovery haircut H(t) is rescaled by
+        the path's portfolio volatility relative to today and by the square
+        root of the inverse of its volume multiplier (a slower exit lengthens
+        the recovery horizon), so the level falls when volatility rises or
+        liquidity dries up, not only when prices fall.
+        """
         v0 = float(q @ sim.price)
         c_part = cash / sim.growth[min(sim.growth.size - 1, 1 + sim.settle)]
         if v0 <= 0 or b_mc <= c_part:
             return max(0.0, min(b_mc, c_part))
-        mult = (sim.level[:, 1:sessions + 1] @ (q * sim.price)) / v0              # (M, h)
-        level_t = c_part + (b_mc - c_part) * mult
+        wv = q * sim.price
+        mult = (sim.level[:, 1:sessions + 1] @ wv) / v0                           # (M, h)
+        h0 = float(np.clip(1.0 - (b_mc - c_part) / v0, 0.0, 0.99))
+        w = wv / v0
+        sig_t = np.sqrt(((sim.sigma[:, 1:sessions + 1] * w) ** 2).sum(axis=2))     # (M, h)
+        sig_0 = float(np.sqrt(((sim.sigma[:, 0].mean(axis=0) * w) ** 2).sum())) or 1e-12
+        nu_t = np.maximum((sim.volume[:, 1:sessions + 1] * w).sum(axis=2), 0.05)
+        h_t = np.clip(h0 * (sig_t / sig_0) * np.sqrt(1.0 / nu_t), 0.0, 0.99)
+        level_t = c_part + v0 * mult * (1.0 - h_t)
         admissible = (level_t / sim.growth[1:sessions + 1][None, :]).min(axis=1)  # per path
         return float(min(b_mc, np.quantile(admissible, 1 - conf)))
 
-    def _thresholds(self, sim: _Sim, q: np.ndarray, cash: float, grace: int, delay: int) -> dict[str, float]:
+    def headroom_sessions(self, legs: list[dict[str, Any]], q: np.ndarray, sim: _Sim | None,
+                          exec_p95: float) -> tuple[int, dict[str, float]]:
+        """Origination headroom horizon. fixed: the authorised 5 sessions.
+        adaptive (research): longer when prices adjust slowly (variance ratio),
+        when the exit is slow, when tails are fat relative to volatility and when
+        parameters are uncertain. The same formula applies to every asset."""
         cfg = self.cfg
-        b_mc, mc_med, mc_p95 = self._coverage_es(sim, q, cash, 1 + grace, cfg.margin_call_confidence)
+        if cfg.headroom_mode != "adaptive" or sim is None or not np.any(q > 0):
+            return cfg.headroom_sessions, {}
+        w = q * sim.price / float(q @ sim.price)
+        vr = float(sum(wi * lg["est"].variance_ratio for wi, lg in zip(w, legs, strict=True)))
+        unc = float(sum(wi * lg["est"].posterior_sd_log_vol for wi, lg in zip(w, legs, strict=True)))
+        gap = float(sum(wi * max(0.0, lg["est"].worst_day_loss / max(4 * lg["est"].sigma_raw, 1e-9) - 1.0)
+                        for wi, lg in zip(w, legs, strict=True)))
+        h = cfg.headroom_sessions * vr * (1 + cfg.uncertainty_z * unc) + exec_p95 / 2 + cfg.headroom_sessions * gap
+        h_int = int(np.clip(round(h), cfg.headroom_sessions, min(cfg.max_headroom_sessions, sim.horizon)))
+        return h_int, {"variance_ratio": vr, "uncertainty": unc, "gap_excess": gap, "exit_p95": exec_p95}
+
+    def concentration_addon(self, legs: list[dict[str, Any]], q: np.ndarray, sim: _Sim | None) -> float:
+        """Single-name jump add-on (research): sum of w_i x V_i x J_i, J_i = 1.5 x the
+        worst observed one-session loss; negligible for diversified collateral."""
+        if not self.cfg.concentration_control or sim is None or not np.any(q > 0):
+            return 0.0
+        v = q * sim.price
+        w = v / v.sum()
+        j = np.array([min(0.9, 1.5 * lg["est"].worst_day_loss) for lg in legs])
+        return float((w * v * j).sum())
+
+    def _thresholds(self, sim: _Sim, q: np.ndarray, cash: float, grace: int, delay: int,
+                    headroom: int | None = None, delayed: float = 0.0, addon: float = 0.0,
+                    sim_restore: _Sim | None = None) -> dict[str, float]:
+        """delayed: present value of recoveries that cannot be executed now
+        (suspended instruments), counted in margin-call and forced coverage but
+        never in lending capacity or restoration. addon: concentration add-on."""
+        cfg = self.cfg
+        h = headroom or cfg.headroom_sessions
+        b_mc_l, mc_med, mc_p95 = self._coverage_es(sim, q, cash, 1 + grace, cfg.margin_call_confidence)
         b_f_raw, f_med, f_p95 = self._coverage_es(sim, q, cash, 1 + delay, cfg.forced_confidence)
-        b_f = max(b_mc, b_f_raw)
-        b0 = self._first_passage_level(sim, q, cash, b_mc, min(cfg.headroom_sessions, sim.horizon),
-                                       cfg.headroom_confidence)
-        b_ew_raw = self._first_passage_level(sim, q, cash, b_mc, min(cfg.warning_sessions, sim.horizon),
-                                             cfg.warning_confidence)
+        b_mc = b_mc_l + delayed
+        b_f = max(b_mc, b_f_raw + delayed)
+        g_h = float(sim.growth[min(sim.growth.size - 1, h)])
+        b0 = max(0.0, self._first_passage_level(sim, q, cash, b_mc_l, min(h, sim.horizon),
+                                                cfg.headroom_confidence) - addon / g_h)
+        b_ew_raw = self._first_passage_level(sim, q, cash, b_mc_l, min(cfg.warning_sessions, sim.horizon),
+                                             cfg.warning_confidence) + delayed
         b_ew = min(b_mc, max(b0, b_ew_raw))
+        if sim_restore is not None and sim_restore is not sim:
+            rb_mc, _, _ = self._coverage_es(sim_restore, q, cash, 1 + grace, cfg.margin_call_confidence)
+            restore = max(0.0, self._first_passage_level(sim_restore, q, cash, rb_mc, min(h, sim.horizon),
+                                                         cfg.headroom_confidence) - addon / g_h)
+            restore = min(restore, b_ew)
+        else:
+            restore = b0
         return {
             "initial_capacity_uncapped": b0, "early_warning": b_ew, "margin_call": b_mc, "forced_recovery": b_f,
-            "margin_call_proceeds": b_mc, "execution_sessions_median_mc": mc_med,
-            "execution_sessions_p95_mc": mc_p95, "execution_sessions_median_forced": f_med,
-            "execution_sessions_p95_forced": f_p95,
+            "margin_call_proceeds": b_mc, "executable_recovery_value": b_f_raw, "delayed_recovery_value": delayed,
+            "restoration_uncapped": restore, "concentration_addon": addon, "headroom_sessions": float(h),
+            "execution_sessions_median_mc": mc_med, "execution_sessions_p95_mc": mc_p95,
+            "execution_sessions_median_forced": f_med, "execution_sessions_p95_forced": f_p95,
         }
+
+    @staticmethod
+    def _scaled(sim: _Sim, k: np.ndarray) -> _Sim:
+        """Scenario set with log-returns scaled by k per instrument (k < 1: calmer)."""
+        return replace(sim, level=np.exp(np.log(sim.level) * k), sigma=sim.sigma * k)
 
     # ---------------------------------------------------------- evaluate
 
@@ -346,6 +409,7 @@ class CandidateEngine:
         assets: list[CandidateAsset] = []
         all_est: list[InstrumentEstimate] = []
         cash_ceiling = 0.0
+        suspended: list[tuple[Any, ...]] = []
 
         def last_bar_lag(h: Holding) -> int:
             rows = [b for b in bars.get(data_key(h), []) if str(b["bar_date"])[:10] <= day.isoformat()]
@@ -378,12 +442,20 @@ class CandidateEngine:
             dkey = data_key(h)
             prof0 = profile_for_exchange(h.exchange)
             lag0 = last_bar_lag(h)
-            if (md is not None and md.last_price > 0 and prof0 is not None and prof0.code in trading
-                    and lag0 > cfg.max_bar_lag_business_days):
-                reasons.append(f"{h.asset_id}: no trades for {lag0} business days while its market trades "
-                               "(suspension or no liquidity): economic risk; no lending value, not sellable now")
+            halted = md is not None and md.halted and md.last_price > 0
+            if md is not None and (halted or (md.last_price > 0 and prof0 is not None and prof0.code in trading
+                                              and lag0 > cfg.max_bar_lag_business_days)):
+                # Not trading while its market trades: economic risk, never sellable now.
+                # confirmed = exchange halt flag; impaired = no trades beyond the
+                # impairment horizon; otherwise a suspected suspension.
+                kind = ("impaired" if lag0 > cfg.permanent_impairment_sessions else
+                        "confirmed_suspension" if halted else "suspected_suspension")
+                reasons.append(f"{h.asset_id}: {kind.replace('_', ' ')} (no trades for {lag0} business days while "
+                               "its market trades): no lending value, not sellable now")
                 assets.append(CandidateAsset(h.stable_key, h.asset_id, h.quantity * md.last_price, False, False, 0.0,
-                                             1.0, 1.0, dkey, "not_trading", [f"no trades for {lag0} business days"]))
+                                             1.0, 1.0, dkey, "not_trading", [kind, f"no trades for {lag0} sessions"]))
+                if cfg.suspension_value == "delayed" and kind != "impaired" and prof0 is not None:
+                    suspended.append((h, md, prof0, lag0, kind))
                 continue
             if md is None or md.last_price <= 0 or (as_of - md.timestamp).days > ex.maximum_quote_age_days:
                 missing = True
@@ -481,8 +553,32 @@ class CandidateEngine:
             sim = _Sim([e.key for e in est_list], price, cap, np.array([lg["extra"] for lg in legs]),
                        self.cfg.impact_coefficient * np.sqrt(np.array([lg["part"] for lg in legs])),
                        level, sigma, volume, growth, horizon, settle, joint, sstats)
-            th = self._thresholds(sim, q_lend, cash, grace, delay)
-            th_econ = self._thresholds(sim, q_econ, cash, grace, delay) if data_status == "degraded" else th
+            # Delayed recovery value of suspended instruments (research): sold after the
+            # expected remaining suspension, valued at the q_mc lower bound over that
+            # horizon, less costs, discounted by contractual growth. Never lendable.
+            delayed = 0.0
+            for h_s, md_s, prof_s, lag_s, _kind in suspended:
+                est_s = estimate_instrument(data_key(h_s), bars.get(data_key(h_s), []), day,
+                                            self.priors.get(prof_s.code), prof_s.spread_floor, prof_s.spread_fallback,
+                                            cfg)
+                if not math.isfinite(est_s.sigma_used):
+                    continue
+                t_rem = max(5.0, est_s.mean_gap_spell, float(lag_s))
+                t_tot = int(min(growth.size - 1, t_rem + 1 + grace + settle))
+                z = float(stats.norm.ppf(cfg.margin_call_confidence))
+                val = h_s.quantity * md_s.last_price * math.exp(-z * est_s.sigma_used * math.sqrt(t_rem + 5))
+                delayed += val * (1 - est_s.spread) / float(growth[t_tot])
+            k = np.array([lg["est"].long_ratio for lg in legs])
+            sim_r = self._scaled(sim, k) if cfg.restoration_volatility == "long_run" else sim
+            th0 = self._thresholds(sim, q_lend, cash, grace, delay)
+            hz, hz_detail = self.headroom_sessions(legs, q_lend, sim, th0["execution_sessions_p95_mc"])
+            addon = self.concentration_addon(legs, q_lend, sim)
+            th = self._thresholds(sim, q_lend, cash, grace, delay, headroom=hz, delayed=delayed, addon=addon,
+                                  sim_restore=sim_r)
+            th_econ = (self._thresholds(sim, q_econ, cash, grace, delay, headroom=hz, delayed=delayed)
+                       if data_status == "degraded" else th)
+            self._last = (sim_r, hz, legs)
+            th["headroom_detail"] = hz_detail  # type: ignore[assignment]
         else:
             c = cash / growth[min(growth.size - 1, 1 + grace + settle)]
             th = {"initial_capacity_uncapped": c, "early_warning": c, "margin_call": c,
@@ -496,8 +592,8 @@ class CandidateEngine:
         b0 = min(th["initial_capacity_uncapped"], ceiling_value)
         th["client_ceiling"] = ceiling_value
         th["initial_capacity"] = b0
-        th["restoration_target"] = (th["initial_capacity_uncapped"] if cfg.restoration == "initial_capacity"
-                                    else th["early_warning"])
+        th["restoration_target"] = (th.get("restoration_uncapped", th["initial_capacity_uncapped"])
+                                    if cfg.restoration == "initial_capacity" else th["early_warning"])
         if restriction:
             b0 = th["initial_capacity"] = 0.0
 
@@ -543,15 +639,17 @@ class CandidateEngine:
             state = MarginState.RESTRICT_NEW_BORROWING
         cure = max(0.0, balance - th["restoration_target"]) if state in BAD else 0.0
         reasoning = {
-            "initial_capacity": (f"{b0:,.2f}: largest balance whose chance of crossing the margin-call level at any "
-                                 f"session within {cfg.headroom_sessions} sessions is at most "
+            "initial_capacity": (f"{b0:,.2f}: largest balance whose estimated chance of crossing the margin-call "
+                                 f"level at any session within {int(th.get('headroom_sessions', cfg.headroom_sessions))}"
+                                 " sessions is at most "
                                  f"{1 - cfg.headroom_confidence:.0%} (first passage, contractual interest), "
                                  f"capped by the client ceiling {ceiling_value:,.2f}"
                                  + ("; no additional borrowing while data is deteriorated" if data_status != "ok"
                                     else "")),
             "early_warning": (f"{th['early_warning']:,.2f}: a {cfg.warning_sessions}-session path reaches the "
                               f"margin-call level with probability {1 - cfg.warning_confidence:.0%}"),
-            "margin_call": (f"{th['margin_call']:,.2f}: mean coverage of the worst {1 - cfg.margin_call_confidence:.0%}"
+            "margin_call": ("expected-shortfall level, not a guarantee about loss probability; "
+                            f"{th['margin_call']:,.2f}: mean coverage of the worst {1 - cfg.margin_call_confidence:.0%}"
                             f" of paths if the borrower is given {grace} session(s) of grace, then the collateral is "
                             f"sold at the participation cap of simulated volume and settles in {settle} session(s); "
                             f"median sale {th.get('execution_sessions_median_mc', 0):.0f} sessions, "
@@ -630,8 +728,10 @@ class CandidateEngine:
                 if restoration_override is not None:
                     target = restoration_override(q, c, sim)
                 else:
-                    th = engine._thresholds(sim, q, c, grace, delay)
-                    target = (th["initial_capacity_uncapped"] if engine.cfg.restoration == "initial_capacity"
+                    sim_r, hz, _ = engine._last
+                    th = engine._thresholds(sim, q, c, grace, delay, headroom=hz,
+                                            addon=engine.concentration_addon(legs, q, sim), sim_restore=sim_r)
+                    target = (th["restoration_uncapped"] if engine.cfg.restoration == "initial_capacity"
                               else th["early_warning"])
                 ok = residual.balance <= target
                 return type("R", (), {"margin_state": MarginState.SAFE if ok else MarginState.MARGIN_CALL,

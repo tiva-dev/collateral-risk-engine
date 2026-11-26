@@ -380,7 +380,7 @@ def test_lifecycle_sells_through_the_planner() -> None:
     hs, bars, dates = _cohort_inputs()
     c = run_cohort(holdings=hs, bars=bars, origination=dates[400], term_sessions=63, seed=3,
                    config=CandidateConfig(n_paths=300), workout_sessions=40)
-    liq = [e for v in c["variants"].values() for e in v["events"] if e["event"] == "liquidation"]
+    liq = [e for v in c["variants"].values() for e in v["events"] if e["event"] == "liquidation_decided"]
     assert liq
     for e in liq:
         assert e["orders"]
@@ -404,3 +404,102 @@ def test_suspension_is_economic_not_data_deterioration() -> None:
     assert r.deterioration in {None, "economic"}
     if r.margin_state in {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}:
         assert r.deterioration == "economic" and r.recovery_plan is not None
+
+
+# ------------------------------------------- lifecycle regression tests (27 Nov)
+
+def _crash_cohort(**kw):
+    hs, bars, dates = _cohort_inputs()
+    return run_cohort(holdings=hs, bars=bars, origination=dates[400], term_sessions=63, seed=3,
+                      config=CandidateConfig(n_paths=300), **{"workout_sessions": 40, **kw})
+
+
+def test_no_same_session_execution() -> None:
+    c = _crash_cohort()
+    seen = 0
+    for v in c["variants"].values():
+        decided = {e["session"] for e in v["events"] if e["event"] == "liquidation_decided"}
+        for e in v["events"]:
+            if e["event"] == "first_fill":
+                seen += 1
+                assert e["session"] > e["episode"] and e["episode"] in decided
+    assert seen
+
+
+def test_market_state_is_isolated_per_pass() -> None:
+    from app.candidate.lifecycle import _Feed
+
+    hs, bars, dates = _cohort_inputs()
+    keys = {h.stable_key: data_key(h) for h in hs if h.asset_type != AssetType.CASH}
+    series = {dk: {b["bar_date"]: b for b in bars[dk]} for dk in keys.values()}
+    a, b = _Feed(hs, keys, series), _Feed(hs, keys, series)
+    a.market(dates[-1])
+    md = b.market(dates[100])
+    assert all(m.timestamp.date() == dates[100] for m in md.values())
+
+
+def test_limit_down_close_does_not_fill() -> None:
+    from app.candidate.lifecycle import limit_locked
+
+    assert limit_locked(100.0, 90.0, 0.10)
+    assert not limit_locked(100.0, 91.0, 0.10)
+    assert not limit_locked(100.0, 50.0, None)
+
+
+def test_default_at_maturity_and_censoring() -> None:
+    hs, bars, dates = _cohort_inputs()
+    thin = {k: [dict(b, volume=1.0) if b["bar_date"] > dates[400] else b for b in v] for k, v in bars.items()}
+    c = run_cohort(holdings=hs, bars=thin, origination=dates[400], term_sessions=30, seed=1, maturity="default",
+                   config=CandidateConfig(n_paths=200), workout_sessions=3)
+    for v in c["variants"].values():
+        assert v["defaulted_at_maturity"]
+        assert v["censored"] and v["lender_loss"] is None and v["outstanding_debt"] > 0
+        assert v["residual_collateral_estimate"] > 0
+
+
+def test_recovery_counts_only_settled_proceeds() -> None:
+    c = _crash_cohort(maturity="default")
+    for v in c["variants"].values():
+        assert v["realized_recovery"] <= v["executed_gross"] - v["execution_costs"] + 1e-6
+
+
+def test_partial_repayment_scenario() -> None:
+    c = _crash_cohort(maturity="partial:0.5")
+    for v in c["variants"].values():
+        if v["borrower_repayment"] > 0:
+            assert not v["repaid_at_maturity"] and v["defaulted_at_maturity"]
+
+
+def test_research_switches_behave() -> None:
+    hs, md, bars, asof = setup()
+    base = ev(hs, md, bars, asof).thresholds
+    adaptive_h = ev(hs, md, bars, asof, cfg=replace(CFG, headroom_mode="adaptive")).thresholds
+    assert adaptive_h["headroom_sessions"] >= base["headroom_sessions"]
+    assert adaptive_h["initial_capacity_uncapped"] <= base["initial_capacity_uncapped"] + 1e-6
+    conc = ev(hs[:1] + hs[2:], md, bars, asof, cfg=replace(CFG, concentration_control=True)).thresholds
+    plain = ev(hs[:1] + hs[2:], md, bars, asof).thresholds
+    assert conc["concentration_addon"] > 0 and conc["initial_capacity_uncapped"] < plain["initial_capacity_uncapped"]
+    lr = ev(hs, md, bars, asof, cfg=replace(CFG, restoration_volatility="long_run")).thresholds
+    assert lr["restoration_uncapped"] <= lr["early_warning"] + 1e-6
+
+
+def test_suspended_instrument_delayed_value_not_lendable_not_sellable() -> None:
+    hs, md, bars, asof = setup()
+    key = data_key(hs[0])
+    k_md = next(k for k in md if "AAA" in k)
+    susp = dict(bars, **{key: bars[key][:-6]})
+    md2 = dict(md)
+    md2[k_md] = replace(md[k_md], timestamp=asof - timedelta(days=8))
+    zero = ev(hs, md2, susp, asof).thresholds
+    delayed = ev(hs, md2, susp, asof, cfg=replace(CFG, suspension_value="delayed")).thresholds
+    assert delayed["delayed_recovery_value"] > 0
+    assert delayed["margin_call"] > zero["margin_call"]                     # economic value recognised
+    assert delayed["initial_capacity"] == pytest.approx(zero["initial_capacity"], rel=1e-6)  # not lendable
+    r = ev(hs, md2, susp, asof, cfg=replace(CFG, suspension_value="delayed"))
+    assert not next(a for a in r.asset_results if a.asset_id == "AAA").eligible        # not sellable now
+    old = dict(bars, **{key: bars[key][:-80]})
+    md3 = dict(md)
+    md3[k_md] = replace(md[k_md], timestamp=asof - timedelta(days=5))
+    imp = ev(hs, md3, old, asof, cfg=replace(CFG, suspension_value="delayed"))
+    assert "impaired" in next(a for a in imp.asset_results if a.asset_id == "AAA").notes
+    assert imp.thresholds["delayed_recovery_value"] == 0

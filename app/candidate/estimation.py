@@ -25,6 +25,7 @@ This is a stated modelling assumption, not a substitute for missing data.
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass, field
 from datetime import date
@@ -62,6 +63,9 @@ class InstrumentEstimate:
     spread_source: str
     eligible: bool
     reasons: list[str] = field(default_factory=list)
+    long_ratio: float = 1.0           # long-run / max(EWMA, long-run) volatility
+    worst_day_loss: float = 0.0       # largest one-session loss in the last 250 sessions
+    mean_gap_spell: float = 1.0       # mean length (sessions) of runs of missing sessions
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -226,10 +230,14 @@ def estimate_instrument(
         reasons.append(f"empirical tail weighted {tail_weight:.0%}; remainder Student-t(4)")
     if vr > 1.2:
         reasons.append(f"variance ratio {vr:.2f}: daily volatility scaled for multi-session dependence")
+    gaps = [int(np.busday_count(a, b)) - 1 for a, b in itertools.pairwise(dates)]
+    spells = [g for g in gaps if g > 0]
     return InstrumentEstimate(
         key, n, dates, r, resid, sigma_raw, vr, sigma_own, sigma_post, sigma_used, w, sd_post, n_eff,
         stale_share, missing_share, range_share, volume_share, dq, tail_weight, adv, spread, source,
-        eligible, reasons)
+        eligible, reasons, long_ratio=float(min(1.0, long / sigma_raw)),
+        worst_day_loss=float(max(0.0, -float(np.min(r[-250:])))) if r.size else 0.0,
+        mean_gap_spell=float(np.mean(spells)) if spells else 1.0)
 
 
 def group_prior(log_vols: list[float], source: str) -> Prior | None:
