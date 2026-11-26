@@ -92,6 +92,24 @@ def validate_provider_coverage(
         target.append(f"{classification} missing symbol: {symbol}")
     for pair in result["missing_fx_pairs"]:
         result["blocking_errors"].append(f"blocking missing FX pair: {pair}")
+    # Calendar-aware coverage (late start / silent truncation, stale end,
+    # unexplained gaps). A series that exists but does not cover the window
+    # blocks official evidence just as a missing series does.
+    coverage_series = (data.get("coverage_validation") or {}).get("series") or {}
+    result["coverage_validation"] = {}
+    for name in required + list(required_fx_pairs):
+        report = coverage_series.get(name)
+        if not report:
+            continue
+        result["coverage_validation"][name] = report.get("status")
+        if report.get("status") == "fail":
+            for failure in report.get("failures") or []:
+                result["blocking_errors"].append(
+                    f"blocking coverage failure: {name}: {failure}"
+                )
+        elif report.get("status") == "warn":
+            for warning in report.get("warnings") or []:
+                result["warnings"].append(f"coverage warning: {name}: {warning}")
     result["methodology_notes"] = list(data.get("methodology_notes") or [])
     result["passed"] = not result["blocking_errors"]
     return result

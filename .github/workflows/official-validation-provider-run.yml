@@ -20,7 +20,7 @@ on:
         required: true
         default: "all"
         type: choice
-        options: ["alpaca", "ngnmarket", "alpha_vantage", "all"]
+        options: ["alpaca", "ngnmarket", "alpha_vantage", "cbn", "all"]
       start_date:
         description: "Dataset start date"
         required: true
@@ -103,6 +103,16 @@ jobs:
           if [ "$FORCE_REFRESH" = "true" ]; then args+=(--force-refresh); fi
           if [ "$QUOTA_OVERRIDE" = "true" ]; then args+=(--quota-override); fi
           python -m app.simulations.build_official_dataset "${args[@]}" | tee data/simulation_results/dataset_build.log
+      - name: Report coverage, FX selection and imputation
+        if: ${{ inputs.dry_run != 'true' }}
+        run: |
+          manifest=$(find data/simulation_results -name '*.manifest.json' | sort | tail -n 1)
+          python tools/data_inventory/report_manifest.py "$manifest" | tee data/simulation_results/coverage_report.txt
+      - name: Create and verify checksummed snapshot
+        if: ${{ inputs.dry_run != 'true' }}
+        run: |
+          manifest=$(find data/simulation_results -name '*.manifest.json' | sort | tail -n 1)
+          python -m app.historical_data.snapshot create "$manifest" data/snapshots | tee data/simulation_results/snapshot_ledger.json
       - name: Run official validation
         if: ${{ inputs.run_validation_after_build == 'true' }}
         shell: bash
@@ -130,7 +140,18 @@ jobs:
             data/simulation_results/**/simulation_assumptions.md
             data/simulation_results/**/calibration_diagnostics.*
             data/simulation_results/**/dataset_build.log
+            data/simulation_results/**/coverage_report.txt
+            data/simulation_results/**/snapshot_ledger.json
             data/simulation_results/**/checkpoints/*.json
             data/historical_cache/normalized/**
             data/historical_cache/raw/**
           if-no-files-found: warn
+          retention-days: 90
+      - name: Upload checksummed snapshot
+        if: ${{ always() && inputs.dry_run != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-data-snapshot
+          path: data/snapshots/**
+          if-no-files-found: warn
+          retention-days: 90
