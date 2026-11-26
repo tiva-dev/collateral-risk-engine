@@ -1,1 +1,1 @@
-{"environment": "staging", "report_only": true, "note": "operational report after ingestion fix"}
+{"environment": "staging", "report_only": true, "note": "report with scheduler and worker logs"}

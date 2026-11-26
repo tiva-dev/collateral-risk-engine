@@ -151,3 +151,12 @@ jobs:
           KEY=$(gcloud secrets versions access latest --secret cri-sandbox-api-key --project ${{ steps.cfg.outputs.project }})
           ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project ${{ steps.cfg.outputs.project }})
           python infra/scripts/staging_report.py --url "$URL" --key "$KEY" --admin-key "$ADMIN"
+      - name: Recent worker and scheduler logs
+        if: always()
+        run: |
+          P=${{ steps.cfg.outputs.project }}
+          gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="cri-worker" AND (httpRequest.requestUrl:"/internal" OR severity>=WARNING)' \
+            --project $P --freshness=3h --limit=40 \
+            --format='table(timestamp, httpRequest.requestMethod, httpRequest.status, httpRequest.requestUrl, severity, textPayload.slice(0:160))' || true
+          gcloud logging read 'resource.type="cloud_scheduler_job"' --project $P --freshness=3h --limit=20 \
+            --format='table(timestamp, resource.labels.job_id, severity, jsonPayload.status, jsonPayload.debugInfo.slice(0:120))' || true
