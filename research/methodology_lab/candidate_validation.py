@@ -45,10 +45,14 @@ from app.candidate.engine import data_key
 from app.candidate.estimation import group_prior, raw_daily_vol
 from app.candidate.lifecycle import (
     DEFAULT_VARIANTS,
+    RESEARCH_VARIANTS,
     aggregate,
+    clustered_interval,
     cure_sensitivity,
+    metrics,
     run_cohort,
     simulated_bars,
+    variant_rows,
 )
 from app.core.enums import AssetType
 from app.core.models import Holding, Policy
@@ -56,6 +60,12 @@ from app.credit.interest import InterestPolicy
 from app.liquidation.policy import LiquidationExecutionPolicy
 
 DEV_START = date(2026, 2, 16)
+# Data tiers (docs/governance/DATA_TIERS.md). Every historical session in this
+# dataset has been examined in earlier CRI research, so none of it is locked
+# unseen validation data. Locked data begins after LOCK_DATE and is reserved.
+LOCK_DATE = date(2026, 11, 26)
+ALL_VARIANTS = DEFAULT_VARIANTS + RESEARCH_VARIANTS
+COMPARE = (DEFAULT_VARIANTS[0], DEFAULT_VARIANTS[1], DEFAULT_VARIANTS[2], RESEARCH_VARIANTS[-1])
 CFG = CandidateConfig(n_paths=400)
 EXCH = {"US": "NYSE", "NGX": "NGX"}
 CCY = {"US": "USD", "NGX": "NGN"}
@@ -71,7 +81,7 @@ PORTFOLIOS = {
             "mixed": {"MTNN": .25, "DANGCEM": .25, "GTCO": .25, "SEPLAT": .25},
             "telco": {"MTNN": .6, "AIRTELAFRI": .4}},
 }
-STRESS = ("base", "overnight_gap", "consecutive_adverse", "suspension", "liquidity_collapse",
+STRESS = ("base", "overnight_gap", "consecutive_adverse", "suspension", "liquidity_collapse", "combined",
           "correlated_drawdown", "short_history")
 
 
@@ -173,6 +183,19 @@ def stress_paths(hist: dict[str, list[dict[str, Any]]], keys: list[str], kind: s
         for k in keys:
             out[k][t0:t0 + 20] = out[k][t0:t0 + 20] * 2 + math.log(0.7) / 20
             vm[k][t0:t0 + 20] = 0.5
+    elif kind == "combined":
+        # Gap, then a correlated drawdown with collapsing liquidity, and a suspension
+        # of the largest holding in the middle of it.
+        g = min(-0.10, 1.5 * worst)
+        for k in keys:
+            out[k][t0] += g
+            out[k][t0 + 1:t0 + 21] = out[k][t0 + 1:t0 + 21] * 2 + math.log(0.75) / 20
+            vm[k][t0:t0 + 30] = 0.2
+        big = keys[0]
+        s0 = t0 + 5
+        cum = float(np.nansum(out[big][s0:s0 + 8])) - 2 * sig[big] * math.sqrt(8)
+        out[big][s0:s0 + 8] = np.nan
+        out[big][min(days - 1, s0 + 8)] += cum
     return out, vm
 
 
@@ -184,7 +207,8 @@ def run_task(t: dict[str, Any]) -> dict[str, Any]:
                          term_sessions=t["term"], variants=t["variants"], policy=Policy.default(),
                          interest=InterestPolicy(t["rate"], accrual_frequency="monthly", compounding="compound"),
                          execution=LiquidationExecutionPolicy(), cure_probability=t.get("cure", 0.5),
-                         seed=t["seed"], config=CFG, priors=t["priors"], workout_sessions=40)
+                         seed=t["seed"], config=CFG, priors=t["priors"], workout_sessions=40,
+                         maturity=t.get("maturity", "repay"), principal_scale=t.get("scale", 1.0))
     except ValueError as exc:
         res = {"origination": t["origination"].isoformat(), "skipped": str(exc)}
     res["group"] = t["group"]
@@ -220,15 +244,31 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
                 d = dates[oi]
                 prices = {s: next(b["close"] for b in reversed(bars[refs[s]]) if b["bar_date"] <= d) for s in weights}
                 hs = holdings_for(market, weights, prices, size)
-                period = "development" if d >= DEV_START else "held_out"
+                period = ("previously_examined_2026" if d >= DEV_START else "previously_examined_pre_2026_02_16")
                 pri = priors_at(market, all_market, d)
                 base_labels = {"market": market, "portfolio": pname, "size": size, "period": period,
                                "data": "observed" + ("+assumption_liq20d" if market == "NGX" else "")}
                 if mode == "hist":
                     seed += 1
                     tasks.append({"holdings": hs, "bars": bars, "origination": d, "term": 63, "rate": RATE[market],
-                                  "variants": DEFAULT_VARIANTS, "seed": seed, "priors": pri,
+                                  "variants": ALL_VARIANTS, "seed": seed, "priors": pri,
                                   "group": f"hist|{pname}|{size}|{period}", "labels": base_labels})
+                elif mode == "repay" and pname in ("concentrated_TSLA", "diversified", "banks", "mixed"):
+                    for mat, cure in (("default", 0.5), ("partial:0.5", 0.5), ("refinance", 0.5), ("default", 0.0)):
+                        seed += 1
+                        tag = "zero_voluntary" if cure == 0.0 else mat
+                        tasks.append({"holdings": hs, "bars": bars, "origination": d, "term": 63,
+                                      "rate": RATE[market], "variants": COMPARE, "seed": seed, "priors": pri,
+                                      "maturity": mat, "cure": cure, "group": f"repay|{tag}|{pname}|{period}",
+                                      "labels": {**base_labels, "maturity": tag}})
+                elif mode == "frontier":
+                    for scale in (0.7, 0.85, 1.0, 1.15):
+                        seed += 1
+                        tasks.append({"holdings": hs, "bars": bars, "origination": d, "term": 63,
+                                      "rate": RATE[market], "variants": COMPARE, "seed": seed, "priors": pri,
+                                      "maturity": "refinance", "scale": scale,
+                                      "group": f"frontier|scale{scale}|{pname}|{size}",
+                                      "labels": {**base_labels, "principal_scale": scale, "maturity": "refinance"}})
                 elif mode == "sens" and pname in ("concentrated_TSLA", "diversified", "banks", "mixed"):
                     for rate, term in ((0.05, 63), (0.30, 63), (RATE[market], 21), (RATE[market], 126)):
                         if oi + term >= len(dates):
@@ -239,7 +279,7 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
                                       "group": f"sens|{pname}|rate{rate}|term{term}|{period}", "labels": base_labels})
                     seed += 1
                     tasks.append({"holdings": hs, "bars": bars, "origination": d, "term": 63, "rate": RATE[market],
-                                  "variants": cure_sensitivity(), "seed": seed, "priors": pri,
+                                  "variants": cure_sensitivity(), "seed": seed, "priors": pri, "maturity": "refinance",
                                   "group": f"cure|{pname}|{period}", "labels": base_labels})
             if mode == "sim":
                 rng = np.random.default_rng(7 + len(tasks))
@@ -252,7 +292,7 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
                     hs = holdings_for(market, weights, prices, size)
                     pri = priors_at(market, all_market, d)
                     keys = [refs[s] for s in weights]
-                    for rep in range(3):
+                    for rep in range(2):
                         path_seed = int(rng.integers(0, 2**31))
                         for kind in STRESS:
                             prng = np.random.default_rng(path_seed)   # same base path for every overlay
@@ -265,7 +305,7 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
                                           + [b for b in sb[k0] if b["bar_date"] > d])
                             seed += 1
                             tasks.append({"holdings": hs, "bars": sb, "origination": d, "term": 63,
-                                          "rate": RATE[market], "variants": DEFAULT_VARIANTS, "seed": seed,
+                                          "rate": RATE[market], "variants": ALL_VARIANTS, "seed": seed,
                                           "priors": pri, "group": f"sim|{kind}|{pname}|{size}",
                                           "labels": {**base_labels, "period": "held_out_origination",
                                                      "data": "observed history + synthetic future", "scenario": kind,
@@ -280,7 +320,7 @@ def main() -> None:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("manifest")
-    ap.add_argument("--part", required=True, choices=["hist-US", "hist-NGX", "sens-US", "sens-NGX", "sim-US", "sim-NGX"])
+    ap.add_argument("--part", required=True, choices=[f"{m}-{k}" for m in ("hist", "sens", "sim", "repay", "frontier") for k in ("US", "NGX")])
     ap.add_argument("--out", required=True)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
     ap.add_argument("--limit", type=int, default=0)
@@ -312,9 +352,11 @@ def main() -> None:
     keep = ("loans", "mean_capacity_share_of_principal", "loss_probability", "loss_probability_ci95", "expected_loss",
             "expected_loss_ci95", "es99_loss", "worst_loss", "margin_calls_per_loan", "liquidation_frequency",
             "liquidation_frequency_ci95", "unnecessary_liquidation_share", "borrower_execution_cost_share",
-            "liquidated_share_of_principal", "cure_payments_share", "recovery_sessions_median",
-            "recovery_sessions_p95", "residual_after_recovery_share", "time_restricted",
-            "time_margin_call_or_forced", "data_review_sessions", "no_fill_sessions", "censored")
+            "executed_share_of_principal", "realized_recovery_share", "cure_payments_share",
+            "recovery_sessions_median", "recovery_sessions_p95", "recovery_completion",
+            "residual_after_recovery_share", "time_restricted", "repeated_margin_call_share",
+            "time_margin_call_or_forced", "data_review_sessions", "no_fill_sessions", "censored",
+            "censored_outstanding_share", "censored_loss_lower_bound_mean", "es95_loss")
 
     def rnd(x: Any) -> Any:
         if isinstance(x, float):
@@ -329,6 +371,26 @@ def main() -> None:
                 "skipped_reasons": sm["skipped_reasons"][:2],
                 "v": {n: {k: rnd(m[k]) for k in keep if k in m} for n, m in sm["variants"].items()}}
         print("RESULT " + json.dumps(line, default=str), flush=True)
+
+    # Pooled across portfolios and sizes, with intervals that resample clusters of
+    # loans originated in the same quarter (shared shocks, same paths, overlaps).
+    pools: dict[str, list[dict[str, Any]]] = {}
+    for r in results:
+        parts = r["group"].split("|")
+        key = "|".join(parts[:2]) if parts[0] in ("sim", "repay", "frontier") else \
+            f"{parts[0]}|{parts[-1]}" if parts[0] == "hist" else parts[0]
+        pools.setdefault(key, []).append(r)
+    for key, rows in sorted(pools.items()):
+        names = sorted({n for c in rows if "variants" in c for n in c["variants"]})
+        line = {"pool": key, "part": a.part, "cohorts": sum(1 for c in rows if "variants" in c), "v": {}}
+        for n in names:
+            vr = variant_rows(rows, n)
+            m = metrics(vr)
+            m["loss_probability_ci95"] = clustered_interval(vr, "loss_event")
+            m["expected_loss_ci95"] = clustered_interval(vr, "loss")
+            m["liquidation_frequency_ci95"] = clustered_interval(vr, "liquidation")
+            line["v"][n] = {k: rnd(m[k]) for k in keep if k in m}
+        print("POOLED " + json.dumps(line, default=str), flush=True)
 
 
 if __name__ == "__main__":

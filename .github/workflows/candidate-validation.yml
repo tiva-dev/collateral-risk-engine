@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [hist-US, hist-NGX, sens-US, sens-NGX, sim-US, sim-NGX]
+        part: [hist-US, hist-NGX, sens-US, sens-NGX, sim-US, sim-NGX, repay-US, repay-NGX, frontier-US, frontier-NGX]
     env:
       SOURCE_RUN: ${{ inputs.source_run_id || '45681534542' }}
     steps:
@@ -57,3 +57,22 @@ jobs:
             out/**
             out.log
           retention-days: 90
+
+  us-coverage-probe:
+    # Free probes only: does a provider we already have deliver US daily bars
+    # before July 2020 (March 2020)? Prints availability, never keys.
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          AK: ${{ secrets.ALPACA_API_KEY }}
+          AS: ${{ secrets.ALPACA_SECRET_KEY }}
+          AV: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+        run: |
+          set +e
+          for feed in sip iex; do
+            r=$(curl -s -H "APCA-API-KEY-ID: $AK" -H "APCA-API-SECRET-KEY: $AS" \
+              "https://data.alpaca.markets/v2/stocks/SPY/bars?timeframe=1Day&start=2018-01-02&end=2020-04-30&limit=1000&feed=$feed&adjustment=all")
+            echo "alpaca feed=$feed: $(echo "$r" | jq -c '{n: (.bars|length), first: .bars[0].t, last: .bars[-1].t, message}')"
+          done
+          r=$(curl -s "https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=SPY&outputsize=full&apikey=$AV")
+          echo "alphavantage full: $(echo "$r" | jq -c '{n: ((.["Time Series (Daily)"] // {})|length), oldest: ((.["Time Series (Daily)"] // {})|keys|min), info: (.Information // .Note // ."Error Message")}')"
