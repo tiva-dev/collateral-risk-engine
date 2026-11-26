@@ -96,9 +96,11 @@ def main(argv: list[str]) -> int:
             for name, d in (("live", db), ("clone", clone)):
                 with d.transaction("*") as conn:
                     for t in tables:
-                        n = conn.fetchone(f"SELECT COUNT(*) AS n FROM {t}")["n"]
+                        row = conn.fetchone(f"SELECT COUNT(*) AS n FROM {t}")
+                        n = row["n"] if row else None
                         report["tables"].setdefault(t, {})[name] = n
-                    latest = conn.fetchone("SELECT MAX(created_at) AS m FROM audit_log")["m"]
+                    mrow = conn.fetchone("SELECT MAX(created_at) AS m FROM audit_log")
+                    latest = mrow["m"] if mrow else None
                     report.setdefault("latest_audit_record", {})[name] = str(latest)
                     tenants = [r["tenant_id"] for r in conn.fetchall("SELECT DISTINCT tenant_id FROM audit_log")]
                     report.setdefault("audit_chains_valid", {})[name] = {t: verify_chain(t)["valid"] for t in tenants}
