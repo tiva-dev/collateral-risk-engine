@@ -1,1 +1,1 @@
-{"environment": "staging", "report_only": true, "note": "report shadow and lifecycle results"}
+{"environment": "staging", "seed_sandbox": false, "run_jobs": ["apply-exclusions", "shadow", "lifecycle-all"], "note": "candidate-2026.11.2, console login fix, excluded runs, shadow and lifecycle validation"}
