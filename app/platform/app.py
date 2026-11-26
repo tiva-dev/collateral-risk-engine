@@ -561,12 +561,17 @@ def build_router(p: Platform) -> APIRouter:
     @r.get("/backtests")
     def list_backtests(limit: int = 50) -> dict[str, Any]:
         rows = current_connection().fetchall(
-            "SELECT run_id, account_ref, requested_by, models, status, created_at, started_at, finished_at, summary, "
-            "error FROM backtest_runs WHERE tenant_id=%s ORDER BY created_at DESC LIMIT %s",
+            "SELECT b.run_id, account_ref, requested_by, models, params, status, created_at, started_at, finished_at, "
+            "summary, error, (SELECT reason FROM excluded_runs x WHERE x.kind='backtest' AND x.run_id=b.run_id "
+            "LIMIT 1) AS excluded_reason FROM backtest_runs b WHERE tenant_id=%s ORDER BY created_at DESC LIMIT %s",
             (require_principal().tenant_id, max(1, min(limit, 200))))
         for x in rows:
             x["models"] = json.loads(x["models"])
+            params = json.loads(x.pop("params") or "{}")
+            # decision = historical decision replay; lifecycle = full loan lifecycle validation
+            x["kind"] = params.get("kind", "decision")
             x["summary"] = json.loads(x["summary"]) if x["summary"] else None
+            x["excluded"] = x["excluded_reason"] is not None
         return {"backtests": rows}
 
     @r.get("/backtests/{run_id}")

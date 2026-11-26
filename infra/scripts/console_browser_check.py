@@ -58,6 +58,20 @@ class Stub(BaseHTTPRequestHandler):
                                     "role": role, "environment": "test"})
         if path == "/platform/controls":
             return self._json(200, {"controls": {"lending_enabled": False, "liquidation_execution_enabled": False}})
+        if path == "/monitoring/accounts":
+            return self._json(200, {"accounts": [{"account_ref": "acc-1"}]})
+        if path.startswith("/shadow/accounts/"):
+            th = {"initial_capacity": 600.0, "initial_capacity_uncapped": 700.0, "early_warning": 800.0,
+                  "margin_call": 850.0, "forced_recovery": 900.0, "restoration_target": 700.0, "client_ceiling": 600.0}
+            return self._json(200, {"evaluations": [
+                {"model_id": "baseline", "risk_state": "safe"},
+                {"model_id": "candidate", "model_version": "candidate-test", "risk_state": "safe",
+                 "collateral_value": 1000.0, "loan_balance": 500.0, "evaluated_at": "2026-11-27T00:00:00Z",
+                 "explanation": {"thresholds": th, "threshold_ltv": {k: v / 1000 for k, v in th.items()},
+                                 "threshold_reasoning": {k: f"reason for {k}" for k in th}, "data_status": "ok",
+                                 "instruments": [{"key": "NYSE:AAA:USD:LISTED_EQUITY", "sessions": 400}],
+                                 "assets": [{"asset_id": "AAA", "market_value": 1000.0}], "parameters": {},
+                                 "reasons": ["test"]}}]})
         if path == "/admin/tenants":
             return self._json(200, {"tenants": [{"tenant_id": "tiva-sandbox", "kind": "sandbox"}]})
         return self._json(200, {})
@@ -100,6 +114,11 @@ def check(page, base: str, label: str) -> list[str]:
     page.click("#login-form button")
     page.wait_for_function("getComputedStyle(document.querySelector('#shell')).display !== 'none'")
     ok(visible("#tenant-select"), "admin sign-in shows the tenant selector")
+    page.get_by_text("Candidate engine", exact=True).first.click()
+    page.wait_for_function("document.querySelector('#main').textContent.includes('reason for margin_call')")
+    txt = page.text_content("#main")
+    ok(all(w in txt for w in ("Initial lending capacity", "Early warning", "Margin call", "Forced recovery",
+                              "Restoration target")), "candidate view shows all five thresholds with reasoning")
     REVOKED.add("cri_test_admin")
     page.reload()
     page.wait_for_function("getComputedStyle(document.querySelector('#login')).display !== 'none'")

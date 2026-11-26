@@ -93,6 +93,7 @@ const TABS = [
   ["alerts", "Margin calls & advisories", renderAlerts],
   ["market", "Market data", renderMarket],
   ["models", "Model comparison", renderModels],
+  ["candidate", "Candidate engine", renderCandidate],
   ["backtests", "Backtests", renderBacktests],
   ["policies", "Policies", renderPolicies],
   ["admin", "Tenants & access", renderAdmin, true],
@@ -272,6 +273,57 @@ async function renderModels() {
     findings ? h("div", {}, h("h3", {}, "Historical research findings (repository: REAL_DATA_FINDINGS.md)"), h("pre", { class: "md" }, findings)) : null);
 }
 
+
+async function renderCandidate() {
+  const accts = (await api("/monitoring/accounts")).accounts || [];
+  if (!accts.length) return h("div", { class: "muted" }, "No monitored accounts.");
+  const ref = S.account && accts.some((a) => a.account_ref === S.account) ? S.account : accts[0].account_ref;
+  const sel = h("select", { onchange: (e) => { S.account = e.target.value; go("candidate"); } },
+    accts.map((a) => h("option", { value: a.account_ref, selected: a.account_ref === ref }, a.account_ref)));
+  const rows = (await api(`/shadow/accounts/${encodeURIComponent(ref)}`)).evaluations || [];
+  const c = rows.find((r) => r.model_id === "candidate");
+  const base = rows.find((r) => r.model_id === "baseline");
+  const head = h("div", {}, h("h2", {}, "Candidate engine (shadow only — no lending effect)"),
+    h("div", { class: "row" }, "Account", sel),
+    h("div", { class: "notice" }, "Research defaults authorised for experimental use: margin call 99%, forced recovery 95%, origination headroom 95% over 5 sessions (first passage), early warning 90%, restoration to initial risk capacity. Client LTV ceilings apply independently. Not approved for customer lending."));
+  if (!c || c.error) return h("div", {}, head, h("div", { class: "notice" }, c ? `Candidate error: ${c.error}` : "No candidate evaluation yet."));
+  const x = c.explanation || {};
+  const th = x.thresholds || {}, lt = x.threshold_ltv || {}, why = x.threshold_reasoning || {};
+  const levels = [["initial_capacity", "Initial lending capacity"], ["early_warning", "Early warning"], ["margin_call", "Margin call"],
+    ["forced_recovery", "Forced recovery"], ["restoration_target", "Restoration target"]];
+  const p = x.parameters || {};
+  return h("div", {}, head,
+    h("div", { class: "row" },
+      card(h("div", { class: "small muted" }, "Collateral"), h("div", {}, fmt(c.collateral_value))),
+      card(h("div", { class: "small muted" }, "Balance"), h("div", {}, `${fmt(c.loan_balance)} (${pct(lt.current)})`)),
+      card(h("div", { class: "small muted" }, "Candidate state"), pill(c.risk_state)),
+      card(h("div", { class: "small muted" }, "Baseline state"), base ? pill(base.risk_state) : "—"),
+      card(h("div", { class: "small muted" }, "Data"), h("div", {}, `${x.data_status || "—"}${x.deterioration ? ` · ${x.deterioration} deterioration` : ""}`)),
+      card(h("div", { class: "small muted" }, "Evaluated"), h("div", { class: "small" }, `${ago(c.evaluated_at)} · ${c.model_version}`))),
+    h("h3", {}, "Thresholds and their financial reasoning"),
+    table([{ t: "Level", k: "label" }, { t: "Balance", n: 1, f: (r) => fmt(r.v) }, { t: "LTV", n: 1, f: (r) => pct(r.l) },
+      { t: "Why", f: (r) => h("span", { class: "small" }, r.why || "") }],
+      levels.map(([k, label]) => ({ label, v: th[k], l: lt[k], why: why[k] }))),
+    h("div", { class: "small muted" }, `Client ceiling ${fmt(th.client_ceiling)} · uncapped risk capacity ${fmt(th.initial_capacity_uncapped)} · grace ${p.grace_sessions} · settlement ${p.settlement_sessions} sessions · obligation growth over the margin-call horizon ×${(p.interest?.growth_over_mc_horizon || 1).toFixed(5)}`),
+    h("h3", {}, "Asset risk estimates and execution costs"),
+    table([{ t: "Instrument", k: "key" }, { t: "Sessions", n: 1, k: "sessions" }, { t: "Eff. obs.", n: 1, k: "effective_observations" },
+      { t: "Annual vol used", n: 1, f: (r) => pct(r.annual_vol_used) }, { t: "Own weight", n: 1, f: (r) => pct(r.pooling_weight_own, 0) },
+      { t: "Tail weight", n: 1, f: (r) => pct(r.empirical_tail_weight, 0) }, { t: "Var. ratio", n: 1, f: (r) => (r.variance_ratio || 0).toFixed(2) },
+      { t: "Spread", n: 1, f: (r) => pct(r.spread, 2) }, { t: "ADV (shares)", n: 1, f: (r) => fmt(r.adv_shares) },
+      { t: "Data quality", n: 1, f: (r) => (r.data_quality || 0).toFixed(2) }, { t: "Lending value", f: (r) => pill(r.eligible_for_lending_value ? "ok" : "bad") },
+      { t: "Notes", f: (r) => h("span", { class: "small" }, (r.reasons || []).slice(0, 3).join(" · ")) }], x.instruments || []),
+    table([{ t: "Holding", k: "asset_id" }, { t: "Value", n: 1, f: (r) => fmt(r.market_value) },
+      { t: "Participation", n: 1, f: (r) => pct(r.participation_rate) }, { t: "Spread + fee cost", n: 1, f: (r) => pct(r.execution_cost_rate, 2) },
+      { t: "Sellable", f: (r) => pill(r.sellable ? "ok" : "bad") }, { t: "Data", k: "data_status" }], x.assets || []),
+    h("div", { class: "small muted" }, `Scenario liquidity: ${JSON.stringify(p.scenario_liquidity || {})}. Provenance: ${JSON.stringify(p.provenance || {})}`),
+    x.recovery_plan ? h("div", {}, h("h3", {}, "Advisory recovery plan (never executed)"),
+      table([{ t: "Instrument", k: "instrument_key" }, { t: "Quantity", n: 1, f: (r) => fmt(r.quantity) },
+        { t: "Sessions", n: 1, k: "execution_observations" }, { t: "Expected net", n: 1, f: (r) => fmt(r.expected_net_proceeds) },
+        { t: "Costs", n: 1, f: (r) => fmt(r.expected_execution_costs) }], x.recovery_plan.orders || []),
+      h("div", { class: "small muted" }, `Cure amount ${fmt(x.cure_amount)} · residual after plan ${fmt(x.recovery_plan.projected_residual_obligation)} · restores: ${x.recovery_plan.restores_safety_standard}`)) : null,
+    h("h3", {}, "Reasons"), h("ul", {}, (x.reasons || []).map((r) => h("li", { class: "small" }, r))));
+}
+
 async function renderBacktests() {
   const [accts, list, models] = await Promise.all([api("/monitoring/accounts"), api("/backtests"), api("/shadow/models")]);
   const acct = h("select", {}, (accts.accounts || []).map((a) => h("option", { value: a.account_ref }, a.account_ref)));
@@ -289,6 +341,22 @@ async function renderBacktests() {
   const detail = h("div");
   const show = async (r) => {
     const b = await api(`/backtests/${r.run_id}`);
+    if (r.kind === "lifecycle") {
+      const v = b.summary?.variants || {};
+      detail.replaceChildren(h("h3", {}, `Lifecycle validation ${b.run_id} — ${b.account_ref}`),
+        r.excluded ? h("div", { class: "notice" }, `Excluded from summaries: ${r.excluded_reason}`) : null,
+        b.error ? h("div", { class: "notice" }, b.error) : null,
+        h("div", { class: "small muted" }, `${b.summary?.cohorts ?? 0} matched cohorts (${(b.summary?.effective_independent_cohorts ?? 0).toFixed(1)} effectively independent), window ${(b.summary?.window || []).join(" → ")}. Observed bars; common random numbers across variants.`),
+        table([{ t: "Variant", k: "n" }, { t: "Loans", n: 1, k: "loans" },
+          { t: "P(loss)", n: 1, f: (x) => pct(x.loss_probability ?? (x.loans_with_loss / x.loans), 1) },
+          { t: "Expected loss", n: 1, f: (x) => pct(x.expected_loss ?? x.loss_rate, 3) },
+          { t: "Margin calls / loan", n: 1, f: (x) => (x.margin_calls_per_loan || 0).toFixed(2) },
+          { t: "Liquidation freq.", n: 1, f: (x) => pct(x.liquidation_frequency) },
+          { t: "Unnecessary", n: 1, f: (x) => pct(x.unnecessary_liquidation_share) },
+          { t: "Exec. cost", n: 1, f: (x) => pct(x.borrower_execution_cost_share, 2) },
+          { t: "Time restricted", n: 1, f: (x) => pct(x.time_restricted) }], Object.keys(v).map((n) => ({ n, ...v[n] }))));
+      return;
+    }
     const series = b.series || [];
     const ms = Object.keys(b.summary?.models || {});
     detail.replaceChildren(h("h3", {}, `Backtest ${b.run_id} — ${b.account_ref}`),
@@ -306,10 +374,13 @@ async function renderBacktests() {
   return h("div", {}, h("h2", {}, "Historical backtesting"),
     card(h("div", { class: "row" }, "Account", acct, "Every", step, "sessions", ...boxes, h("button", { onclick: start }, "Run backtest"), msg),
       h("div", { class: "small muted" }, "Replays stored daily bars; each decision uses only bars up to its date. Runs as the cri-backtest Cloud Run job.")),
-    h("h3", {}, "Runs"),
-    table([{ t: "Created", f: (r) => ago(r.created_at) }, { t: "Account", k: "account_ref" }, { t: "Models", f: (r) => r.models.join(", ") },
-      { t: "Status", f: (r) => pill(r.status) }, { t: "Requested by", f: (r) => h("span", { class: "small mono" }, r.requested_by) },
-      { t: "Error", f: (r) => r.error ? h("span", { class: "small" }, r.error.slice(0, 120)) : "" }], list.backtests || [], show),
+    ...[["decision", "Historical decision replay", "What each model would have decided on past dates for a fixed loan. Not a loan outcome."],
+      ["lifecycle", "Loan lifecycle validation", "Matched loans run to maturity with interest, interventions, execution, settlement and recovery."]].map(([k, title, note]) =>
+      h("div", {}, h("h3", {}, title), h("div", { class: "small muted" }, note),
+        table([{ t: "Created", f: (r) => ago(r.created_at) }, { t: "Account", k: "account_ref" }, { t: "Models", f: (r) => r.models.join(", ") },
+          { t: "Status", f: (r) => pill(r.excluded ? "excluded" : r.status) }, { t: "Requested by", f: (r) => h("span", { class: "small mono" }, r.requested_by) },
+          { t: "Note", f: (r) => h("span", { class: "small" }, r.excluded ? `excluded: ${r.excluded_reason}` : (r.error || "").slice(0, 120)) }],
+          (list.backtests || []).filter((r) => (r.kind || "decision") === k), show))),
     detail);
 }
 

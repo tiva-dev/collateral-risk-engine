@@ -464,6 +464,12 @@ def candidate_model(inp: ShadowInputs) -> ShadowResult:
         explanation=_plain({
             "method": "candidate adaptive thresholds",
             "thresholds": ev.thresholds, "threshold_ltv": ev.threshold_ltv, "cure_amount": ev.cure_amount,
+            "threshold_reasoning": ev.threshold_reasoning, "data_status": ev.data_status,
+            "deterioration": ev.deterioration,
+            "assets": [{"asset_id": x.asset_id, "market_value": x.market_value, "sellable": x.eligible,
+                        "lending_value": x.lending_value_eligible, "participation_rate": x.participation_rate,
+                        "execution_cost_rate": x.estimated_slippage_rate, "annual_vol_used": x.risk_score,
+                        "data_status": x.data_status, "notes": x.notes} for x in ev.asset_results],
             "data_review_required": ev.data_review_required, "restriction": ev.restriction,
             "instruments": ev.instruments, "recovery_plan": plan or None, "parameters": ev.parameters,
             "reasons": ev.reasons,
@@ -559,8 +565,9 @@ def run_all(db: Database, services: Any, models: dict[str, Callable[[ShadowInput
 
 def latest_by_account(tenant_id: str, account_ref: str) -> list[dict[str, Any]]:
     conn = current_connection()
-    row = conn.fetchone("SELECT run_id FROM shadow_evaluations WHERE tenant_id=%s AND account_ref=%s "
-                        "ORDER BY evaluated_at DESC LIMIT 1", (tenant_id, account_ref))
+    row = conn.fetchone("SELECT run_id FROM shadow_evaluations e WHERE tenant_id=%s AND account_ref=%s "
+                        "AND NOT EXISTS (SELECT 1 FROM excluded_runs x WHERE x.kind='shadow' AND x.run_id=e.run_id "
+                        "AND x.model_id='*') ORDER BY evaluated_at DESC LIMIT 1", (tenant_id, account_ref))
     if not row:
         return []
     rows = conn.fetchall("SELECT * FROM shadow_evaluations WHERE tenant_id=%s AND account_ref=%s AND run_id=%s "
@@ -601,8 +608,12 @@ def summary(tenant_id: str, since: datetime) -> dict[str, Any]:
         "AVG(capacity_ltv) AS avg_capacity_ltv, SUM(approved_credit) AS total_approved_credit, "
         "AVG(estimated_recovery / NULLIF(collateral_value, 0)) AS avg_recovery_ratio, "
         "SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS errors "
-        "FROM shadow_evaluations WHERE tenant_id=%s AND evaluated_at >= %s "
+        "FROM shadow_evaluations e WHERE tenant_id=%s AND evaluated_at >= %s "
+        "AND NOT EXISTS (SELECT 1 FROM excluded_runs x WHERE x.kind='shadow' AND x.run_id=e.run_id "
+        "AND (x.model_id=e.model_id OR x.model_id='*')) "
         "GROUP BY model_id, model_version, role ORDER BY role, model_id", (tenant_id, since.isoformat()))
+    excluded = conn.fetchall("SELECT run_id, model_id, reason, recorded_at FROM excluded_runs WHERE kind='shadow' "
+                             "ORDER BY recorded_at")
     for r in rows:
         ok = (r["evaluations"] or 0) - (r["errors"] or 0)
         r["margin_call_frequency"] = (r["margin_calls"] or 0) / ok if ok else None
@@ -615,4 +626,6 @@ def summary(tenant_id: str, since: datetime) -> dict[str, Any]:
             n_dis[d["model_id"]] = n_dis.get(d["model_id"], 0) + 1
     for r in rows:
         r["accounts_disagreeing_with_baseline_now"] = n_dis.get(r["model_id"], 0)
-    return {"since": since.isoformat(), "runs": len(runs), "models": rows}
+    return {"since": since.isoformat(), "runs": len(runs), "models": rows,
+            "excluded_runs": excluded,
+            "note": "excluded runs are omitted from these figures and kept in the evaluation history"}

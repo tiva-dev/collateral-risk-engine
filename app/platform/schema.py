@@ -338,6 +338,18 @@ CREATE TABLE IF NOT EXISTS operational_drills (
 );
 """
 
+_M7 = """
+CREATE TABLE IF NOT EXISTS excluded_runs (
+  run_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('shadow','backtest')),
+  model_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  recorded_at {TS} NOT NULL,
+  source TEXT NOT NULL,
+  PRIMARY KEY (run_id, model_id)
+);
+"""
+
 MIGRATIONS: list[tuple[int, str, dict[str, str]]] = [
     (1, "initial platform schema", {"postgres": _M1, "sqlite": _M1}),
     (2, "append-only audit and row-level security", {"postgres": _M2_POSTGRES + _rls_statements(), "sqlite": ""}),
@@ -345,6 +357,7 @@ MIGRATIONS: list[tuple[int, str, dict[str, str]]] = [
     (4, "sandbox webhook receiver", {"postgres": _M4 + _grants(), "sqlite": _M4}),
     (5, "market bars and shadow model evaluations", {"postgres": _M5 + _shadow_rls() + _grants(), "sqlite": _M5}),
     (6, "operational drill records", {"postgres": _M6 + _grants(), "sqlite": _M6}),
+    (7, "defective or superseded model runs excluded from summaries", {"postgres": _M7 + _grants(), "sqlite": _M7}),
 ]
 
 

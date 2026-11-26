@@ -205,8 +205,8 @@ def test_lifecycle_aggregate_metrics() -> None:
     agg = aggregate(cohorts)
     assert agg["cohorts"] == 2
     for m in agg["variants"].values():
-        for k in ("loss_rate", "liquidation_frequency", "borrower_execution_cost_share", "time_restricted",
-                  "mean_capacity_share_of_principal"):
+        for k in ("expected_loss", "loss_probability", "liquidation_frequency", "borrower_execution_cost_share",
+                  "time_restricted", "mean_capacity_share_of_principal", "unnecessary_liquidation_share"):
             assert m[k] >= 0
 
 
@@ -221,3 +221,167 @@ def test_daily_bar_quotes_without_bid_are_usable_and_flagged() -> None:
     r = ev(hs, nobid, bars, asof)
     assert r.approved_credit_limit > 0
     assert all(any("bid not observed" in x for x in i["reasons"]) for i in r.instruments)
+
+
+# ------------------------------------------------- review corrections (27 Nov)
+
+def _sim(level: np.ndarray, growth: np.ndarray | None = None):
+    from app.candidate.engine import _Sim
+
+    _m, d1, n = level.shape
+    return _Sim(["k"] * n, np.ones(n), np.ones(n), np.zeros(n), np.zeros(n), level, np.full_like(level, 0.01),
+                np.ones_like(level), growth if growth is not None else np.ones(d1 + 5), d1 - 1, 1, True)
+
+
+def test_first_passage_catches_intra_horizon_breach() -> None:
+    # Half the paths dip 30% on session 2 and fully recover by session 5.
+    m = 100
+    path = np.ones((m, 6, 1))
+    path[: m // 2, 2, 0] = 0.7
+    sim = _sim(path)
+    eng = CandidateEngine(CFG)
+    fp = eng._first_passage_level(sim, np.array([1.0]), 0.0, 1.0, 5, 0.95)
+    terminal = float(np.quantile(path[:, 5, 0], 0.05))
+    assert terminal == pytest.approx(1.0)
+    assert fp == pytest.approx(0.7)
+
+
+def test_capacity_falls_with_headroom_horizon() -> None:
+    hs, md, bars, asof = setup()
+    caps = [ev(hs, md, bars, asof, cfg=replace(CFG, headroom_sessions=h)).thresholds["initial_capacity_uncapped"]
+            for h in (1, 5, 20)]
+    assert caps[0] >= caps[1] >= caps[2]
+
+
+def test_obligation_growth_follows_contract() -> None:
+    from app.candidate.engine import obligation_growth
+
+    t0 = datetime(2026, 1, 1, 21, tzinfo=UTC)
+    simple = obligation_growth(Loan(100.0), InterestPolicy(0.365), t0, 10)
+    assert simple[5] == pytest.approx(1 + 0.365 * 7 / 365)
+    comp = obligation_growth(Loan(100.0), InterestPolicy(0.365, accrual_frequency="daily", compounding="compound",
+                                                         schedule_anchor=t0), t0, 10)
+    assert comp[10] > simple[10]
+    a360 = obligation_growth(Loan(100.0), InterestPolicy(0.365, day_count_convention="actual_360"), t0, 10)
+    assert a360[5] > simple[5]
+    # Accrued interest does not earn simple interest: growth relative to the balance is lower.
+    with_accrued = obligation_growth(Loan(100.0, accrued_interest=20.0), InterestPolicy(0.365), t0, 10)
+    assert with_accrued[5] < simple[5]
+    client = obligation_growth(Loan(100.0), InterestPolicy(0.365, interest_accrual_mode="client_supplied"), t0, 10)
+    assert client[5] == pytest.approx(simple[5])
+
+
+def test_stressed_liquidity_lowers_thresholds_and_price_limits_apply() -> None:
+    hs, md, bars, asof = setup()
+    # Institutional size: the exit takes many sessions, so liquidity matters.
+    hs = [replace(h, quantity=h.quantity * 60) if h.asset_type != AssetType.CASH else h for h in hs]
+    calm = ev(hs, md, bars, asof, cfg=replace(CFG, volume_drawdown_elasticity=0.0, liquidity_noise_sd=0.01))
+    stressed = ev(hs, md, bars, asof, cfg=replace(CFG, volume_drawdown_elasticity=4.0, liquidity_noise_sd=0.8))
+    assert stressed.thresholds["margin_call"] < calm.thresholds["margin_call"]
+    assert stressed.thresholds["execution_sessions_p95_mc"] >= calm.thresholds["execution_sessions_p95_mc"]
+    ngx = [Holding("ZEN", AssetType.LISTED_EQUITY, 200_000, "NGN", "NGX")]
+    b = make_bars(5, vol=0.06, volume=5e5)
+    mdn = {ngx[0].stable_key: MarketData("ZEN", b[-1]["close"], timestamp=asof)}
+    r = CandidateEngine(CFG).evaluate("n", ngx, Loan(0.0, currency="NGN"), Policy.default(), mdn,
+                                      bars={data_key(ngx[0]): b}, interest_policy=InterestPolicy(0.25),
+                                      as_of=asof, seed=3)
+    assert r.parameters["scenario_liquidity"]["limit_down_sessions"] > 0
+    assert r.parameters["settlement_sessions"] == 2
+
+
+def test_restoration_never_gives_lending_value_to_excluded_assets() -> None:
+    hs, md, bars, asof = setup()
+    key = data_key(hs[1])
+    short = dict(bars, **{key: bars[key][-15:]})          # BBB: sellable, no lending value
+    r = ev(hs, md, short, asof)
+    bbb = next(a for a in r.asset_results if a.asset_id == "BBB")
+    assert bbb.eligible and not bbb.lending_value_eligible
+    t = r.thresholds
+    bal = (t["margin_call"] + t["forced_recovery"]) / 2
+    r2 = ev(hs, md, short, asof, balance=bal)
+    plan = r2.recovery_plan
+    assert plan is not None
+    # Whatever is sold, the restored state is judged on lendable collateral only:
+    # residual obligation must be within AAA + cash capacity alone.
+    a_only = ev([hs[0], hs[2]], md, short, asof).thresholds["initial_capacity_uncapped"]
+    assert plan["projected_residual_obligation"] <= a_only * 1.05
+
+
+def test_stale_material_data_blocks_borrowing_and_is_not_a_sale_trigger() -> None:
+    hs, md, bars, asof = setup()
+    key = next(k for k in md if "AAA" in k)
+    stale = dict(md)
+    stale[key] = replace(md[key], timestamp=asof - timedelta(days=3))   # 3 calendar / >1 business day
+    fresh = ev(hs, md, bars, asof)
+    bal = fresh.thresholds["initial_capacity"] * 0.5
+    r = ev(hs, stale, bars, asof, balance=bal)
+    assert r.data_status == "degraded"
+    assert r.approved_credit_limit <= bal + 1e-6 and r.current_available_credit == 0
+    assert r.margin_state == MarginState.RESTRICT_NEW_BORROWING
+    # A balance that breaches only because AAA lost lending value is data deterioration.
+    bal2 = (fresh.thresholds["initial_capacity"] + fresh.thresholds["early_warning"]) / 2
+    r2 = ev(hs, stale, bars, asof, balance=bal2)
+    if r2.thresholds["margin_call"] < bal2:
+        assert r2.deterioration == "data" and r2.recovery_plan is None
+
+
+def test_planner_uses_candidate_execution_model() -> None:
+    hs, md, bars, asof = setup()
+    t = ev(hs, md, bars, asof).thresholds
+    r = ev(hs, md, bars, asof, balance=(t["margin_call"] + t["forced_recovery"]) / 2)
+    est = {i["key"]: i for i in r.instruments}
+    for o in r.recovery_plan["orders"]:
+        a = next(x for x in r.asset_results if x.instrument_key == o["instrument_key"])
+        e = est[a.data_key]
+        ref_bid = md[o["instrument_key"]].bid
+        impact = CFG.impact_coefficient * np.sqrt(a.participation_rate) * e["daily_vol_used"]
+        extra = e["spread"] / 2 * (CFG.spread_stress_multiplier - 1)
+        expected_unit = ref_bid * (1 - extra - impact) * (1 - LiquidationExecutionPolicy().execution_cost_rate)
+        assert o["expected_net_proceeds"] / o["quantity"] == pytest.approx(expected_unit, rel=2e-3)
+        assert o["participation_rate"] == pytest.approx(a.participation_rate)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_thresholds_coherent_across_structures(seed: int) -> None:
+    rng = np.random.default_rng(seed)
+    exch = ["NYSE", "NGX"][seed % 2]
+    ccy = "USD" if exch == "NYSE" else "NGN"
+    n = int(rng.integers(1, 4))
+    hs, bars, md = [], {}, {}
+    for j in range(n):
+        b = make_bars(100 + seed * 10 + j, vol=float(rng.uniform(0.01, 0.05)), volume=float(rng.uniform(1e4, 1e6)))
+        h = Holding(f"S{j}", AssetType.LISTED_EQUITY, float(rng.uniform(1e3, 2e5)), ccy, exch)
+        hs.append(h)
+        bars[data_key(h)] = b
+        md[h.stable_key] = MarketData(h.asset_id, b[-1]["close"], timestamp=datetime.combine(b[-1]["bar_date"],
+                                                                                            time(21), UTC))
+    if rng.random() < 0.5:
+        hs.append(Holding(ccy, AssetType.CASH, float(rng.uniform(0, 1e6)), ccy, "CASH"))
+    asof = datetime.combine(max(b[-1]["bar_date"] for b in bars.values()), time(21), UTC)
+    ex = LiquidationExecutionPolicy(margin_call_grace_observations=int(rng.integers(0, 4)),
+                                    max_participation_rate=float(rng.uniform(0.02, 0.1)))
+    r = CandidateEngine(CFG).evaluate("p", hs, Loan(0.0, currency=ccy), Policy.default(), md, bars=bars,
+                                      execution_policy=ex, interest_policy=InterestPolicy(float(rng.uniform(0, .4))),
+                                      as_of=asof, seed=seed)
+    t = r.thresholds
+    assert 0 <= t["initial_capacity"] <= t["initial_capacity_uncapped"] + 1e-6
+    assert t["initial_capacity_uncapped"] <= t["early_warning"] + 1e-6
+    assert t["early_warning"] <= t["margin_call"] + 1e-6 <= t["forced_recovery"] + 2e-6
+    assert t["margin_call"] <= r.portfolio_market_value + 1e-6
+    big = [replace(h, quantity=h.quantity * 50) if h.asset_type != AssetType.CASH else h for h in hs]
+    rb = CandidateEngine(CFG).evaluate("p", big, Loan(0.0, currency=ccy), Policy.default(), md, bars=bars,
+                                       execution_policy=ex, interest_policy=InterestPolicy(0.1), as_of=asof, seed=seed)
+    sec = r.securities_value or 1
+    assert (rb.thresholds["margin_call"] - rb.cash_value) / (rb.securities_value or 1) <= \
+        (t["margin_call"] - r.cash_value) / sec + 1e-6
+
+
+def test_lifecycle_sells_through_the_planner() -> None:
+    hs, bars, dates = _cohort_inputs()
+    c = run_cohort(holdings=hs, bars=bars, origination=dates[400], term_sessions=63, seed=3,
+                   config=CandidateConfig(n_paths=300), workout_sessions=40)
+    liq = [e for v in c["variants"].values() for e in v["events"] if e["event"] == "liquidation"]
+    assert liq
+    for e in liq:
+        assert e["orders"]
+        assert all(q <= 20_000 + 1e-6 for q in e["orders"].values())

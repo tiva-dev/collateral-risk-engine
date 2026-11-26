@@ -111,6 +111,31 @@ def main(argv: list[str]) -> int:
                 except Exception as exc:  # noqa: BLE001 - recorded as failed in the run row
                     done[rid] = {"error": str(exc)[:300]}
             print(json.dumps(done, default=str)[:8000])
+        elif cmd == "apply-exclusions":
+            # Record defective or superseded runs (governance file in the repo)
+            # so summaries omit them; the runs themselves are never deleted.
+            from datetime import UTC, datetime
+            from pathlib import Path
+
+            spec = json.loads((Path(__file__).resolve().parent / "governance" / "excluded_runs.json").read_text())
+            now = datetime.now(UTC).isoformat()
+            added = []
+            with db.transaction("*") as conn:
+                for e in spec["entries"]:
+                    ids = [e["run_id"]] if e.get("run_id") else [
+                        r["run_id"] for r in conn.fetchall(
+                            "SELECT run_id FROM backtest_runs WHERE requested_by=%s AND created_at < %s",
+                            (e["selector"]["requested_by"], e["selector"]["created_before"]))]
+                    for rid in ids:
+                        if conn.fetchone("SELECT 1 AS x FROM excluded_runs WHERE run_id=%s AND model_id=%s",
+                                         (rid, e["model_id"])):
+                            continue
+                        conn.execute("INSERT INTO excluded_runs (run_id, kind, model_id, reason, recorded_at, source) "
+                                     "VALUES (%s,%s,%s,%s,%s,%s)",
+                                     (rid, e["kind"], e["model_id"], e["reason"], now,
+                                      "app/platform/governance/excluded_runs.json"))
+                        added.append(rid)
+            print(json.dumps({"excluded": added}))
         elif cmd == "dr-verify":
             # Compare the live database with a restored clone reached at argv[2].
             import re as _re
