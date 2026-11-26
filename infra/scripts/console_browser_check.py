@@ -23,7 +23,7 @@ REVOKED: set[str] = set()
 
 
 class Stub(BaseHTTPRequestHandler):
-    def log_message(self, *a):  # noqa: D401
+    def log_message(self, *a):
         pass
 
     def _json(self, code, body):
@@ -34,7 +34,7 @@ class Stub(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         path = self.path.split("?")[0]
         if path.startswith("/console"):
             name = path[len("/console/"):] or "index.html"
