@@ -395,6 +395,82 @@ def _c(f: Any, pol: Any, rng: Any) -> tuple[float, Any]:
     return ell, {"appetite": "balanced", "haircut_b": h_b, **(stats or {})}
 
 
+_PRIOR_CACHE: dict[tuple[str, str], Any] = {}
+
+
+def candidate_priors(as_of: datetime, extra_bars: dict[str, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+    """Group priors per market from stored instruments with full histories,
+    using only bars dated on or before ``as_of`` (point in time)."""
+    import math as _m
+
+    from app.candidate.config import CandidateConfig
+    from app.candidate.estimation import group_prior, raw_daily_vol
+    from app.markets.profiles import profile_for_exchange
+    from app.platform.ingestion import load_bars
+
+    cfg = CandidateConfig()
+    day = as_of.date().isoformat()
+    by_key: dict[str, list[dict[str, Any]]] = {}
+    try:
+        conn = current_connection()
+        rows = conn.fetchall("SELECT stable_key, COUNT(*) AS n FROM market_bars WHERE bar_date <= %s "
+                             "GROUP BY stable_key", (day,))
+        keys = sorted(r["stable_key"] for r in rows if (r["n"] or 0) >= cfg.full_tail_sessions)
+        cache_key = (day, "|".join(keys))
+        if cache_key in _PRIOR_CACHE:
+            return _PRIOR_CACHE[cache_key]
+        for k in keys:
+            by_key[k] = [b for b in load_bars(k, cfg.history + 1) if str(b["bar_date"])[:10] <= day]
+    except Exception:  # noqa: BLE001 - priors are optional; the engine reports their absence
+        cache_key = (day, "")
+    for k, v in (extra_bars or {}).items():
+        by_key.setdefault(k, [b for b in v if str(b["bar_date"])[:10] <= day])
+    groups: dict[str, list[float]] = {}
+    for k, v in by_key.items():
+        prof = profile_for_exchange(k.split(":")[0])
+        vol = raw_daily_vol(v, cfg) if prof is not None else None
+        if prof is not None and vol:
+            groups.setdefault(prof.code, []).append(_m.log(vol))
+    out = {code: pr for code, lv in groups.items()
+           if (pr := group_prior(lv, f"{code} instruments with >= {cfg.full_tail_sessions} sessions to {day}"))}
+    _PRIOR_CACHE[cache_key] = out
+    return out
+
+
+def candidate_model(inp: ShadowInputs) -> ShadowResult:
+    from app.candidate import CandidateEngine
+    from app.candidate.engine import data_key
+    from app.platform.ingestion import load_bars
+
+    a = inp.account
+    keys = {data_key(h) for h in inp.holdings if h.asset_type.value != "cash"}
+    bars = ({k: inp.bars.get(k, []) for k in keys} if inp.bars is not None
+            else {k: load_bars(k, 501) for k in keys})
+    engine = CandidateEngine(priors=candidate_priors(inp.now, inp.bars))
+    ev = engine.evaluate(a.account_ref, inp.holdings, a.loan, a.policy, inp.market_data, bars=bars,
+                         execution_policy=a.liquidation_execution_policy, interest_policy=a.interest_policy,
+                         as_of=inp.now)
+    state = ev.margin_state.value
+    plan = ev.recovery_plan or {}
+    return ShadowResult(
+        model_id="candidate", model_version=ev.model_version, role="candidate",
+        collateral_value=ev.portfolio_market_value, loan_balance=ev.current_outstanding_balance,
+        approved_credit=ev.approved_credit_limit, available_credit=ev.current_available_credit,
+        capacity_ltv=ev.threshold_ltv.get("initial_capacity"), risk_state=state,
+        margin_call=state in {"margin_call", "liquidation"},
+        estimated_recovery=ev.thresholds.get("margin_call_proceeds"),
+        liquidation=[{"instrument": o["instrument_key"], "quantity": o["quantity"],
+                      "expected_net_proceeds": o["expected_net_proceeds"]} for o in plan.get("orders", [])],
+        explanation=_plain({
+            "method": "candidate adaptive thresholds",
+            "thresholds": ev.thresholds, "threshold_ltv": ev.threshold_ltv, "cure_amount": ev.cure_amount,
+            "data_review_required": ev.data_review_required, "restriction": ev.restriction,
+            "instruments": ev.instruments, "recovery_plan": plan or None, "parameters": ev.parameters,
+            "reasons": ev.reasons,
+        }),
+    )
+
+
 MODELS: dict[str, Callable[[ShadowInputs], ShadowResult]] = {
     "baseline": baseline_model,
     "cre_v070": v070_model,
@@ -402,6 +478,7 @@ MODELS: dict[str, Callable[[ShadowInputs], ShadowResult]] = {
     "B": _research_model("B", _b),
     "B_gap": _research_model("B_gap", _b_gap),
     "C_balanced": _research_model("C_balanced", _c),
+    "candidate": candidate_model,
 }
 
 
