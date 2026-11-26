@@ -1,0 +1,68 @@
+name: Research Generalization and Intervention
+
+# RESEARCH ONLY. Cross-market generalization of asset-level risk estimation
+# (withholding whole markets and instrument groups) and the intervention
+# threshold study. Inputs: the checksummed snapshot of an Official Provider
+# Validation Run; no provider calls.
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        required: true
+        default: "45681534542"
+  push:
+    branches-ignore: [main]
+    paths: ["infra/requests/research.json"]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        experiment: [generalization, intervention-NGX, intervention-US]
+    env:
+      SOURCE_RUN: ${{ inputs.source_run_id || '45681534542' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt numpy scipy
+      - uses: actions/download-artifact@v4
+        with:
+          name: official-provider-validation-evidence
+          run-id: ${{ env.SOURCE_RUN }}
+          github-token: ${{ github.token }}
+          path: data
+      - uses: actions/download-artifact@v4
+        with:
+          name: historical-data-snapshot
+          run-id: ${{ env.SOURCE_RUN }}
+          github-token: ${{ github.token }}
+          path: snapshots
+      - name: Verify inputs against snapshot
+        run: |
+          snap=$(dirname "$(find snapshots -name SNAPSHOT.json | head -n 1)")
+          python -m app.historical_data.snapshot verify "$snap"
+      - name: Run
+        run: |
+          manifest=$(find data/simulation_results -name '*.manifest.json' | head -n 1)
+          case "${{ matrix.experiment }}" in
+            generalization) python -m research.methodology_lab.generalization "$manifest" --out out | tee out.log ;;
+            intervention-NGX) python -m research.methodology_lab.intervention "$manifest" --market NGX --out out | tee out.log ;;
+            intervention-US) python -m research.methodology_lab.intervention "$manifest" --market US --out out | tee out.log ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: research-${{ matrix.experiment }}
+          path: |
+            out/**
+            out.log
+          retention-days: 90

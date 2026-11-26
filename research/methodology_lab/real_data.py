@@ -198,7 +198,10 @@ def engine_assets(r_hist, spread, adv_units, weights, types):
 
 def run_book(task):
     (label, kind, panel, cols, size, loan_ccy, fx_ret, fx_label, liq_mode, v062, v070,
-     seed, with_c) = task
+     seed, with_c, *rest) = task
+    # Optional experiment options (intervention study): policy overrides and
+    # switches to skip the slow engine and frontier sections.
+    opts = rest[0] if rest else {}
     market = panel["market"]
     syms = [panel["symbols"][c] for c in cols]
     n = len(cols)
@@ -206,7 +209,7 @@ def run_book(task):
     types = ["etf" if s in US_ETF else "listed_equity" for s in syms]
     asset_type = "etf" if all(t == "etf" for t in types) else "listed_equity"
     ceiling = CEILING[asset_type]
-    pol = lifecycle.Policy(rate=RATE[loan_ccy])
+    pol = lifecycle.Policy(rate=RATE[loan_ccy], **opts.get("policy", {}))
     r_local = panel["r"][:, cols]
     r_loan = r_local - (np.nan_to_num(fx_ret)[:, None] if fx_ret is not None else 0.0)
     nd = len(panel["dates"])
@@ -249,6 +252,8 @@ def run_book(task):
             np.nan_to_num(fx_ret[hist]) if fx_ret is not None else None, weights, asset_type,
         )
         feats[t0] = f
+        if opts.get("skip_engines"):
+            continue
         for c in range(0, TERM, ENGINE_CHECK_EVERY):
             t = t0 + c
             reqs.append({"id": f"{t0}:{c}", "assets": engine_assets(
@@ -257,6 +262,8 @@ def run_book(task):
             check_index.append((t0, c))
     eng = {}
     for lbl, path in (("v062", v062), ("v070", v070)):
+        if opts.get("skip_engines"):
+            continue
         res = run_engine(path, reqs)
         eng[lbl] = {ci: (x["principal"] / x["mv"] if x["mv"] else 0.0)
                     for ci, x in zip(check_index, res, strict=True)}
@@ -283,6 +290,8 @@ def run_book(task):
         unlendable = exec_days > MAX_EXEC_DAYS
         cap_paths: dict[str, tuple[float, np.ndarray, str]] = {}
         for lbl in ("v062", "v070"):
+            if lbl not in eng:
+                continue
             vals = [eng[lbl][(t0, c)] for c in range(0, TERM, ENGINE_CHECK_EVERY)]
             path = np.repeat(vals, ENGINE_CHECK_EVERY)[:TERM][None]
             cap_paths[lbl] = (vals[0], path, "accepted" if vals[0] > 0 else "rejected")
@@ -352,7 +361,7 @@ def run_book(task):
                        **simulate(lv, mpath)}
                 row["loss_rate"] = row["loss"] / lv
                 matched_rows.append(row)
-        if not unlendable:
+        if not unlendable and not opts.get("skip_frontier"):
             for name, (_h, ff) in haircuts.items():
                 if name not in ("A", "B", "B_gap", "B_gap_vr"):
                     continue
@@ -387,6 +396,8 @@ def run_book(task):
                     frontier_rows.append({**base, "method": "C", "param": app_name, "ltv0": ell_c,
                                           "status": "accepted", **simulate(ell_c, path)})
             for lbl in ("v062", "v070"):
+                if lbl not in cap_paths:
+                    continue
                 ell0, path, status = cap_paths[lbl]
                 if status == "accepted":
                     frontier_rows.append({**base, "method": lbl, "param": "engine", "ltv0": ell0,
