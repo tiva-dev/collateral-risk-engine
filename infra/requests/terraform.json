@@ -1,1 +1,1 @@
-{"environment": "staging", "action": "apply", "note": "create staging (retry with provider secret placeholders)"}
+{"environment": "dev", "action": "apply", "note": "create dev environment (schedules off, db-f1-micro)"}
