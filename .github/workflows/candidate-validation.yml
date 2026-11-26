@@ -1,0 +1,59 @@
+name: Candidate Lifecycle Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        required: true
+        default: "45681534542"
+  push:
+    paths: ["infra/requests/validation.json"]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [hist-US, hist-NGX, sens-US, sens-NGX, sim-US, sim-NGX]
+    env:
+      SOURCE_RUN: ${{ inputs.source_run_id || '45681534542' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: official-provider-validation-evidence
+          run-id: ${{ env.SOURCE_RUN }}
+          github-token: ${{ github.token }}
+          path: data
+      - uses: actions/download-artifact@v4
+        with:
+          name: historical-data-snapshot
+          run-id: ${{ env.SOURCE_RUN }}
+          github-token: ${{ github.token }}
+          path: snapshots
+      - name: Verify inputs against snapshot
+        run: |
+          snap=$(dirname "$(find snapshots -name SNAPSHOT.json | head -n 1)")
+          python -m app.historical_data.snapshot verify "$snap"
+      - name: Run
+        run: |
+          manifest=$(find data/simulation_results -name '*.manifest.json' | head -n 1)
+          python -m research.methodology_lab.candidate_validation "$manifest" --part ${{ matrix.part }} --out out | tee out.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: candidate-validation-${{ matrix.part }}
+          path: |
+            out/**
+            out.log
+          retention-days: 90
