@@ -43,7 +43,9 @@ class V06ProviderValidationTests(unittest.TestCase):
         mkdir_index = text.index("mkdir -p data/simulation_results")
         tee_index = text.index("tee data/simulation_results/dataset_build.log")
         self.assertLess(mkdir_index, tee_index)
-        self.assertIn('ALPACA_DATA_FEED: "iex"', text)
+        # IEX stays the default; SIP is an explicit, recorded choice per run.
+        self.assertIn("ALPACA_DATA_FEED: ${{ inputs.data_feed || 'iex' }}", text)
+        self.assertIn('default: "iex"', text)
         self.assertIn("if: ${{ always() }}", text)
         self.assertIn('default: "baseline"', text)
         self.assertIn('--stress "$STRESS"', text)
