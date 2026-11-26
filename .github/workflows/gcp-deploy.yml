@@ -28,6 +28,7 @@ jobs:
     outputs:
       environment: ${{ steps.r.outputs.environment }}
       seed: ${{ steps.r.outputs.seed }}
+      report_only: ${{ steps.r.outputs.report_only }}
       sync: ${{ steps.r.outputs.sync }}
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +37,7 @@ jobs:
           if [ "${{ github.event_name }}" = "push" ]; then
             env=$(jq -r .environment infra/requests/deploy.json); seed=$(jq -r '.seed_sandbox // false' infra/requests/deploy.json)
             sync=$(jq -r '.sync_provider_secrets // false' infra/requests/deploy.json)
+            echo "report_only=$(jq -r '.report_only // false' infra/requests/deploy.json)" >> "$GITHUB_OUTPUT"
           else
             env="${{ inputs.environment }}"; seed="${{ inputs.seed_sandbox }}"; sync=false
           fi
@@ -70,7 +72,7 @@ jobs:
           service_account: cri-deployer@${{ steps.cfg.outputs.project }}.iam.gserviceaccount.com
       - uses: google-github-actions/setup-gcloud@v2
       - name: Sync provider secrets from GitHub secrets (values never printed)
-        if: needs.request.outputs.sync == 'true'
+        if: needs.request.outputs.report_only != 'true' && needs.request.outputs.sync == 'true'
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
@@ -85,6 +87,7 @@ jobs:
             echo "$name: new version added"
           done
       - name: Build and push images
+        if: needs.request.outputs.report_only != 'true'
         run: |
           gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
           T=${{ steps.cfg.outputs.tag }}
@@ -95,6 +98,7 @@ jobs:
           echo "SERVICE_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' $REPO/cri-service:$T)" >> "$GITHUB_ENV"
           echo "RESEARCH_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' $REPO/cri-research:$T)" >> "$GITHUB_ENV"
       - name: Migrate database (owner role, Cloud Run job)
+        if: needs.request.outputs.report_only != 'true'
         run: |
           P=${{ steps.cfg.outputs.project }}
           gcloud run jobs update cri-migrate --project $P --region $REGION --image "$SERVICE_IMAGE" --quiet
@@ -103,6 +107,7 @@ jobs:
             gcloud run jobs update $j --project $P --region $REGION --image "$RESEARCH_IMAGE" --quiet
           done
       - name: Deploy new revisions without traffic
+        if: needs.request.outputs.report_only != 'true'
         run: |
           P=${{ steps.cfg.outputs.project }}; T=r-${{ steps.cfg.outputs.tag }}
           for s in cri-worker cri-api; do
@@ -112,6 +117,7 @@ jobs:
           echo "CANDIDATE_URL=$(gcloud run services describe cri-api --project $P --region $REGION \
             --format=json | jq -r --arg t "$T" '.status.traffic[] | select(.tag==$t) | .url')" >> "$GITHUB_ENV"
       - name: Smoke test candidate
+        if: needs.request.outputs.report_only != 'true'
         run: |
           set -euo pipefail
           curl -fsS "$CANDIDATE_URL/health" | tee /dev/stderr | jq -e '.status=="ok"'
@@ -123,6 +129,7 @@ jobs:
           curl -fsS -H "Authorization: Bearer $KEY" "$CANDIDATE_URL/platform/controls" | tee /dev/stderr \
             | jq -e '.controls.lending_enabled==false and .controls.liquidation_execution_enabled==false'
       - name: Shift traffic to candidate
+        if: needs.request.outputs.report_only != 'true'
         run: |
           P=${{ steps.cfg.outputs.project }}; T=r-${{ steps.cfg.outputs.tag }}
           for s in cri-worker cri-api; do
@@ -137,3 +144,10 @@ jobs:
           KEY=$(gcloud secrets versions access latest --secret cri-sandbox-api-key --project ${{ steps.cfg.outputs.project }})
           ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project ${{ steps.cfg.outputs.project }})
           python infra/scripts/seed_sandbox.py --url "$URL" --key "$KEY" --admin-key "$ADMIN"
+      - name: Operational report
+        run: |
+          pip install -q httpx
+          URL=$(gcloud run services describe cri-api --project ${{ steps.cfg.outputs.project }} --region $REGION --format='value(status.url)')
+          KEY=$(gcloud secrets versions access latest --secret cri-sandbox-api-key --project ${{ steps.cfg.outputs.project }})
+          ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project ${{ steps.cfg.outputs.project }})
+          python infra/scripts/staging_report.py --url "$URL" --key "$KEY" --admin-key "$ADMIN"

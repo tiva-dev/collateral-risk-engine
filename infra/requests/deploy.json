@@ -1,1 +1,1 @@
-{"environment": "staging", "seed_sandbox": true, "sync_provider_secrets": true, "note": "first staging deployment"}
+{"environment": "staging", "report_only": true, "note": "operational report after first monitoring cycles"}
