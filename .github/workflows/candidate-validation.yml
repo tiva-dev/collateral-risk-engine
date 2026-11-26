@@ -1,5 +1,5 @@
 name: Candidate Lifecycle Validation
-true:
+on:
   workflow_dispatch:
     inputs:
       source_run_id:
