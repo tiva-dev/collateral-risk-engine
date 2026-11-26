@@ -66,6 +66,21 @@ def main(argv: list[str]) -> int:
 
             platform = Platform(s, db)
             print(json.dumps(backtest.run(db, platform.services, argv[2]), default=str)[:4000])
+        elif cmd == "backtest-pending":
+            from app.platform import backtest
+            from app.platform.app import Platform
+
+            platform = Platform(s, db)
+            with db.transaction("*") as conn:
+                queued = [r["run_id"] for r in conn.fetchall(
+                    "SELECT run_id FROM backtest_runs WHERE status='queued' ORDER BY created_at")]
+            done = {}
+            for run_id in queued:
+                try:
+                    done[run_id] = backtest.run(db, platform.services, run_id)["models"]
+                except Exception as exc:  # noqa: BLE001 - recorded as failed in the run row
+                    done[run_id] = {"error": str(exc)[:300]}
+            print(json.dumps(done, default=str)[:6000])
         elif cmd == "shadow":
             from app.platform import shadow
             from app.platform.app import Platform

@@ -19,6 +19,7 @@ def main() -> None:
     ap.add_argument("--url", required=True)
     ap.add_argument("--key", required=True)
     ap.add_argument("--admin-key", required=True)
+    ap.add_argument("--request-backtest", default="")
     a = ap.parse_args()
     c = httpx.Client(base_url=a.url.rstrip("/"), timeout=60.0)
     sb = {"Authorization": f"Bearer {a.key}"}
@@ -62,12 +63,26 @@ def main() -> None:
     out["ingestion_runs"] = ops.get("ingestion_runs", [])[:6]
     out["latest_quotes"] = ops.get("latest_quotes")
     out["webhook_backlog"] = ops.get("webhook_backlog")
+    out["shadow_summary"] = c.get("/shadow/summary?hours=168", headers=sb).json()
+    out["shadow_disagreements"] = c.get("/shadow/disagreements", headers=sb).json().get("disagreements", [])
+    if accounts:
+        ref = accounts[0]["account_ref"]
+        out["explanation_example"] = c.get(f"/explain/accounts/{ref}", headers=sb).json()
+        out["shadow_example"] = c.get(f"/shadow/accounts/{ref}", headers=sb).json()
+    out["backtests"] = c.get("/backtests", headers=sb).json().get("backtests", [])[:5]
+    out["onboarding"] = {k: {"decision": v["decision"], "findings": v["findings"]}
+                         for k, v in c.get("/admin/markets/onboarding", headers=ad).json().get("markets", {}).items()}
+    out["console_status"] = c.get("/console/").status_code
     unauth = c.get("/monitoring/accounts").status_code
     cross = c.get("/admin/tenants", headers=sb).status_code
     lend = c.put("/admin/controls/lending_enabled", headers={**ad, "Idempotency-Key": "report-lending-probe"},
                  json={"value": True, "reason": "interlock probe from staging report"}).status_code
     out["security_probes"] = {"no_key_status": unauth, "sandbox_key_on_admin_status": cross,
                               "enable_lending_status": lend}
+    if a.request_backtest and accounts:
+        r = c.post("/backtests", headers={**sb, "Idempotency-Key": f"report-bt-{a.request_backtest}"},
+                   json={"account_ref": a.request_backtest, "step": 5})
+        out["backtest_requested"] = {"status": r.status_code, "body": r.json()}
     print(json.dumps(out, indent=2, default=str))
 
 

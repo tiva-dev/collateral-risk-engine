@@ -533,9 +533,12 @@ def build_router(p: Platform) -> APIRouter:
         if p.settings.gcp_project:
             from app.platform import gcp
 
-            op = gcp.run_job(p.settings.gcp_project, p.settings.gcp_region, "cri-backtest",
-                             ["-m", "app.platform.cli", "backtest", run_id])
-            execution = (op.get("metadata") or {}).get("name") or op.get("name")
+            try:
+                op = gcp.run_job(p.settings.gcp_project, p.settings.gcp_region, "cri-backtest",
+                                 ["-m", "app.platform.cli", "backtest", run_id])
+                execution = (op.get("metadata") or {}).get("name") or op.get("name")
+            except Exception as exc:  # noqa: BLE001 - stays queued; the pending-backtest job picks it up
+                execution = f"not started: {type(exc).__name__}: {str(exc)[:200]}"
             current_connection().execute("UPDATE backtest_runs SET execution=%s WHERE run_id=%s", (execution, run_id))
         return {"run_id": run_id, "status": "queued", "models": models, "execution": execution}
 

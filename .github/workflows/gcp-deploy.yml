@@ -30,6 +30,7 @@ jobs:
       seed: ${{ steps.r.outputs.seed }}
       report_only: ${{ steps.r.outputs.report_only }}
       sync: ${{ steps.r.outputs.sync }}
+      jobs: ${{ steps.r.outputs.jobs }}
     steps:
       - uses: actions/checkout@v4
       - id: r
@@ -38,6 +39,7 @@ jobs:
             env=$(jq -r .environment infra/requests/deploy.json); seed=$(jq -r '.seed_sandbox // false' infra/requests/deploy.json)
             sync=$(jq -r '.sync_provider_secrets // false' infra/requests/deploy.json)
             echo "report_only=$(jq -r '.report_only // false' infra/requests/deploy.json)" >> "$GITHUB_OUTPUT"
+            echo "jobs=$(jq -c '.run_jobs // []' infra/requests/deploy.json)" >> "$GITHUB_OUTPUT"
           else
             env="${{ inputs.environment }}"; seed="${{ inputs.seed_sandbox }}"; sync=false
           fi
@@ -144,13 +146,23 @@ jobs:
           KEY=$(gcloud secrets versions access latest --secret cri-sandbox-api-key --project ${{ steps.cfg.outputs.project }})
           ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project ${{ steps.cfg.outputs.project }})
           python infra/scripts/seed_sandbox.py --url "$URL" --key "$KEY" --admin-key "$ADMIN"
+      - name: Run platform jobs (shadow models, pending backtests) on the migrate job image
+        if: needs.request.outputs.jobs != '[]' && needs.request.outputs.jobs != ''
+        run: |
+          P=${{ steps.cfg.outputs.project }}
+          for cmd in $(echo '${{ needs.request.outputs.jobs }}' | jq -r '.[]'); do
+            echo "== $cmd"
+            gcloud run jobs execute cri-migrate --project $P --region $REGION --wait \
+              --args="-m,app.platform.cli,$cmd"
+          done
       - name: Operational report
         run: |
           pip install -q httpx
           URL=$(gcloud run services describe cri-api --project ${{ steps.cfg.outputs.project }} --region $REGION --format='value(status.url)')
           KEY=$(gcloud secrets versions access latest --secret cri-sandbox-api-key --project ${{ steps.cfg.outputs.project }})
           ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project ${{ steps.cfg.outputs.project }})
-          python infra/scripts/staging_report.py --url "$URL" --key "$KEY" --admin-key "$ADMIN"
+          python infra/scripts/staging_report.py --url "$URL" --key "$KEY" --admin-key "$ADMIN" \
+            --request-backtest "$(jq -r '.request_backtest // ""' infra/requests/deploy.json)"
       - name: Recent worker and scheduler logs
         if: always()
         run: |
