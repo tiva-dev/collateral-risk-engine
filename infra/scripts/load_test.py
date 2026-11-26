@@ -93,6 +93,10 @@ async def main_async(a: argparse.Namespace) -> dict:
                 ("GET", "/monitoring/events?limit=20", {"headers": h})]
         out["mixed_read_and_explain"] = [await drive(c, reqs, conc, a.seconds) for conc in (5, 20, 50)]
         out["health_only"] = [await drive(c, [("GET", "/health", {})], 50, a.seconds / 2)]
+        if a.hold_seconds:
+            # Keep the accounts active through scheduled monitoring ticks so the
+            # tick latency with the extra accounts can be read from the logs.
+            await asyncio.sleep(a.hold_seconds)
         await c.post("/admin/tenants/loadtest/status", headers={**admin, "Idempotency-Key": f"lt-off-{time.time()}"},
                      json={"value": "suspended", "reason": "load test finished (automated)"})
     return out
@@ -104,6 +108,7 @@ def main() -> None:
     ap.add_argument("--admin-key", required=True)
     ap.add_argument("--accounts", type=int, default=100)
     ap.add_argument("--seconds", type=float, default=45.0)
+    ap.add_argument("--hold-seconds", type=float, default=0.0)
     print(json.dumps(asyncio.run(main_async(ap.parse_args())), indent=2))
 
 

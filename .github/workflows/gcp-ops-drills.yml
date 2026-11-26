@@ -84,14 +84,14 @@ jobs:
           pip install -q httpx
           URL=$(gcloud run services describe cri-api --project $P --region $REGION --format='value(status.url)')
           ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project $P)
-          python infra/scripts/load_test.py --url "$URL" --admin-key "$ADMIN" --accounts 100 --seconds 45 | tee load.json
+          python infra/scripts/load_test.py --url "$URL" --admin-key "$ADMIN" --accounts 100 --seconds 45 --hold-seconds 330 | tee load.json
           echo "Cloud Run 95th percentile request latency during the window (from logs):"
           gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="cri-api" AND httpRequest.latency:*' \
             --project $P --freshness=15m --limit=2000 --format='value(httpRequest.latency)' | sed 's/s$//' | sort -n | \
             awk '{a[NR]=$1} END {if (NR) print "n=" NR " p50=" a[int(NR*0.5)] "s p95=" a[int(NR*0.95)] "s p99=" a[int(NR*0.99)] "s"}'
           echo "Worker monitoring tick latency (last 2h):"
           gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="cri-worker" AND httpRequest.requestUrl:"tick-all"' \
-            --project $P --freshness=2h --limit=50 --format='value(timestamp,httpRequest.latency,httpRequest.status)' | head -20
+            --project $P --freshness=30m --limit=20 --format='value(timestamp,httpRequest.latency,httpRequest.status)'
       - name: Wrong-environment identity probe (must fail)
         if: contains(fromJSON(needs.request.outputs.drills), 'security')
         id: probe
@@ -99,7 +99,7 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: projects/${{ needs.request.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
-          service_account: cri-deployer@tiva-cri-prd-cda9.iam.gserviceaccount.com
+          service_account: cri-deployer@tiva-cri-dev-cda9.iam.gserviceaccount.com
           token_format: access_token
       - name: Wrong-environment identity probe 2 (must fail)
         if: contains(fromJSON(needs.request.outputs.drills), 'security')
@@ -113,7 +113,7 @@ jobs:
       - name: Record probe outcomes
         if: contains(fromJSON(needs.request.outputs.drills), 'security')
         run: |
-          echo "PROBE_RESULT {\"staging_job_as_prod_deployer\":\"${{ steps.probe.outcome }}\",\"staging_job_as_terraform_prod\":\"${{ steps.probe2.outcome }}\"}"
+          echo "PROBE_RESULT {\"staging_job_as_dev_deployer\":\"${{ steps.probe.outcome }}\",\"staging_job_as_terraform_prod\":\"${{ steps.probe2.outcome }}\"}"
           test "${{ steps.probe.outcome }}" = "failure"
           test "${{ steps.probe2.outcome }}" = "failure"
 
@@ -126,6 +126,7 @@ jobs:
       P: ${{ needs.request.outputs.project }}
       REGION: europe-west1
       INSTANCE: cri-${{ needs.request.outputs.environment }}-pg
+      CLOUDSDK_BILLING_QUOTA_PROJECT: ${{ needs.request.outputs.project }}
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2

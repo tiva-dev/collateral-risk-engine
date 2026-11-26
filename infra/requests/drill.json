@@ -1,1 +1,1 @@
-{"environment": "staging", "drills": ["rollback", "load", "security", "dr"], "tf_sa": "terraform", "note": "drills (rollback step fixed)"}
+{"environment": "staging", "drills": ["load", "security", "dr"], "tf_sa": "terraform", "note": "DR with quota project; tick latency under 107 accounts; dev-deployer isolation probe"}
