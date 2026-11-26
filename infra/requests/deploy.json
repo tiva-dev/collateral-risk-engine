@@ -1,1 +1,1 @@
-{"environment": "staging", "report_only": true, "note": "verification report after scheduled ingestion cycles"}
+{"environment": "staging", "note": "deploy consolidated build: corrected engine (#25), data (#24), research (#26), platform (#28) + shadow models + Control Centre"}
