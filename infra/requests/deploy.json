@@ -1,1 +1,1 @@
-{"environment": "staging", "report_only": true, "note": "final verification report"}
+{"environment": "staging", "seed_sandbox": false, "run_jobs": ["shadow", "lifecycle-all"], "note": "deploy candidate engine, interest capitalization fix and CI-gated deploys; run shadow and lifecycle validation"}
