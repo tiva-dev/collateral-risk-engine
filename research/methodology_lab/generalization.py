@@ -61,17 +61,24 @@ def _features(r: np.ndarray) -> tuple[float, float, float]:
     return float(np.log(sd)), float(max(stats.kurtosis(z, fisher=True), 0.0)), float(np.mean(np.abs(x) >= GAP))
 
 
-def train_priors(panel: dict, symbols: set[str] | None = None) -> dict:
-    """Group-level priors from full histories of the training instruments."""
+def train_priors(panel: dict, symbols: set[str] | None = None, upto=None) -> dict:
+    """Group-level priors from the training instruments' histories.
+
+    ``upto`` (a date) restricts the training data to sessions before the
+    decision date, so priors never contain information from the test period.
+    """
     r = panel["r"]
+    end = r.shape[0]
+    if upto is not None:
+        end = int(np.searchsorted(np.array(panel["dates"]), upto, side="left"))
     rows = []
     for j, s in enumerate(panel["symbols"]):
         if symbols is not None and s not in symbols:
             continue
-        x = r[panel["listed"][:, j], j]
+        x = r[max(0, end - 756):end][panel["listed"][max(0, end - 756):end, j], j]
         if x.size < WARM:
             continue
-        lv, ku, gf = _features(x[-756:])
+        lv, ku, gf = _features(x)
         rows.append((lv, ku, gf, s))
     if not rows:
         raise ValueError("no training instruments")
@@ -86,17 +93,25 @@ def nu_from_kurtosis(k: float) -> float:
     return float(np.clip(4 + 6 / max(k, 1e-3), 3.0, 30.0))
 
 
-def evaluate(test: dict, test_symbols: list[int], priors: dict | None, k: int) -> dict:
+SD_FLOOR = 0.001  # 0.1% daily: below this a window is stale, not riskless
+
+
+def evaluate(test: dict, test_symbols: list[int], prior_source: tuple[dict, set[str] | None] | None, k: int) -> dict:
     r = test["r"]
     listed = test["listed"]
     nd = r.shape[0]
     out = {m: {"qlike": [], "logbias": [], "exceed": [], "gap_err": []} for m in ("raw", "pooled", "hierarchical")}
     for t in range(WARM, nd - FWD_GAP, STEP):
+        try:
+            priors = (train_priors(prior_source[0], prior_source[1], upto=test["dates"][t])
+                      if prior_source is not None else None)
+        except ValueError:
+            priors = None
         cols = [j for j in test_symbols if listed[t - k:t, j].all() and listed[t:t + FWD_GAP, j].all()]
         if len(cols) < 3:
             continue
         hist = r[t - k:t, cols]
-        logsd = np.log(np.maximum(hist.std(axis=0, ddof=1), 1e-6))
+        logsd = np.log(np.maximum(hist.std(axis=0, ddof=1), SD_FLOOR))
         v_i = 1.0 / (2 * (k - 1))  # sampling variance of a log sample s.d.
         # pooled: cross-section of the held-out market only
         mu_x = float(logsd.mean())
@@ -112,7 +127,13 @@ def evaluate(test: dict, test_symbols: list[int], priors: dict | None, k: int) -
             w = priors["tau2_logvol"] / (priors["tau2_logvol"] + v_i)
             hier = w * logsd + (1 - w) * prior_i
             nu_h = nu_from_kurtosis(priors["kurtosis"])
-            gap_h = priors["gap_freq"]
+            # gap intensity: beta-binomial shrinkage of each instrument's own gap
+            # count toward the held-out market's cross-section, itself shrunk
+            # toward the training prior (strength kappa sessions each).
+            kappa = 100.0
+            counts = (np.abs(hist) >= GAP).sum(axis=0)
+            market_rate = (counts.sum() + kappa * priors["gap_freq"]) / (k * len(cols) + kappa)
+            gap_h = (counts + kappa * market_rate) / (k + kappa)
         else:
             hier = pooled
             nu_h = 5.0
@@ -125,7 +146,7 @@ def evaluate(test: dict, test_symbols: list[int], priors: dict | None, k: int) -
             ("raw", logsd, nu_from_kurtosis(float(np.median([stats.kurtosis(h, fisher=True) for h in hist.T]))),
              np.mean(np.abs(hist) >= GAP, axis=0)),
             ("pooled", pooled, 5.0, np.full(len(cols), float(np.mean(np.abs(hist) >= GAP)))),
-            ("hierarchical", hier, nu_h, np.full(len(cols), gap_h)),
+            ("hierarchical", hier, nu_h, np.broadcast_to(gap_h, (len(cols),))),
         ):
             pred_var = np.exp(2 * lsd)
             q = stats.t.ppf(0.99, nu) * np.sqrt((nu - 2) / nu) * np.sqrt(pred_var * FWD_VAR)
@@ -136,6 +157,7 @@ def evaluate(test: dict, test_symbols: list[int], priors: dict | None, k: int) -
             out[name]["exceed"].extend((loss10 > var99).astype(float).tolist())
             out[name]["gap_err"].extend(np.abs(np.asarray(gap_pred) - gap_real).tolist())
     return {m: {"n": len(v["qlike"]), "qlike": float(np.mean(v["qlike"])) if v["qlike"] else None,
+                "qlike_median": float(np.median(v["qlike"])) if v["qlike"] else None,
                 "log_vol_bias": float(np.mean(v["logbias"])) if v["logbias"] else None,
                 "var99_exceedance": float(np.mean(v["exceed"])) if v["exceed"] else None,
                 "gap_freq_abs_error": float(np.mean(v["gap_err"])) if v["gap_err"] else None}
@@ -149,14 +171,14 @@ def main() -> None:
     a = ap.parse_args()
     panels = {m: _panel(a.manifest, m) for m in ("NGX", "US")}
     results: dict = {"withhold_market": {}, "withhold_group": {}, "within_market_full_history": {}}
+    results["within_market_point_in_time"] = results.pop("within_market_full_history")
     for test_m, train_m in (("NGX", "US"), ("US", "NGX")):
-        priors = train_priors(panels[train_m])
         idx = list(range(len(panels[test_m]["symbols"])))
         results["withhold_market"][f"train {train_m} -> test {test_m}"] = {
-            "priors": priors, **{f"k={k}": evaluate(panels[test_m], idx, priors, k) for k in KS}}
-        own = train_priors(panels[test_m])
-        results["within_market_full_history"][test_m] = {
-            "priors": own, **{f"k={k}": evaluate(panels[test_m], idx, own, k) for k in KS}}
+            "priors_full_period": train_priors(panels[train_m]),
+            **{f"k={k}": evaluate(panels[test_m], idx, (panels[train_m], None), k) for k in KS}}
+        results["within_market_point_in_time"][test_m] = {
+            **{f"k={k}": evaluate(panels[test_m], idx, (panels[test_m], None), k) for k in KS}}
     for m, groups in GROUPS.items():
         p = panels[m]
         for g, members in groups.items():
@@ -165,14 +187,13 @@ def main() -> None:
             if len(held) < 3 or len(rest) < 3:
                 results["withhold_group"][f"{m}:{g}"] = {"skipped": f"held={len(held)} rest={len(rest)}"}
                 continue
-            priors = train_priors(p, rest)
             results["withhold_group"][f"{m}:{g}"] = {
-                "priors": priors, **{f"k={k}": evaluate(p, held, priors, k) for k in KS}}
+                **{f"k={k}": evaluate(p, held, (p, rest), k) for k in KS}}
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "generalization.json").write_text(json.dumps(results, indent=2))
     print("#### GENERALIZATION")
-    print("experiment\tk\testimator\tn\tqlike\tlog_vol_bias\tvar99_exceed\tgap_abs_err")
+    print("experiment\tk\testimator\tn\tqlike_mean\tqlike_median\tlog_vol_bias\tvar99_exceed\tgap_abs_err")
     for section, exps in results.items():
         for name, res in exps.items():
             for k in KS:
@@ -181,7 +202,8 @@ def main() -> None:
                     continue
                 for est, x in block.items():
                     if x["n"]:
-                        print(f"{section}:{name}\t{k}\t{est}\t{x['n']}\t{x['qlike']:.4f}\t{x['log_vol_bias']:+.4f}\t"
+                        print(f"{section}:{name}\t{k}\t{est}\t{x['n']}\t{x['qlike']:.4f}\t{x['qlike_median']:.4f}\t"
+                              f"{x['log_vol_bias']:+.4f}\t"
                               f"{x['var99_exceedance']:.4f}\t{x['gap_freq_abs_error']:.4f}")
 
 

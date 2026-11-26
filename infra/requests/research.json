@@ -1,1 +1,1 @@
-{"note": "cross-market generalization and intervention study, 26 Nov 2026"}
+{"experiments": ["generalization"], "note": "generalization v2: point-in-time priors, stale-window floor, hierarchical gap intensity, median QLIKE"}

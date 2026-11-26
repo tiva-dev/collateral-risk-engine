@@ -30,27 +30,37 @@ jobs:
       SOURCE_RUN: ${{ inputs.source_run_id || '45681534542' }}
     steps:
       - uses: actions/checkout@v4
+      - id: sel
+        run: |
+          want=$(jq -r '(.experiments // ["generalization","intervention-NGX","intervention-US"]) | index("${{ matrix.experiment }}") != null' infra/requests/research.json 2>/dev/null || echo true)
+          echo "run=$want" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
+        if: steps.sel.outputs.run == 'true'
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt numpy scipy
+        if: steps.sel.outputs.run == 'true'
       - uses: actions/download-artifact@v4
+        if: steps.sel.outputs.run == 'true'
         with:
           name: official-provider-validation-evidence
           run-id: ${{ env.SOURCE_RUN }}
           github-token: ${{ github.token }}
           path: data
       - uses: actions/download-artifact@v4
+        if: steps.sel.outputs.run == 'true'
         with:
           name: historical-data-snapshot
           run-id: ${{ env.SOURCE_RUN }}
           github-token: ${{ github.token }}
           path: snapshots
       - name: Verify inputs against snapshot
+        if: steps.sel.outputs.run == 'true'
         run: |
           snap=$(dirname "$(find snapshots -name SNAPSHOT.json | head -n 1)")
           python -m app.historical_data.snapshot verify "$snap"
       - name: Run
+        if: steps.sel.outputs.run == 'true'
         run: |
           manifest=$(find data/simulation_results -name '*.manifest.json' | head -n 1)
           case "${{ matrix.experiment }}" in
@@ -59,7 +69,7 @@ jobs:
             intervention-US) python -m research.methodology_lab.intervention "$manifest" --market US --out out | tee out.log ;;
           esac
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.sel.outputs.run == 'true'
         with:
           name: research-${{ matrix.experiment }}
           path: |
