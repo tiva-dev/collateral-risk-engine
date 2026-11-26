@@ -41,10 +41,10 @@ def main() -> None:
             "approved_ltv": ev.get("approved_ltv") or ev.get("max_ltv"),
             "maintenance_ltv": ev.get("maintenance_ltv"),
             "collateral_value": ev.get("collateral_value") or ev.get("total_collateral_value"),
-            "warnings": (full.get("last_market_data_warnings") or [])[:6],
+            "warnings": list(full.get("last_market_data_warnings") or [])[:6],
             "missing_data": full.get("last_missing_data"),
             "last_checked_at": full.get("last_checked_at"),
-            "evaluation_keys": sorted(ev.keys())[:40],
+            "evaluation_keys": sorted(ev)[:40] if isinstance(ev, dict) else type(ev).__name__,
         })
     out["accounts"] = accounts
     events = c.get("/monitoring/events?limit=500", headers=sb).json().get("events", [])
