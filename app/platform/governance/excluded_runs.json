@@ -22,7 +22,7 @@
       "kind": "backtest",
       "selector": {
         "requested_by": "cli:lifecycle-all",
-        "created_before": "2026-11-26T20:30:00+00:00"
+        "engine_version_not": "candidate-2026.11.4"
       },
       "model_id": "*",
       "reason": "lifecycle batches of 26 Nov ran candidate versions before 2026.11.4 (simplified executor, terminal headroom, sell-all fallback, suspensions treated as data problems); superseded by candidate-2026.11.4.",

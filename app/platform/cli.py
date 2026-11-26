@@ -86,6 +86,7 @@ def main(argv: list[str]) -> int:
             import uuid as _uuid
             from datetime import UTC, datetime
 
+            from app.candidate.config import VERSION as CANDIDATE_VERSION
             from app.platform import backtest
             from app.platform.app import Platform
 
@@ -102,7 +103,8 @@ def main(argv: list[str]) -> int:
                         "status, created_at) VALUES (%s,%s,%s,'cli:lifecycle-all',%s,%s,'queued',%s)",
                         (rid, a["tenant_id"], a["account_ref"], json.dumps(["candidate"]),
                          json.dumps({"kind": "lifecycle", "term_sessions": 63, "every": every,
-                                     "cure_probability": 0.5}), datetime.now(UTC).isoformat()))
+                                     "cure_probability": 0.5, "engine_version": CANDIDATE_VERSION}),
+                         datetime.now(UTC).isoformat()))
                     ids.append(rid)
             done = {}
             for rid in ids:
@@ -122,10 +124,20 @@ def main(argv: list[str]) -> int:
             added = []
             with db.transaction("*") as conn:
                 for e in spec["entries"]:
-                    ids = [e["run_id"]] if e.get("run_id") else [
-                        r["run_id"] for r in conn.fetchall(
-                            "SELECT run_id FROM backtest_runs WHERE requested_by=%s AND created_at < %s",
-                            (e["selector"]["requested_by"], e["selector"]["created_before"]))]
+                    if e.get("run_id"):
+                        ids = [e["run_id"]]
+                    else:
+                        sel = e["selector"]
+                        rows = conn.fetchall("SELECT run_id, params, created_at FROM backtest_runs WHERE requested_by=%s",
+                                             (sel["requested_by"],))
+                        ids = []
+                        for r in rows:
+                            ver = json.loads(r["params"] or "{}").get("engine_version")
+                            if "created_before" in sel and str(r["created_at"]) >= sel["created_before"]:
+                                continue
+                            if "engine_version_not" in sel and ver == sel["engine_version_not"]:
+                                continue
+                            ids.append(r["run_id"])
                     for rid in ids:
                         if conn.fetchone("SELECT 1 AS x FROM excluded_runs WHERE run_id=%s AND model_id=%s",
                                          (rid, e["model_id"])):
