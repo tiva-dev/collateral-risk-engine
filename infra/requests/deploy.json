@@ -1,1 +1,1 @@
-{"environment": "staging", "report_only": true, "run_jobs": ["shadow", "backtest-pending"], "note": "shadow models and queued backtests after bar ingestion"}
+{"environment": "staging", "report_only": true, "run_jobs": ["shadow"], "request_backtest": "sbx-ngx-mixed", "note": "shadow after bars are stored; request NGX backtest"}
