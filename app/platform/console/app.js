@@ -380,7 +380,7 @@ async function renderAudit() {
 }
 
 async function renderInfra() {
-  const [inf, ops] = await Promise.all([api("/admin/infrastructure"), api("/admin/operations")]);
+  const [inf, ops, drills] = await Promise.all([api("/admin/infrastructure"), api("/admin/operations"), api("/admin/drills")]);
   if (!inf.available) return h("div", {}, h("h2", {}, "Infrastructure"), h("p", {}, inf.reason));
   return h("div", {}, h("h2", {}, `Infrastructure — ${inf.project} (${inf.region})`),
     h("div", { class: "grid" }, kpi("Open alerts", (inf.open_alerts || []).length), kpi("Alert policies", (inf.alert_policies || []).length),
@@ -395,6 +395,10 @@ async function renderInfra() {
     h("h3", {}, "Cloud Run jobs"),
     table([{ t: "Job", k: "name" }, { t: "Latest execution", f: (r) => h("span", { class: "mono small" }, r.latest_execution) },
       { t: "Completed", f: (r) => ago(r.latest_completion) }, { t: "Status", f: (r) => r.latest_status || "—" }], inf.jobs || []),
+    h("h3", {}, "Operational drills (recorded evidence)"),
+    table([{ t: "Recorded", f: (r) => String(r.recorded_at).slice(0, 19) }, { t: "Drill", k: "kind" },
+      { t: "Result", f: (r) => pill(r.passed === null ? "—" : r.passed ? "ok" : "bad") }, { t: "Source", f: (r) => h("span", { class: "small" }, r.source) },
+      { t: "Detail", f: (r) => h("span", { class: "mono" }, JSON.stringify(r.result).slice(0, 260)) }], drills.drills || []),
     h("h3", {}, "Alert policies"),
     table([{ t: "Policy", k: "name" }, { t: "Enabled", f: (r) => pill(r.enabled ? "ok" : "bad") }], inf.alert_policies || []),
     (inf.open_alerts || []).length ? h("div", {}, h("h3", {}, "Open alerts"), table([{ t: "Policy", k: "policy" }, { t: "Opened", f: (r) => ago(r.opened) }], inf.open_alerts)) : null);

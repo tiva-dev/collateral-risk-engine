@@ -1,1 +1,1 @@
-{"environment": "staging", "run_jobs": ["shadow", "backtest-pending"], "note": "deploy current integration build (dr-verify, onboarding, drills support), then shadow and pending backtests"}
+{"environment": "staging", "run_jobs": ["shadow"], "note": "deploy drill evidence recording (migration 6) and Control Centre drill view"}

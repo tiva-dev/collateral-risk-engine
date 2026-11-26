@@ -326,12 +326,25 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
 );
 """
 
+_M6 = """
+CREATE TABLE IF NOT EXISTS operational_drills (
+  drill_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  recorded_at {TS} NOT NULL,
+  source TEXT NOT NULL,
+  passed INTEGER,
+  result TEXT NOT NULL
+);
+"""
+
 MIGRATIONS: list[tuple[int, str, dict[str, str]]] = [
     (1, "initial platform schema", {"postgres": _M1, "sqlite": _M1}),
     (2, "append-only audit and row-level security", {"postgres": _M2_POSTGRES + _rls_statements(), "sqlite": ""}),
     (3, "application role grants", {"postgres": _grants(), "sqlite": ""}),
     (4, "sandbox webhook receiver", {"postgres": _M4 + _grants(), "sqlite": _M4}),
     (5, "market bars and shadow model evaluations", {"postgres": _M5 + _shadow_rls() + _grants(), "sqlite": _M5}),
+    (6, "operational drill records", {"postgres": _M6 + _grants(), "sqlite": _M6}),
 ]
 
 

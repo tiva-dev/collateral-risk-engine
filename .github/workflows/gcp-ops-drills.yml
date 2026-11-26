@@ -77,7 +77,11 @@ jobs:
           for i in $(seq 1 30); do after=$(curl -fsS $URL/health | jq -r .git_sha); [ "$after" = "$before" ] && break; sleep 2; done
           t3=$(date +%s)
           echo "ROLLBACK_RESULT {\"revision_before\":\"$serving\",\"rolled_back_to\":\"$prev\",\"sha_before\":\"$before\",\"sha_after_rollback\":\"$rb\",\"ready_after_rollback\":\"$ready\",\"rollback_command_s\":$((t1-t0)),\"rollback_observed_s\":$((t1b-t0)),\"roll_forward_s\":$((t3-t2)),\"sha_after_roll_forward\":\"$after\"}"
-          test "$rb" != "$before" && test "$ready" = "ready" && test "$after" = "$before"
+          ok=false; [ "$rb" != "$before" ] && [ "$ready" = "ready" ] && [ "$after" = "$before" ] && ok=true
+          ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project $P)
+          curl -fsS -X POST "$URL/admin/drills" -H "Authorization: Bearer $ADMIN" -H "Idempotency-Key: drill-rb-${{ github.run_id }}" \
+            -H "Content-Type: application/json" -d "{\"kind\":\"rollback\",\"source\":\"gcp-ops-drills run ${{ github.run_id }}\",\"passed\":$ok,\"result\":{\"revision_before\":\"$serving\",\"rolled_back_to\":\"$prev\",\"sha_before\":\"$before\",\"sha_after_rollback\":\"$rb\",\"ready_after_rollback\":\"$ready\",\"rollback_observed_s\":$((t1b-t0)),\"roll_forward_s\":$((t3-t2))}}"
+          $ok
       - name: Load test
         if: contains(fromJSON(needs.request.outputs.drills), 'load')
         run: |
@@ -85,6 +89,8 @@ jobs:
           URL=$(gcloud run services describe cri-api --project $P --region $REGION --format='value(status.url)')
           ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project $P)
           python infra/scripts/load_test.py --url "$URL" --admin-key "$ADMIN" --accounts 100 --seconds 45 --hold-seconds 330 | tee load.json
+          jq -c --arg src "gcp-ops-drills run ${{ github.run_id }}" '{kind:"load_test",source:$src,passed:([.mixed_read_and_explain[].errors_5xx_or_network]|add==0),result:.}' load.json | \
+            curl -fsS -X POST "$URL/admin/drills" -H "Authorization: Bearer $ADMIN" -H "Idempotency-Key: drill-load-${{ github.run_id }}" -H "Content-Type: application/json" -d @-
           echo "Cloud Run 95th percentile request latency during the window (from logs):"
           gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="cri-api" AND httpRequest.latency:*' \
             --project $P --freshness=15m --limit=2000 --format='value(httpRequest.latency)' | sed 's/s$//' | sort -n | \
@@ -159,7 +165,7 @@ jobs:
           sleep 30
           gcloud logging read "resource.type=\"cloud_run_job\" AND labels.\"run.googleapis.com/execution_name\"=\"$EXEC\"" \
             --project $P --limit 100 --format='value(textPayload)' | tee job.log | tail -40
-          grep '"tables"' job.log | head -1 | sed 's/^/DR_RESULT /'
+          grep '"tables"' job.log | head -1 | sed 's/^/DR_RESULT /' || true
           exit $rc
       - name: Delete drill clone
         if: always() && contains(fromJSON(needs.request.outputs.drills), 'dr') && env.CLONE != ''
@@ -170,7 +176,7 @@ jobs:
         run: |
           B=$(gcloud storage buckets list --project $P --format='value(name)' | grep db-exports)
           OBJ="gs://$B/cri-drill-$(date -u +%Y%m%d%H%M).sql.gz"
-          gcloud sql export sql $INSTANCE "$OBJ" --project $P --database cri --offload=false
+          gcloud sql export sql $INSTANCE "$OBJ" --project $P --database cri
           gcloud storage ls -l "$OBJ" | sed 's/^/EXPORT_RESULT /'
           gcloud storage buckets describe gs://$B --format='value(location,versioning_enabled)' | sed 's/^/EXPORT_BUCKET /'
       - name: Security configuration verification

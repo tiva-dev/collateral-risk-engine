@@ -289,6 +289,13 @@ class WebhookCreate(BaseModel):
     event_types: list[str] = Field(default_factory=lambda: ["*"])
 
 
+class DrillRecord(BaseModel):
+    kind: str = Field(pattern=r"^(rollback|load_test|disaster_recovery|security|isolation_probe)$")
+    source: str
+    passed: bool | None = None
+    result: dict[str, Any]
+
+
 class BacktestCreate(BaseModel):
     account_ref: str
     models: list[str] | None = None
@@ -669,6 +676,27 @@ def build_router(p: Platform) -> APIRouter:
         append_audit("lending_policy_approved", {"tenant_id": tenant_id, "policy_id": policy_id, "version": version,
                                                  "reason": req.reason}, tenant_id=tenant_id)
         return {"tenant_id": tenant_id, "policy_id": policy_id, "version": version, "status": "approved"}
+
+    @r.post("/admin/drills", status_code=201)
+    def admin_record_drill(req: DrillRecord) -> dict[str, Any]:
+        drill_id = "drl_" + uuid.uuid4().hex[:16]
+        current_connection().execute(
+            "INSERT INTO operational_drills (drill_id, kind, environment, recorded_at, source, passed, result) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (drill_id, req.kind, p.settings.environment, datetime.now(UTC).isoformat(), req.source,
+             None if req.passed is None else int(req.passed), json.dumps(req.result)))
+        append_audit("operational_drill_recorded", {"drill_id": drill_id, "kind": req.kind, "passed": req.passed},
+                     tenant_id="*")
+        return {"drill_id": drill_id}
+
+    @r.get("/admin/drills")
+    def admin_list_drills(limit: int = 50) -> dict[str, Any]:
+        rows = current_connection().fetchall(
+            "SELECT drill_id, kind, environment, recorded_at, source, passed, result FROM operational_drills "
+            "ORDER BY recorded_at DESC LIMIT %s", (max(1, min(limit, 500)),))
+        for x in rows:
+            x["result"] = json.loads(x["result"])
+        return {"drills": rows}
 
     @r.get("/admin/infrastructure")
     def admin_infrastructure() -> dict[str, Any]:

@@ -103,6 +103,21 @@ def main(argv: list[str]) -> int:
                     tenants = [r["tenant_id"] for r in conn.fetchall("SELECT DISTINCT tenant_id FROM audit_log")]
                     report.setdefault("audit_chains_valid", {})[name] = {t: verify_chain(t)["valid"] for t in tenants}
             clone.close()
+            same = all(v["live"] == v["clone"] for k, v in report["tables"].items()
+                       if k not in ("market_bars", "shadow_evaluations", "monitoring_events", "audit_log",
+                                    "idempotency_keys", "webhook_deliveries"))
+            chains_ok = all(report["audit_chains_valid"]["clone"].values())
+            report["static_tables_identical"] = same
+            report["clone_audit_chains_valid"] = chains_ok
+            import uuid as _uuid
+            from datetime import UTC, datetime
+
+            with db.transaction("*") as conn:
+                conn.execute(
+                    "INSERT INTO operational_drills (drill_id, kind, environment, recorded_at, source, passed, result) "
+                    "VALUES (%s,'disaster_recovery',%s,%s,'cri-migrate dr-verify',%s,%s)",
+                    ("drl_" + _uuid.uuid4().hex[:16], s.environment, datetime.now(UTC).isoformat(),
+                     1 if (same and chains_ok) else 0, json.dumps(report, default=str)))
             print(json.dumps(report, default=str))
         elif cmd == "shadow":
             from app.platform import shadow
