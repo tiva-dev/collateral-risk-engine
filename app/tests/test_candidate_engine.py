@@ -385,3 +385,22 @@ def test_lifecycle_sells_through_the_planner() -> None:
     for e in liq:
         assert e["orders"]
         assert all(q <= 20_000 + 1e-6 for q in e["orders"].values())
+
+
+def test_suspension_is_economic_not_data_deterioration() -> None:
+    hs, md, bars, asof = setup()
+    key = data_key(hs[0])
+    k_md = next(k for k in md if "AAA" in k)
+    fresh = ev(hs, md, bars, asof)
+    # AAA (the largest holding) stops trading: last bar 6 business days ago.
+    susp = dict(bars, **{key: bars[key][:-6]})
+    md2 = dict(md)
+    md2[k_md] = replace(md[k_md], timestamp=asof - timedelta(days=8))
+    bal = (fresh.thresholds["initial_capacity"] + fresh.thresholds["margin_call"]) / 2
+    r = ev(hs, md2, susp, asof, balance=bal)
+    a = next(x for x in r.asset_results if x.asset_id == "AAA")
+    assert a.data_status == "not_trading" and not a.lending_value_eligible
+    assert r.data_status == "ok" and not r.data_review_required
+    assert r.deterioration in {None, "economic"}
+    if r.margin_state in {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}:
+        assert r.deterioration == "economic" and r.recovery_plan is not None

@@ -22,11 +22,11 @@
       "kind": "backtest",
       "selector": {
         "requested_by": "cli:lifecycle-all",
-        "created_before": "2026-11-27T00:00:00+00:00"
+        "created_before": "2026-11-26T20:30:00+00:00"
       },
       "model_id": "*",
-      "reason": "lifecycle batches of 26 Nov used the simplified executor, terminal headroom quantiles or the sell-all fallback; superseded by candidate-2026.11.3 (first-passage thresholds, planner-driven lifecycle, data holds).",
-      "fixed_in": "candidate-2026.11.3"
+      "reason": "lifecycle batches of 26 Nov ran candidate versions before 2026.11.4 (simplified executor, terminal headroom, sell-all fallback, suspensions treated as data problems); superseded by candidate-2026.11.4.",
+      "fixed_in": "candidate-2026.11.4"
     }
   ]
 }

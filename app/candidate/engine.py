@@ -346,6 +346,22 @@ class CandidateEngine:
         assets: list[CandidateAsset] = []
         all_est: list[InstrumentEstimate] = []
         cash_ceiling = 0.0
+
+        def last_bar_lag(h: Holding) -> int:
+            rows = [b for b in bars.get(data_key(h), []) if str(b["bar_date"])[:10] <= day.isoformat()]
+            if not rows:
+                return 99
+            last = max(date.fromisoformat(str(b["bar_date"])[:10]) for b in rows)
+            return int(np.busday_count(last, day))
+
+        # A market is trading if some instrument of it in this portfolio has a
+        # current bar. Then an instrument without new bars is not trading
+        # (suspension, no liquidity): economic risk, not a data problem.
+        trading: set[str] = set()
+        for h in holdings:
+            prof_h = profile_for_exchange(h.exchange) if h.asset_type != AssetType.CASH else None
+            if prof_h is not None and last_bar_lag(h) <= cfg.max_bar_lag_business_days:
+                trading.add(prof_h.code)
         for h in holdings:
             if h.quantity <= 0:
                 continue
@@ -360,6 +376,15 @@ class CandidateEngine:
                 continue
             md = market.get(h.stable_key)
             dkey = data_key(h)
+            prof0 = profile_for_exchange(h.exchange)
+            lag0 = last_bar_lag(h)
+            if (md is not None and md.last_price > 0 and prof0 is not None and prof0.code in trading
+                    and lag0 > cfg.max_bar_lag_business_days):
+                reasons.append(f"{h.asset_id}: no trades for {lag0} business days while its market trades "
+                               "(suspension or no liquidity): economic risk; no lending value, not sellable now")
+                assets.append(CandidateAsset(h.stable_key, h.asset_id, h.quantity * md.last_price, False, False, 0.0,
+                                             1.0, 1.0, dkey, "not_trading", [f"no trades for {lag0} business days"]))
+                continue
             if md is None or md.last_price <= 0 or (as_of - md.timestamp).days > ex.maximum_quote_age_days:
                 missing = True
                 reasons.append(f"{h.asset_id}: no current price (missing or older than "
@@ -405,7 +430,9 @@ class CandidateEngine:
             lend_ok = est.eligible and sellable and not degraded
             # Economic view: the collateral on its latest reliable information,
             # used only to tell data deterioration from economic deterioration.
-            econ_ok = sellable and est.sessions >= cfg.min_sessions
+            # An instrument with no recent trades (suspension, no bars) is economic
+            # risk, not a data problem: it is excluded from the economic view too.
+            econ_ok = sellable and est.sessions >= cfg.min_sessions and bar_lag <= cfg.max_bar_lag_business_days
             extra = est.spread / 2 * (cfg.spread_stress_multiplier - 1) + ex.execution_cost_rate
             status = "degraded" if degraded else "ok"
             assets.append(CandidateAsset(
@@ -426,7 +453,7 @@ class CandidateEngine:
 
         securities_value = sum(a.market_value for a in assets)
         total_value = securities_value + cash
-        material_degraded = [a for a in assets if a.data_status != "ok"
+        material_degraded = [a for a in assets if a.data_status in ("degraded", "missing")
                              and a.market_value >= cfg.material_share * max(securities_value, 1e-9)]
         data_status = "missing" if missing else ("degraded" if material_degraded else "ok")
         balance = loan.balance
