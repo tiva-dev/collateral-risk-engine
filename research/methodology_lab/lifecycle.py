@@ -195,4 +195,92 @@ def simulate_loans(
         "min_cushion": min_cushion,
         "cushion_path": cushion_path,
         "final_obligation": obligation_final,
+        # State at the end of the term, for terminal_workout.
+        "holdings_final": holdings,
+        "obligation_gross_final": obligation,
+        "pending_after_final": pending[:, final_t + 1 :],
+        "price_index_final": prices[:, final_t],
+        "obs_price_final": obs[:, final_t],
+    }
+
+
+def terminal_workout(
+    out: dict[str, np.ndarray],
+    r_tail: np.ndarray,       # (M, T, n) loan-currency log returns after maturity
+    halted: np.ndarray,       # (M, T, n)
+    spread: np.ndarray,       # (M, T, n)
+    adv: np.ndarray,          # (M, T, n)
+    sigma_d: np.ndarray,      # (M, T, n)
+    fx_ret: np.ndarray | None,  # (M, T)
+    policy: Policy,
+) -> dict[str, np.ndarray]:
+    """Maturity: repayment or a lender workout through real execution.
+
+    At maturity the borrower repays when the account (net liquidation value
+    plus pending proceeds) covers the obligation. Otherwise the lender sells
+    the remaining collateral day by day, at most ``participation`` x ADV per
+    asset, nothing while halted, paying half-spread, impact and fees; proceeds
+    settle ``settle_days`` later (FX moves in between apply) and interest keeps
+    accruing until the obligation is covered. Loss is the obligation left
+    after every settlement. If collateral is still unsold when the path ends,
+    the loss marks the remainder at net liquidation value and the loan is
+    flagged ``censored``.
+    """
+    m, t_len, _ = r_tail.shape
+    holdings = out["holdings_final"].astype(float).copy()
+    obligation = out["obligation_gross_final"].astype(float).copy()
+    carry = out["pending_after_final"]
+    pending = np.zeros((m, t_len + policy.settle_days + carry.shape[1] + 2))
+    pending[:, : carry.shape[1]] = carry
+    prices = out["price_index_final"][:, None, :] * np.exp(np.cumsum(r_tail, axis=1))
+    rows = np.arange(m)
+    cost0 = spread[:, 0] / 2 + policy.impact_y * sigma_d[:, 0] * np.sqrt(policy.participation) + policy.fee
+    nlv0 = (holdings * out["price_index_final"] * (1 - cost0)).sum(axis=1)
+    cushion0 = nlv0 + carry.sum(axis=1) - obligation
+    repaid = (cushion0 >= 0) | (obligation <= 1e-9)
+    defaulted = ~repaid
+    obligation[repaid] = 0.0
+    holdings[repaid] = 0.0
+    workout_days = np.zeros(m, int)
+    sold_cost = np.zeros(m)
+    for t in range(t_len):
+        obligation *= 1 + policy.rate / DAILY
+        obligation -= pending[:, t]
+        obligation = np.maximum(obligation, 0.0)
+        net_owed = obligation - pending[:, t + 1 :].sum(axis=1)
+        active = defaulted & (net_owed > 1e-9) & (holdings.sum(axis=1) > 1e-12)
+        if not active.any():
+            continue
+        workout_days[active] += 1
+        cap_val = np.where(halted[:, t], 0.0, policy.participation * adv[:, t])
+        held_val = holdings * prices[:, t]
+        cost_rate = spread[:, t] / 2 + policy.impact_y * sigma_d[:, t] * np.sqrt(policy.participation) + policy.fee
+        need_gross = net_owed / np.maximum(1 - cost_rate.mean(axis=1), 1e-6)
+        share = held_val / np.maximum(held_val.sum(axis=1, keepdims=True), 1e-12)
+        sell_val = np.minimum(np.minimum(share * need_gross[:, None], cap_val), held_val)
+        sell_val[~active] = 0.0
+        qty = np.where(prices[:, t] > 0, sell_val / prices[:, t], 0.0)
+        impact = policy.impact_y * sigma_d[:, t] * np.sqrt(np.where(adv[:, t] > 0, sell_val / adv[:, t], 0.0))
+        costs = sell_val * (spread[:, t] / 2 + impact + policy.fee)
+        net = np.maximum(sell_val - costs, 0.0).sum(axis=1)
+        if fx_ret is not None and policy.settle_days:
+            end = min(t + policy.settle_days, t_len - 1)
+            net = net * np.exp(-(fx_ret[:, t + 1 : end + 1].sum(axis=1) if end > t else 0.0))
+        pending[rows, t + policy.settle_days] += net
+        holdings = np.maximum(holdings - qty, 0.0)
+        sold_cost += costs.sum(axis=1)
+    for t in range(t_len, pending.shape[1]):
+        obligation -= pending[:, t]
+    obligation = np.maximum(obligation, 0.0)
+    last = t_len - 1
+    cost_last = spread[:, last] / 2 + policy.impact_y * sigma_d[:, last] * np.sqrt(policy.participation) + policy.fee
+    residual_nlv = (holdings * prices[:, last] * (1 - cost_last)).sum(axis=1)
+    censored = defaulted & (obligation > 1e-9) & (holdings.sum(axis=1) > 1e-12)
+    loss = np.maximum(0.0, obligation - residual_nlv)
+    return {
+        "loss": loss,
+        "defaulted_at_maturity": defaulted,
+        "workout_days": workout_days,
+        "workout_cost": sold_cost,
+        "censored": censored,
     }
