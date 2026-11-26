@@ -1,1 +1,1 @@
-{"environment": "staging", "report_only": true, "note": "operational report after first monitoring cycles"}
+{"environment": "staging", "note": "deploy ingestion timestamp fix"}

@@ -286,6 +286,8 @@ class IngestionTests(unittest.TestCase):
         self.assertIsNotNone(q.volatility_30d)
         self.assertAlmostEqual(q.average_daily_volume, sum(1e5 + i for i in range(40, 60)) / 20)
         self.assertIsNone(parse_stable_key("SPY"))
+        same_day = quote_from_bars(ident, bars, "ngnmarket", now=datetime(2026, 7, 30, 10, 0, tzinfo=UTC))
+        self.assertLessEqual(same_day.timestamp, datetime(2026, 7, 30, 10, 0, tzinfo=UTC))
 
 
 @unittest.skipIf(TestClient is None, "fastapi TestClient unavailable")

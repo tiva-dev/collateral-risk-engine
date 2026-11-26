@@ -77,9 +77,13 @@ def quote_from_bars(identity: InstrumentIdentity, bars: list[Any], provider: str
     last_bar = bars[-1]
     bar_ts = last_bar.timestamp
     if not isinstance(bar_ts, datetime):
-        bar_ts = datetime.combine(bar_ts, time(16, 0), tzinfo=UTC)
+        # Daily bars carry a date only: stamp them at the exchange close, but
+        # never later than now (today's bar may still be forming).
+        close_utc = time(13, 30) if identity.exchange.upper() in NGX_EXCHANGES else time(21, 0)
+        bar_ts = datetime.combine(bar_ts, close_utc, tzinfo=UTC)
     elif bar_ts.tzinfo is None:
         bar_ts = bar_ts.replace(tzinfo=UTC)
+    bar_ts = min(bar_ts, now)
     price = latest_price if latest_price and latest_price > 0 else closes[-1]
     ts = latest_time if latest_price and latest_time else bar_ts
     warnings = ["bid_ask_not_observed"]

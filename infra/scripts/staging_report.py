@@ -29,7 +29,8 @@ def main() -> None:
     accounts = []
     for acct in c.get("/monitoring/accounts", headers=sb).json().get("accounts", []):
         ref = acct["account_ref"]
-        full = c.get(f"/monitoring/accounts/{ref}", headers=sb).json()
+        body = c.get(f"/monitoring/accounts/{ref}", headers=sb).json()
+        full = body.get("account", body)
         ev = full.get("last_evaluation") or {}
         accounts.append({
             "account_ref": ref,
