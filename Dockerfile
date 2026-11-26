@@ -6,6 +6,9 @@ WORKDIR /service
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 COPY app ./app
+COPY shadow_engines ./shadow_engines
+COPY research/__init__.py ./research/__init__.py
+COPY research/methodology_lab ./research/methodology_lab
 ARG GIT_SHA=unknown
 ENV CRI_GIT_SHA=${GIT_SHA} \
     HISTORICAL_DATA_CACHE_DIR=/tmp/cri-cache \
@@ -20,7 +23,6 @@ CMD ["sh", "-c", "exec uvicorn app.platform.app:create_app --factory --host 0.0.
 # Research and backtesting image for Cloud Run Jobs.
 FROM base AS research
 USER root
-RUN pip install "numpy>=1.26"
 COPY research ./research
 USER 10001
 CMD ["python", "-m", "research.methodology_lab.run_experiments"]

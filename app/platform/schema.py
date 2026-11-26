@@ -219,6 +219,21 @@ def _rls_statements() -> str:
     return "\n".join(out)
 
 
+def _shadow_rls() -> str:
+    return (
+        "ALTER TABLE backtest_runs ENABLE ROW LEVEL SECURITY;\n"
+        "DROP POLICY IF EXISTS tenant_isolation ON backtest_runs;\n"
+        "CREATE POLICY tenant_isolation ON backtest_runs USING ("
+        "current_setting('cri.tenant_id', true) = '*' OR tenant_id = current_setting('cri.tenant_id', true)) "
+        "WITH CHECK (current_setting('cri.tenant_id', true) = '*' OR tenant_id = current_setting('cri.tenant_id', true));\n"
+        "ALTER TABLE shadow_evaluations ENABLE ROW LEVEL SECURITY;\n"
+        "DROP POLICY IF EXISTS tenant_isolation ON shadow_evaluations;\n"
+        "CREATE POLICY tenant_isolation ON shadow_evaluations USING ("
+        "current_setting('cri.tenant_id', true) = '*' OR tenant_id = current_setting('cri.tenant_id', true)) "
+        "WITH CHECK (current_setting('cri.tenant_id', true) = '*' OR tenant_id = current_setting('cri.tenant_id', true));\n"
+    )
+
+
 def _grants() -> str:
     return """
 DO $$
@@ -247,11 +262,76 @@ CREATE TABLE IF NOT EXISTS sandbox_webhook_receipts (
 );
 """
 
+_M5 = """
+CREATE TABLE IF NOT EXISTS market_bars (
+  stable_key TEXT NOT NULL,
+  bar_date TEXT NOT NULL,
+  open DOUBLE PRECISION,
+  high DOUBLE PRECISION,
+  low DOUBLE PRECISION,
+  close DOUBLE PRECISION NOT NULL,
+  volume DOUBLE PRECISION,
+  range_reported INTEGER NOT NULL DEFAULT 0,
+  volume_reported INTEGER NOT NULL DEFAULT 0,
+  provider TEXT NOT NULL,
+  ingested_at {TS} NOT NULL,
+  PRIMARY KEY (stable_key, bar_date)
+);
+CREATE TABLE IF NOT EXISTS shadow_runs (
+  run_id TEXT PRIMARY KEY,
+  started_at {TS} NOT NULL,
+  finished_at {TS},
+  accounts INTEGER NOT NULL DEFAULT 0,
+  evaluations INTEGER NOT NULL DEFAULT 0,
+  errors TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS shadow_evaluations (
+  evaluation_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+  account_ref TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  model_version TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('baseline','candidate')),
+  evaluated_at {TS} NOT NULL,
+  collateral_value DOUBLE PRECISION,
+  loan_balance DOUBLE PRECISION,
+  approved_credit DOUBLE PRECISION,
+  available_credit DOUBLE PRECISION,
+  capacity_ltv DOUBLE PRECISION,
+  risk_state TEXT,
+  margin_call INTEGER NOT NULL DEFAULT 0,
+  estimated_recovery DOUBLE PRECISION,
+  liquidation TEXT NOT NULL DEFAULT '[]',
+  explanation TEXT NOT NULL DEFAULT '{{}}',
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS shadow_eval_account ON shadow_evaluations(tenant_id, account_ref, evaluated_at);
+CREATE INDEX IF NOT EXISTS shadow_eval_model ON shadow_evaluations(tenant_id, model_id, evaluated_at);
+CREATE TABLE IF NOT EXISTS backtest_runs (
+  run_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+  account_ref TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  models TEXT NOT NULL,
+  params TEXT NOT NULL DEFAULT '{{}}',
+  status TEXT NOT NULL CHECK (status IN ('queued','running','succeeded','failed')),
+  created_at {TS} NOT NULL,
+  started_at {TS},
+  finished_at {TS},
+  execution TEXT,
+  summary TEXT,
+  series TEXT,
+  error TEXT
+);
+"""
+
 MIGRATIONS: list[tuple[int, str, dict[str, str]]] = [
     (1, "initial platform schema", {"postgres": _M1, "sqlite": _M1}),
     (2, "append-only audit and row-level security", {"postgres": _M2_POSTGRES + _rls_statements(), "sqlite": ""}),
     (3, "application role grants", {"postgres": _grants(), "sqlite": ""}),
     (4, "sandbox webhook receiver", {"postgres": _M4 + _grants(), "sqlite": _M4}),
+    (5, "market bars and shadow model evaluations", {"postgres": _M5 + _shadow_rls() + _grants(), "sqlite": _M5}),
 ]
 
 

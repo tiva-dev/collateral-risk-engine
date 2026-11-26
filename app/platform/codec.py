@@ -18,7 +18,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-_ALLOWED_PREFIX = "app."
+_ALLOWED_PREFIXES = ("app.", "shadow_engines.")
 
 
 def _qualname(cls: type) -> str:
@@ -27,7 +27,7 @@ def _qualname(cls: type) -> str:
 
 def _resolve(name: str) -> type:
     module_name, _, qual = name.partition(":")
-    if not module_name.startswith(_ALLOWED_PREFIX):
+    if not module_name.startswith(_ALLOWED_PREFIXES):
         raise ValueError(f"refusing to decode type outside app package: {name}")
     obj: Any = importlib.import_module(module_name)
     for part in qual.split("."):
@@ -73,21 +73,29 @@ def encode(value: Any) -> Any:
     raise TypeError(f"cannot encode value of type {type(value).__name__}")
 
 
-def decode(value: Any) -> Any:
+def decode(value: Any, lenient: list[str] | None = None) -> Any:
+    """Rebuild objects. With ``lenient`` (a list), constructor fields the target
+    class does not define are dropped and recorded instead of raising, which is
+    how one engine version's objects are translated into another's."""
     if isinstance(value, list):
-        return [decode(v) for v in value]
+        return [decode(v, lenient) for v in value]
     if not isinstance(value, dict):
         return value
     if "__map__" in value:
-        return {k: decode(v) for k, v in value["__map__"].items()}
+        return {k: decode(v, lenient) for k, v in value["__map__"].items()}
     if "__pairs__" in value:
-        return {decode(k): decode(v) for k, v in value["__pairs__"]}
+        return {decode(k, lenient): decode(v, lenient) for k, v in value["__pairs__"]}
     if "__dc__" in value:
         cls = _resolve(value["__dc__"])
-        kwargs = {k: decode(v) for k, v in value["f"].items()}
+        kwargs = {k: decode(v, lenient) for k, v in value["f"].items()}
+        if lenient is not None and dataclasses.is_dataclass(cls):
+            known = {f.name for f in dataclasses.fields(cls) if f.init}
+            for k in sorted(set(kwargs) - known):
+                lenient.append(f"{cls.__name__}.{k}")
+                kwargs.pop(k)
         return cls(**kwargs)
     if "__enum__" in value:
-        return _resolve(value["__enum__"])(decode(value["v"]))
+        return _resolve(value["__enum__"])(decode(value["v"], lenient))
     if "__dt__" in value:
         return datetime.fromisoformat(value["__dt__"])
     if "__date__" in value:
@@ -95,9 +103,9 @@ def decode(value: Any) -> Any:
     if "__dec__" in value:
         return Decimal(value["__dec__"])
     if "__tuple__" in value:
-        return tuple(decode(v) for v in value["__tuple__"])
+        return tuple(decode(v, lenient) for v in value["__tuple__"])
     if "__set__" in value:
-        return {decode(v) for v in value["__set__"]}
+        return {decode(v, lenient) for v in value["__set__"]}
     if "__float__" in value:
         return float(value["__float__"])
     raise ValueError(f"unrecognised encoded object with keys {sorted(value)}")
@@ -111,3 +119,22 @@ def loads(text: str | bytes | dict | list) -> Any:
     if isinstance(text, dict | list):
         return decode(text)
     return decode(json.loads(text))
+
+
+def translate(value: Any, to_package: str, dropped: list[str] | None = None) -> Any:
+    """Re-create ``value`` (built from ``app`` classes) using the same-named
+    classes of another engine snapshot, e.g. ``shadow_engines.cri_v070.app``."""
+
+    def retag(node: Any) -> Any:
+        if isinstance(node, list):
+            return [retag(x) for x in node]
+        if isinstance(node, dict):
+            out = {k: retag(v) for k, v in node.items()}
+            for tag in ("__dc__", "__enum__"):
+                name = out.get(tag)
+                if isinstance(name, str) and name.startswith("app."):
+                    out[tag] = f"{to_package}.{name[len('app.'):]}"
+            return out
+        return node
+
+    return decode(retag(encode(value)), dropped if dropped is not None else [])

@@ -127,9 +127,13 @@ def _alpaca_latest_trades(symbols: list[str]) -> dict[str, tuple[float, datetime
     return out
 
 
-def fetch_quotes(instruments: list[InstrumentIdentity], today: date | None = None) -> tuple[dict[str, RawQuote], list[dict[str, str]]]:
+HISTORY_DAYS = 460  # about 300 sessions: enough for 260-session shadow-model estimation
+
+
+def fetch_quotes(instruments: list[InstrumentIdentity], today: date | None = None,
+                 bars_out: dict[str, list[Any]] | None = None) -> tuple[dict[str, RawQuote], list[dict[str, str]]]:
     today = today or datetime.now(UTC).date()
-    start = today - timedelta(days=200)
+    start = today - timedelta(days=HISTORY_DAYS)
     quotes: dict[str, RawQuote] = {}
     errors: list[dict[str, str]] = []
     us = [i for i in instruments if i.exchange.upper() in US_EXCHANGES]
@@ -152,6 +156,8 @@ def fetch_quotes(instruments: list[InstrumentIdentity], today: date | None = Non
                 lp = latest.get(ident.symbol)
                 quotes[ident.stable_key] = quote_from_bars(ident, series.bars, "alpaca",
                                                            lp[0] if lp else None, lp[1] if lp else None)
+                if bars_out is not None:
+                    bars_out[ident.stable_key] = list(series.bars)
             except Exception as exc:  # noqa: BLE001 - isolate per instrument
                 errors.append({"instrument": ident.stable_key, "error": str(exc)[:300]})
     if ngx:
@@ -162,6 +168,8 @@ def fetch_quotes(instruments: list[InstrumentIdentity], today: date | None = Non
             try:
                 series = nprov.fetch_equity_history(ident.symbol, start, today, force_refresh=True)
                 quotes[ident.stable_key] = quote_from_bars(ident, series.bars, "ngnmarket")
+                if bars_out is not None:
+                    bars_out[ident.stable_key] = list(series.bars)
             except Exception as exc:  # noqa: BLE001
                 errors.append({"instrument": ident.stable_key, "error": str(exc)[:300]})
     return quotes, errors
@@ -177,3 +185,44 @@ def record_run(db: Database, started: datetime, n_instruments: int, n_quotes: in
             (run_id, started.isoformat(), datetime.now(UTC).isoformat(), n_instruments, n_quotes,
              json.dumps(errors)))
     return run_id
+
+
+def _range_reported(bar: Any) -> int:
+    fn = getattr(bar, "has_reported_range", None)
+    return int(bool(fn())) if callable(fn) else int(bool(bar.high and bar.low))
+
+
+def _volume_reported(bar: Any) -> int:
+    prov = getattr(bar, "field_provenance", None) or {}
+    return int(prov.get("volume", "reported") == "reported" and bool(bar.volume))
+
+
+def store_bars(db: Database, bars: dict[str, list[Any]], provider_by_key: dict[str, str]) -> int:
+    """Upsert observed daily bars. Only fields the provider reported are stored."""
+    now = datetime.now(UTC).isoformat()
+    n = 0
+    with db.transaction("*") as conn:
+        for key, series in bars.items():
+            for b in series:
+                d = b.timestamp.date() if isinstance(b.timestamp, datetime) else b.timestamp
+                conn.execute(
+                    "INSERT INTO market_bars (stable_key, bar_date, open, high, low, close, volume, range_reported, "
+                    "volume_reported, provider, ingested_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (stable_key, bar_date) DO UPDATE SET open=excluded.open, high=excluded.high, "
+                    "low=excluded.low, close=excluded.close, volume=excluded.volume, "
+                    "range_reported=excluded.range_reported, volume_reported=excluded.volume_reported, "
+                    "provider=excluded.provider, ingested_at=excluded.ingested_at",
+                    (key, d.isoformat(), b.open, b.high, b.low, float(b.adjusted_close or b.close),
+                     float(b.volume) if b.volume else None, _range_reported(b), _volume_reported(b),
+                     provider_by_key.get(key, "unknown"), now))
+                n += 1
+    return n
+
+
+def load_bars(stable_key: str, limit: int = 320) -> list[dict[str, Any]]:
+    from app.platform.db import current_connection
+
+    rows = current_connection().fetchall(
+        "SELECT bar_date, open, high, low, close, volume, range_reported, volume_reported FROM market_bars WHERE stable_key=%s "
+        "ORDER BY bar_date DESC LIMIT %s", (stable_key, limit))
+    return list(reversed(rows))

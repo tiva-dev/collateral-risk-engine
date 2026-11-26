@@ -73,8 +73,16 @@ class PlatformMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Any) -> Response:
         path = request.url.path
         s = self.p.settings
-        if path in PUBLIC_PATHS:
-            return await call_next(request)
+        if path in PUBLIC_PATHS or (path.startswith("/console") and s.role == "api"):
+            response = await call_next(request)
+            if path.startswith("/console"):
+                response.headers["Content-Security-Policy"] = (
+                    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                    "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+                response.headers["X-Frame-Options"] = "DENY"
+                response.headers["Referrer-Policy"] = "no-referrer"
+                response.headers["Cache-Control"] = "no-store"
+            return response
         if path.startswith("/sandbox/webhook-receiver/") and s.role == "api" and s.environment != "production":
             # Signature-verified test receiver; authentication is the HMAC signature.
             return await call_next(request)
@@ -265,6 +273,12 @@ class WebhookCreate(BaseModel):
     event_types: list[str] = Field(default_factory=lambda: ["*"])
 
 
+class BacktestCreate(BaseModel):
+    account_ref: str
+    models: list[str] | None = None
+    step: int = Field(default=5, ge=1, le=21)
+
+
 class PolicyCreate(BaseModel):
     policy_id: str = Field(pattern=r"^[A-Za-z0-9._-]{1,80}$")
     body: dict[str, Any]
@@ -344,6 +358,108 @@ def build_router(p: Platform) -> APIRouter:
     def tenant_audit_verify() -> dict[str, Any]:
         return verify_chain(require_principal().tenant_id)
 
+    # ------------------------------------------------------------ shadow models
+    @r.get("/shadow/models")
+    def shadow_models() -> dict[str, Any]:
+        from app.platform import shadow
+
+        return {"baseline": "baseline", "models": list(shadow.MODELS), "descriptions": {
+            "baseline": "Deployed engine (main) with the confirmed financial-correctness fixes; drives monitoring",
+            "cre_v070": "CRI v0.7.0 recoverability engine with the same fixes (frozen snapshot, shadow only)",
+            "A": "Research A: parametric Student-t expected shortfall haircut, 99%",
+            "B": "Research B: filtered historical simulation expected shortfall, 99%",
+            "B_gap": "Research B_gap: FHS at 99.5% with stressed sampling and empirical gap term",
+            "C_balanced": "Research C: stochastic-recovery capacity meeting the balanced loss appetite",
+        }, "lending_effect": "none: shadow results never drive state, events, webhooks or orders"}
+
+    @r.get("/shadow/summary")
+    def shadow_summary(hours: int = 168) -> dict[str, Any]:
+        from app.platform import shadow
+
+        since = datetime.now(UTC) - timedelta(hours=max(1, min(hours, 24 * 90)))
+        return shadow.summary(require_principal().tenant_id, since)
+
+    @r.get("/shadow/accounts/{account_ref}")
+    def shadow_account(account_ref: str) -> dict[str, Any]:
+        from app.platform import shadow
+
+        rows = shadow.latest_by_account(require_principal().tenant_id, account_ref)
+        return {"account_ref": account_ref, "evaluations": rows, "disagreements": shadow.disagreements(rows)}
+
+    @r.get("/shadow/disagreements")
+    def shadow_disagreements() -> dict[str, Any]:
+        from app.platform import shadow
+
+        tenant = require_principal().tenant_id
+        refs = current_connection().fetchall(
+            "SELECT DISTINCT account_ref FROM shadow_evaluations WHERE tenant_id=%s ORDER BY account_ref", (tenant,))
+        out = []
+        for x in refs:
+            out.extend(shadow.disagreements(shadow.latest_by_account(tenant, x["account_ref"])))
+        return {"disagreements": out}
+
+    @r.get("/shadow/history/{account_ref}")
+    def shadow_history(account_ref: str, model_id: str | None = None, limit: int = 500) -> dict[str, Any]:
+        sql = ("SELECT model_id, evaluated_at, approved_credit, available_credit, capacity_ltv, risk_state, "
+               "margin_call, estimated_recovery, collateral_value, loan_balance, error FROM shadow_evaluations "
+               "WHERE tenant_id=%s AND account_ref=%s")
+        params: list[Any] = [require_principal().tenant_id, account_ref]
+        if model_id:
+            sql += " AND model_id=%s"
+            params.append(model_id)
+        sql += " ORDER BY evaluated_at DESC LIMIT %s"
+        params.append(max(1, min(limit, 5000)))
+        return {"history": current_connection().fetchall(sql, params)}
+
+    # ------------------------------------------------------ explanation (live)
+    @r.get("/explain/accounts/{account_ref}")
+    def explain_account(account_ref: str) -> dict[str, Any]:
+        from app.platform import shadow
+
+        pr = require_principal()
+        account = p.services.service(pr.tenant_id).account_repo.get(account_ref)
+        if account is None:
+            raise HTTPException(404, "monitored account not found")
+        inp = shadow.build_inputs(p.services, pr.tenant_id, account, datetime.now(UTC))
+        res = shadow.baseline_model(inp)
+        return {"account_ref": account_ref, "model_version": res.model_version, "risk_state": res.risk_state,
+                "approved_credit": res.approved_credit, "available_credit": res.available_credit,
+                "collateral_value": res.collateral_value, "loan_balance": res.loan_balance,
+                "estimated_recovery": res.estimated_recovery, "proposed_liquidation": res.liquidation,
+                "explanation": res.explanation,
+                "note": "Computed now from the current persisted holdings, loan and latest ingested market data."}
+
+    # ------------------------------------------------------ market data status
+    @r.get("/platform/market-data/status")
+    def market_data_status() -> dict[str, Any]:
+        conn = current_connection()
+        now = datetime.now(UTC)
+        quotes = []
+        for q in conn.fetchall("SELECT stable_key, quote, observed_at, source, ingested_at FROM market_quotes "
+                               "WHERE quote_key = stable_key ORDER BY stable_key"):
+            body = json.loads(q["quote"])["f"]
+            obs = q["observed_at"]
+            obs_dt = datetime.fromisoformat(obs) if isinstance(obs, str) else obs
+            quotes.append({"stable_key": q["stable_key"], "price": body.get("local_price"),
+                           "provider": body.get("provider_name"), "observed_at": q["observed_at"],
+                           "age_hours": round((now - obs_dt).total_seconds() / 3600, 2),
+                           "quality": body.get("data_quality_score"), "warnings": body.get("warnings"),
+                           "volatility_30d": body.get("volatility_30d"),
+                           "average_daily_volume": body.get("average_daily_volume"),
+                           "ingested_at": q["ingested_at"]})
+        coverage = conn.fetchall("SELECT stable_key, COUNT(*) AS sessions, MIN(bar_date) AS first_bar, "
+                                 "MAX(bar_date) AS last_bar, SUM(range_reported) AS ranges_reported, "
+                                 "SUM(volume_reported) AS volumes_reported FROM market_bars GROUP BY stable_key "
+                                 "ORDER BY stable_key")
+        runs = conn.fetchall("SELECT run_id, started_at, finished_at, instruments, quotes_written, errors "
+                             "FROM ingestion_runs ORDER BY started_at DESC LIMIT 48")
+        providers: dict[str, dict[str, Any]] = {}
+        for run in runs:
+            for e in json.loads(run["errors"] or "[]"):
+                providers.setdefault(e.get("instrument", "?"), {"errors": 0})["errors"] += 1
+        return {"quotes": quotes, "coverage": coverage, "ingestion_runs": runs[:12],
+                "runs_last_48": len(runs), "error_counts": providers}
+
     # Webhooks
     @r.post("/webhooks/endpoints", status_code=201)
     def create_webhook(req: WebhookCreate) -> dict[str, Any]:
@@ -380,6 +496,53 @@ def build_router(p: Platform) -> APIRouter:
         sql += " ORDER BY created_at DESC LIMIT %s"
         params.append(max(1, min(limit, 500)))
         return {"deliveries": current_connection().fetchall(sql, params)}
+
+    # Backtests (Cloud Run job; results persisted)
+    @r.post("/backtests", status_code=202)
+    def create_backtest(req: BacktestCreate) -> dict[str, Any]:
+        from app.platform import backtest, shadow
+
+        pr = require_principal()
+        models = [m for m in (req.models or backtest.DEFAULT_MODELS) if m in shadow.MODELS]
+        if not p.services.service(pr.tenant_id).account_repo.get(req.account_ref):
+            raise HTTPException(404, "monitored account not found")
+        run_id = "btr_" + uuid.uuid4().hex[:16]
+        current_connection().execute(
+            "INSERT INTO backtest_runs (run_id, tenant_id, account_ref, requested_by, models, params, status, "
+            "created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued',%s)",
+            (run_id, pr.tenant_id, req.account_ref, pr.actor, json.dumps(models), json.dumps({"step": req.step}),
+             datetime.now(UTC).isoformat()))
+        append_audit("backtest_requested", {"run_id": run_id, "account_ref": req.account_ref, "models": models})
+        execution = None
+        if p.settings.gcp_project:
+            from app.platform import gcp
+
+            op = gcp.run_job(p.settings.gcp_project, p.settings.gcp_region, "cri-backtest",
+                             ["-m", "app.platform.cli", "backtest", run_id])
+            execution = (op.get("metadata") or {}).get("name") or op.get("name")
+            current_connection().execute("UPDATE backtest_runs SET execution=%s WHERE run_id=%s", (execution, run_id))
+        return {"run_id": run_id, "status": "queued", "models": models, "execution": execution}
+
+    @r.get("/backtests")
+    def list_backtests(limit: int = 50) -> dict[str, Any]:
+        rows = current_connection().fetchall(
+            "SELECT run_id, account_ref, requested_by, models, status, created_at, started_at, finished_at, summary, "
+            "error FROM backtest_runs WHERE tenant_id=%s ORDER BY created_at DESC LIMIT %s",
+            (require_principal().tenant_id, max(1, min(limit, 200))))
+        for x in rows:
+            x["models"] = json.loads(x["models"])
+            x["summary"] = json.loads(x["summary"]) if x["summary"] else None
+        return {"backtests": rows}
+
+    @r.get("/backtests/{run_id}")
+    def get_backtest(run_id: str) -> dict[str, Any]:
+        row = current_connection().fetchone("SELECT * FROM backtest_runs WHERE tenant_id=%s AND run_id=%s",
+                                            (require_principal().tenant_id, run_id))
+        if row is None:
+            raise HTTPException(404, "backtest not found")
+        for k in ("models", "params", "summary", "series"):
+            row[k] = json.loads(row[k]) if row.get(k) else None
+        return row
 
     # Versioned lending policies
     @r.post("/policies", status_code=201)
@@ -488,6 +651,24 @@ def build_router(p: Platform) -> APIRouter:
                                                  "reason": req.reason}, tenant_id=tenant_id)
         return {"tenant_id": tenant_id, "policy_id": policy_id, "version": version, "status": "approved"}
 
+    @r.get("/admin/infrastructure")
+    def admin_infrastructure() -> dict[str, Any]:
+        from app.platform import gcp
+
+        if not p.settings.gcp_project:
+            return {"available": False, "reason": "not running on Google Cloud"}
+        return {"available": True, "project": p.settings.gcp_project, "region": p.settings.gcp_region,
+                **gcp.infrastructure(p.settings.gcp_project, p.settings.gcp_region)}
+
+    @r.get("/admin/research/findings")
+    def admin_research_findings() -> Response:
+        from pathlib import Path
+
+        f = Path(__file__).resolve().parents[2] / "research/methodology_lab/results/real_data/REAL_DATA_FINDINGS.md"
+        if not f.exists():
+            raise HTTPException(404, "findings not packaged in this image")
+        return Response(f.read_text(), media_type="text/markdown")
+
     @r.get("/admin/audit")
     def admin_audit(tenant_id: str = "*", limit: int = 100) -> dict[str, Any]:
         rows = current_connection().fetchall(
@@ -559,7 +740,13 @@ def build_internal_router(p: Platform) -> APIRouter:
             return {"skipped": "ingestion_enabled is false"}
         started = datetime.now(UTC)
         instruments = ingestion.universe(p.db)
-        quotes, errors = ingestion.fetch_quotes(instruments)
+        bars: dict[str, list[Any]] = {}
+        quotes, errors = ingestion.fetch_quotes(instruments, bars_out=bars)
+        if bars:
+            try:
+                ingestion.store_bars(p.db, bars, {k: q.provider_name or "unknown" for k, q in quotes.items()})
+            except Exception as exc:  # noqa: BLE001 - quotes still update; bar storage failure is reported
+                errors.append({"instrument": "market_bars", "error": str(exc)[:300]})
         if quotes:
             with p.db.transaction("*"):
                 p.services.market_data_cache.merge(quotes, {}, "cri_ingestion", started)
@@ -588,6 +775,14 @@ def build_internal_router(p: Platform) -> APIRouter:
             return {"skipped": True}
         results = _per_tenant(lambda svc: svc.ingest_market_data_update({}, {}, keys, "pubsub", True))
         return {"run_id": msg.get("run_id"), "tenants": len(results), "results": results}
+
+    @r.post("/shadow/run-all")
+    def shadow_run_all() -> dict[str, Any]:
+        from app.platform import shadow
+
+        if not _controls()["monitoring_enabled"]:
+            return {"skipped": "monitoring_enabled is false"}
+        return shadow.run_all(p.db, p.services)
 
     @r.post("/webhooks/dispatch")
     def dispatch() -> dict[str, Any]:
@@ -629,6 +824,14 @@ def create_app(settings: PlatformSettings | None = None, db: Database | None = N
         return {"status": "ok", "environment": settings.environment, "role": settings.role,
                 "git_sha": os.environ.get("CRI_GIT_SHA", "unknown")}
 
+    if settings.role == "api":
+        from pathlib import Path
+
+        from fastapi.staticfiles import StaticFiles
+
+        console_dir = Path(__file__).parent / "console"
+        if console_dir.exists():
+            application.mount("/console", StaticFiles(directory=console_dir, html=True), name="console")
     application.include_router(build_router(platform))
     application.include_router(build_internal_router(platform))
     application.include_router(engine_routes.router)

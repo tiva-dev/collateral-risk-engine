@@ -60,6 +60,18 @@ def main(argv: list[str]) -> int:
         elif cmd == "bootstrap":
             migrate(db)
             print(json.dumps(bootstrap(db)))
+        elif cmd == "backtest":
+            from app.platform import backtest
+            from app.platform.app import Platform
+
+            platform = Platform(s, db)
+            print(json.dumps(backtest.run(db, platform.services, argv[2]), default=str)[:4000])
+        elif cmd == "shadow":
+            from app.platform import shadow
+            from app.platform.app import Platform
+
+            platform = Platform(s, db)
+            print(json.dumps(shadow.run_all(db, platform.services), default=str)[:4000])
         elif cmd == "ingest":
             from fastapi.testclient import TestClient
 
