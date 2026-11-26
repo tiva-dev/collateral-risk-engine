@@ -134,27 +134,39 @@ jobs:
           workload_identity_provider: projects/${{ needs.request.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
           service_account: ${{ needs.request.outputs.tf_sa }}@tiva-cri-ops-cda9.iam.gserviceaccount.com
       - uses: google-github-actions/setup-gcloud@v2
+      - name: Remove leftover drill clones
+        if: contains(fromJSON(needs.request.outputs.drills), 'dr')
+        run: |
+          for c in $(gcloud sql instances list --project $P --format='value(name)' | grep -- '-drill-' || true); do
+            echo "deleting leftover clone $c"; gcloud sql instances delete $c --project $P --quiet
+          done
       - name: Disaster-recovery drill (point-in-time clone)
         if: contains(fromJSON(needs.request.outputs.drills), 'dr')
         run: |
-          set -euo pipefail
+          set -uo pipefail
           CLONE="${INSTANCE}-drill-$(date -u +%m%d%H%M)"
+          echo "CLONE=$CLONE" >> $GITHUB_ENV
           PIT=$(date -u -d '-5 minutes' +%Y-%m-%dT%H:%M:%SZ)
           t0=$(date +%s)
-          gcloud sql instances clone $INSTANCE $CLONE --project $P --point-in-time "$PIT"
+          gcloud sql instances clone $INSTANCE $CLONE --project $P --point-in-time "$PIT" || exit 1
           t1=$(date +%s)
           IP=$(gcloud sql instances describe $CLONE --project $P --format='value(ipAddresses[0].ipAddress)')
           echo "clone $CLONE ready in $((t1-t0))s at $IP (point in time $PIT)"
-          gcloud run jobs execute cri-migrate --project $P --region $REGION --wait --args="-m,app.platform.cli,dr-verify,$IP"
-          EXEC=$(gcloud run jobs executions list --job cri-migrate --project $P --region $REGION --limit 1 --format='value(metadata.name)')
-          sleep 20
-          gcloud logging read "resource.type=\"cloud_run_job\" AND labels.\"run.googleapis.com/execution_name\"=\"$EXEC\"" \
-            --project $P --limit 50 --format='value(textPayload)' | grep '"tables"' | head -1 | sed 's/^/DR_RESULT /'
           echo "DR_TIMING {\"clone_seconds\":$((t1-t0)),\"point_in_time\":\"$PIT\",\"clone\":\"$CLONE\"}"
-          gcloud sql instances delete $CLONE --project $P --quiet
-          echo "clone deleted"
+          gcloud run jobs execute cri-migrate --project $P --region $REGION --wait --args="-m,app.platform.cli,dr-verify,$IP"
+          rc=$?
+          EXEC=$(gcloud run jobs executions list --job cri-migrate --project $P --region $REGION --limit 1 --format='value(metadata.name)')
+          sleep 30
+          gcloud logging read "resource.type=\"cloud_run_job\" AND labels.\"run.googleapis.com/execution_name\"=\"$EXEC\"" \
+            --project $P --limit 100 --format='value(textPayload)' | tee job.log | tail -40
+          grep '"tables"' job.log | head -1 | sed 's/^/DR_RESULT /'
+          exit $rc
+      - name: Delete drill clone
+        if: always() && contains(fromJSON(needs.request.outputs.drills), 'dr') && env.CLONE != ''
+        run: |
+          gcloud sql instances delete $CLONE --project $P --quiet && echo "clone $CLONE deleted"
       - name: On-demand logical export to the second-region bucket
-        if: contains(fromJSON(needs.request.outputs.drills), 'dr')
+        if: always() && contains(fromJSON(needs.request.outputs.drills), 'dr')
         run: |
           B=$(gcloud storage buckets list --project $P --format='value(name)' | grep db-exports)
           OBJ="gs://$B/cri-drill-$(date -u +%Y%m%d%H%M).sql.gz"
@@ -162,7 +174,7 @@ jobs:
           gcloud storage ls -l "$OBJ" | sed 's/^/EXPORT_RESULT /'
           gcloud storage buckets describe gs://$B --format='value(location,versioning_enabled)' | sed 's/^/EXPORT_BUCKET /'
       - name: Security configuration verification
-        if: contains(fromJSON(needs.request.outputs.drills), 'security')
+        if: always() && contains(fromJSON(needs.request.outputs.drills), 'security')
         run: |
           echo "--- secrets: accessors per secret"
           for s in $(gcloud secrets list --project $P --format='value(name)'); do

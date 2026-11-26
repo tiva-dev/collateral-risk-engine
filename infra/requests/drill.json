@@ -1,1 +1,1 @@
-{"environment": "staging", "drills": ["load", "security", "dr"], "tf_sa": "terraform", "note": "DR with quota project; tick latency under 107 accounts; dev-deployer isolation probe"}
+{"environment": "staging", "drills": ["security", "dr"], "tf_sa": "terraform", "note": "DR drill with clone cleanup and job logs; security checks"}
