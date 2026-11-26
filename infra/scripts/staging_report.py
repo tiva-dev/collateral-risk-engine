@@ -69,7 +69,16 @@ def main() -> None:
         ref = accounts[0]["account_ref"]
         out["explanation_example"] = c.get(f"/explain/accounts/{ref}", headers=sb).json()
         out["shadow_example"] = c.get(f"/shadow/accounts/{ref}", headers=sb).json()
-    out["backtests"] = c.get("/backtests", headers=sb).json().get("backtests", [])[:5]
+    all_bt = c.get("/backtests", headers=sb).json().get("backtests", [])
+    out["backtests"] = [b for b in all_bt if "cli:lifecycle-all" not in str(b.get("requested_by"))][:5]
+    # Latest lifecycle validation per account (summary only; cohorts stay in the database).
+    seen: set[str] = set()
+    out["lifecycle"] = []
+    for b in all_bt:
+        if "cli:lifecycle-all" in str(b.get("requested_by")) and b["account_ref"] not in seen:
+            seen.add(b["account_ref"])
+            out["lifecycle"].append({k: b.get(k) for k in ("run_id", "account_ref", "status", "created_at",
+                                                            "finished_at", "summary", "error")})
     out["onboarding"] = {k: {"decision": v["decision"], "findings": v["findings"]}
                          for k, v in c.get("/admin/markets/onboarding", headers=ad).json().get("markets", {}).items()}
     out["console_status"] = c.get("/console/").status_code
