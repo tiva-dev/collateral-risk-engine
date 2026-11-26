@@ -1,92 +1,22 @@
-"""Executable liquidation advisories and recovery settlement primitives."""
+"""Execution of liquidation advisories.
+
+Advisories are produced only by app.liquidation.planning (plan_recovery ->
+advisory_from_plan); this module executes them. Orders are matched to
+holdings and quotes by stable instrument key. The daily participation cap is
+the order's own rate (the rate the risk model assumed for that instrument),
+never more than the execution policy's maximum.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import date
 from typing import Any
 
-from app.core.models import Holding, Loan, MarketData
+from app.core.models import Holding, MarketData
 from app.liquidation.policy import LiquidationExecutionPolicy
 from app.risk.math_utils import round_money
-
-
-def projected_interest_buffer(
-    loan: Loan,
-    annual_interest_rate: float,
-    observations_until_settlement: int,
-) -> float:
-    """Conservative simple-interest buffer through execution and settlement."""
-
-    days = max(0, observations_until_settlement)
-    return round_money(loan.principal * max(0.0, annual_interest_rate) * days / 365)
-
-
-def build_recovery_advisory(
-    *,
-    holdings: list[Holding],
-    market_data: Mapping[str, MarketData],
-    target_net_recovery: float,
-    policy: LiquidationExecutionPolicy,
-    trigger_state: str,
-    issued_date: date,
-) -> dict[str, Any]:
-    """Build an auditable stock, quantity, and executable-limit-price advisory."""
-
-    remaining = max(0.0, target_net_recovery)
-    orders: list[dict[str, Any]] = []
-    def liquidity_value(holding: Holding) -> float:
-        data = market_data.get(holding.asset_id)
-        return float(data.average_dollar_volume or 0.0) if data is not None else 0.0
-
-    candidates = sorted(holdings, key=liquidity_value, reverse=True)
-    for holding in candidates:
-        if remaining <= 0:
-            break
-        data = market_data.get(holding.asset_id)
-        if data is None or data.bid is None or data.bid <= 0 or data.halted:
-            continue
-        gross_unit_price = data.bid
-        net_unit_price = gross_unit_price * (1 - policy.execution_cost_rate)
-        if net_unit_price <= 0:
-            continue
-        requested_quantity = min(holding.quantity, remaining / net_unit_price)
-        estimated_net = requested_quantity * net_unit_price
-        orders.append(
-            {
-                "asset_id": holding.asset_id,
-                "side": "sell",
-                "requested_quantity": round(requested_quantity, 8),
-                "order_type": "marketable_limit",
-                "reference_bid": round_money(gross_unit_price),
-                "minimum_limit_price": round_money(
-                    gross_unit_price * (1 - policy.maximum_price_slippage)
-                ),
-                "estimated_gross_proceeds": round_money(
-                    requested_quantity * gross_unit_price
-                ),
-                "estimated_execution_costs": round_money(
-                    requested_quantity
-                    * gross_unit_price
-                    * policy.execution_cost_rate
-                ),
-                "estimated_net_proceeds": round_money(estimated_net),
-            }
-        )
-        remaining -= estimated_net
-    return {
-        "issued_date": issued_date.isoformat(),
-        "trigger_state": trigger_state,
-        "target_net_recovery": round_money(target_net_recovery),
-        "orders": orders,
-        "estimated_net_recovery": round_money(
-            sum(float(order["estimated_net_proceeds"]) for order in orders)
-        ),
-        "uncovered_target": round_money(max(0.0, remaining)),
-        "plan_complete": remaining <= 0.01,
-        "execution_policy": asdict(policy),
-    }
 
 
 def execute_recovery_advisory(
@@ -100,7 +30,13 @@ def execute_recovery_advisory(
 ) -> tuple[list[Holding], dict[str, Any]]:
     """Execute against current bids with participation, freshness, and cost controls."""
 
-    by_asset = {holding.asset_id: holding for holding in holdings}
+    from app.liquidation.planning import resolve_market_data
+
+    by_key = {holding.stable_key: holding for holding in holdings}
+    asset_counts: dict[str, int] = {}
+    for held in holdings:
+        asset_counts[held.asset_id.upper()] = asset_counts.get(held.asset_id.upper(), 0) + 1
+    quotes = resolve_market_data(holdings, market_data)
     fills: list[dict[str, Any]] = []
     unfilled_reasons: list[str] = []
     target = max(0.0, remaining_target)
@@ -109,8 +45,14 @@ def execute_recovery_advisory(
         if target <= 0:
             break
         asset_id = str(requested["asset_id"])
-        holding = by_asset.get(asset_id)
-        data = market_data.get(asset_id)
+        key = str(requested.get("instrument_key") or "")
+        if not key:
+            # Legacy advisory without an instrument key: accept the bare
+            # asset_id only when it identifies exactly one holding.
+            matches = [h.stable_key for h in holdings if h.asset_id == asset_id]
+            key = matches[0] if len(matches) == 1 and asset_counts.get(asset_id.upper(), 0) == 1 else ""
+        holding = by_key.get(key)
+        data = quotes.get(key)
         if holding is None or holding.quantity <= 0:
             unfilled_reasons.append(f"{asset_id}:holding_unavailable")
             continue
@@ -129,7 +71,11 @@ def execute_recovery_advisory(
             unfilled_reasons.append(f"{asset_id}:bid_below_limit")
             continue
         average_volume = max(0.0, float(data.average_daily_volume or 0.0))
-        max_daily_quantity = average_volume * policy.max_participation_rate
+        participation = min(
+            policy.max_participation_rate,
+            float(requested.get("participation_rate", policy.max_participation_rate)),
+        )
+        max_daily_quantity = average_volume * participation
         if max_daily_quantity <= 0:
             unfilled_reasons.append(f"{asset_id}:volume_unavailable")
             continue
@@ -151,10 +97,11 @@ def execute_recovery_advisory(
         net = gross - costs
         target -= net
         remaining_quantity = max(0.0, holding.quantity - filled_quantity)
-        by_asset[asset_id] = replace(holding, quantity=remaining_quantity)
+        by_key[key] = replace(holding, quantity=remaining_quantity)
         fills.append(
             {
                 "asset_id": asset_id,
+                "instrument_key": key,
                 "side": "sell",
                 "requested_quantity": round(requested_quantity, 8),
                 "filled_quantity": round(filled_quantity, 8),
@@ -171,9 +118,7 @@ def execute_recovery_advisory(
         )
 
     updated_holdings = [
-        by_asset[holding.asset_id]
-        for holding in holdings
-        if by_asset[holding.asset_id].quantity > 0
+        by_key[held.stable_key] for held in holdings if by_key[held.stable_key].quantity > 0
     ]
     gross = round_money(sum(float(fill["gross_proceeds"]) for fill in fills))
     costs = round_money(sum(float(fill["execution_costs"]) for fill in fills))

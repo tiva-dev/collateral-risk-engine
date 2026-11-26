@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -10,7 +11,11 @@ from app.audit.logger import AuditLogger
 from app.core.enums import DataMode, LifecycleDecisionValue, MarginState
 from app.core.evaluator import RiskEvaluationError
 from app.core.models import Holding, Loan, Policy
-from app.credit.interest import InterestPolicy, accrue_interest, apply_repayment
+from app.credit.interest import (
+    InterestPolicy,
+    accrue_scheduled_periods,
+    apply_repayment,
+)
 from app.lifecycle.service import CreditLifecycleEngine
 from app.liquidation.policy import LiquidationExecutionPolicy
 from app.market_data.aggregator import MarketDataAggregator
@@ -174,6 +179,21 @@ class MonitoringService:
         if event_reference in account.processed_loan_event_references:
             return account, []
 
+        # Audit H5: accrue interest to now before applying a draw or
+        # repayment, so the draw is checked against the current obligation,
+        # using the same scheduled-period accrual as ticks and replay (M7).
+        now = utc_now()
+        if (
+            account.last_interest_accrual_at is not None
+            and now > account.last_interest_accrual_at
+        ):
+            account.loan, _ = accrue_scheduled_periods(
+                account.loan,
+                account.interest_policy,
+                account.last_interest_accrual_at,
+                now,
+            )
+            account.last_interest_accrual_at = now
         previous_loan = account.loan
         loan_with_client_updates = Loan(
             principal=previous_loan.principal,
@@ -285,18 +305,17 @@ class MonitoringService:
                 and account.last_interest_accrual_at is not None
                 and now > account.last_interest_accrual_at
             ):
-                accrued_loan, _ = accrue_interest(
+                accrued_loan, _ = accrue_scheduled_periods(
                     account.loan,
                     account.interest_policy,
                     account.last_interest_accrual_at,
                     now,
                 )
-                account.loan = replace(
-                    accrued_loan,
-                    principal=round(accrued_loan.principal, 2),
-                    accrued_interest=round(accrued_loan.accrued_interest, 2),
-                    fees=round(accrued_loan.fees, 2),
-                )
+                # Audit H6: rounding the stored balance to cents on every
+                # monitoring tick discarded each sub-cent increment, so a
+                # 30-second cadence accrued almost nothing. Keep full
+                # precision in state; round at presentation and settlement.
+                account.loan = accrued_loan
             account.last_interest_accrual_at = now
             aggregation = self._normalize_market_data(account)
             market_data = self.lifecycle_engine._market_data_with_pledged_cash(
@@ -313,30 +332,33 @@ class MonitoringService:
                 MarginState.MARGIN_CALL,
                 MarginState.LIQUIDATION,
             }:
-                from app.liquidation.execution import (
-                    build_recovery_advisory,
-                    projected_interest_buffer,
-                )
+                # The same planner the evaluator and replay use, with this
+                # account's execution and interest terms (audit: monitoring
+                # previously sold decision.required_cure_amount).
+                from app.liquidation.planning import advisory_from_plan, plan_recovery
 
-                target = (
-                    account.loan.balance
-                    if decision.margin_state == MarginState.LIQUIDATION
-                    else decision.required_cure_amount
-                )
-                target += projected_interest_buffer(
-                    account.loan,
-                    account.interest_policy.annual_interest_rate,
-                    account.liquidation_execution_policy.liquidation_delay_observations
-                    + account.liquidation_execution_policy.settlement_delay_observations,
-                )
-                evaluation_snapshot["liquidation_plan"] = build_recovery_advisory(
-                    holdings=account.holdings,
+                recovery_plan = plan_recovery(
+                    engine=self.lifecycle_engine.risk_engine,
+                    account_ref=account.account_ref,
+                    holdings=holdings,
+                    loan=account.loan,
+                    balance=account.loan.balance,
+                    policy=account.policy,
                     market_data=market_data,
-                    target_net_recovery=target,
-                    policy=account.liquidation_execution_policy,
-                    trigger_state=decision.margin_state.value,
+                    asset_results=decision.evaluation.asset_results,
+                    state=decision.margin_state,
+                    execution_policy=account.liquidation_execution_policy,
+                    interest_policy=account.interest_policy,
+                    as_of=now,
+                )
+                evaluation_snapshot["liquidation_plan"] = advisory_from_plan(
+                    recovery_plan,
+                    execution_policy=account.liquidation_execution_policy,
                     issued_date=now.date(),
                 )
+            data_review_events = self._update_data_review(
+                account, decision.evaluation, now
+            )
             account.last_evaluation = evaluation_snapshot
             account.last_margin_state = decision.margin_state
             account.last_available_credit = decision.current_available_credit
@@ -374,6 +396,7 @@ class MonitoringService:
                 reason=decision.reason,
                 audit_id=decision.audit_id,
             )
+            events.extend(data_review_events)
             saved_events = [self._append_event(event) for event in events]
             return account, saved_events
         except Exception as exc:
@@ -671,6 +694,82 @@ class MonitoringService:
                     f"{account.account_ref}:fx_missing:{self._warnings_signature(warnings)}",
                 )
             )
+        return events
+
+    def _update_data_review(
+        self, account: MonitoredAccount, evaluation: Any, now: datetime
+    ) -> list[MonitoringEvent]:
+        """Track data review and escalate it on the configured schedule.
+
+        Missing, halted or low-quality collateral data never becomes a forced
+        sale. It holds the account in RESTRICT_NEW_BORROWING with
+        data_review_required; this method records when that began and raises
+        DATA_REVIEW_ESCALATED once the configured time has passed.
+        """
+        policy = account.liquidation_execution_policy
+        events: list[MonitoringEvent] = []
+        state = account.last_margin_state
+        credit = account.last_available_credit
+        if getattr(evaluation, "data_review_required", False):
+            assets = list(getattr(evaluation, "data_unavailable_assets", []))
+            if account.data_review_since is None:
+                account.data_review_since = now
+                account.data_review_assets = assets
+                events.append(
+                    self._event(
+                        account, MonitoringEventType.DATA_REVIEW_REQUIRED,
+                        MonitoringSeverity.WARNING, state, state, credit, credit,
+                        "collateral data unavailable; automated liquidation suspended "
+                        "pending review",
+                        {"data_unavailable_assets": assets},
+                        account.last_market_data_warnings, account.last_missing_data,
+                        None, f"{account.account_ref}:data_review:{now.isoformat()}",
+                    )
+                )
+            account.data_review_assets = assets
+            elapsed = (now - account.data_review_since).total_seconds() / 60
+            last = account.data_review_last_escalated_at
+            due = elapsed >= policy.data_review_escalation_minutes and (
+                last is None
+                or (
+                    policy.data_review_reescalation_minutes > 0
+                    and (now - last).total_seconds() / 60
+                    >= policy.data_review_reescalation_minutes
+                )
+            )
+            if due:
+                account.data_review_last_escalated_at = now
+                events.append(
+                    self._event(
+                        account, MonitoringEventType.DATA_REVIEW_ESCALATED,
+                        MonitoringSeverity.CRITICAL, state, state, credit, credit,
+                        f"data review open for {elapsed:.0f} minutes; escalated for "
+                        "manual decision (no automated sale)",
+                        {
+                            "data_unavailable_assets": assets,
+                            "data_review_since": account.data_review_since.isoformat(),
+                            "minutes_open": round(elapsed, 1),
+                        },
+                        account.last_market_data_warnings, account.last_missing_data,
+                        None, f"{account.account_ref}:data_review_escalated:{now.isoformat()}",
+                    )
+                )
+        elif account.data_review_since is not None:
+            events.append(
+                self._event(
+                    account, MonitoringEventType.DATA_REVIEW_CLEARED,
+                    MonitoringSeverity.INFO, state, state, credit, credit,
+                    "collateral data available again; data review closed",
+                    {"data_review_since": account.data_review_since.isoformat()},
+                    account.last_market_data_warnings, account.last_missing_data,
+                    None, f"{account.account_ref}:data_review_cleared:{now.isoformat()}",
+                )
+            )
+            account.data_review_since = None
+            account.data_review_assets = []
+            account.data_review_last_escalated_at = None
+        if events:
+            self.account_repo.update(account)
         return events
 
     def _event(

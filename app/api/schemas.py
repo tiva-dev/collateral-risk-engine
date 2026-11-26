@@ -266,6 +266,8 @@ class LiquidationExecutionPolicyIn(BaseModel):
     maximum_price_slippage: float = Field(default=0.10, ge=0, le=1)
     maximum_quote_age_days: int = Field(default=3, ge=0)
     full_liquidation_on_forced_trigger: bool = True
+    data_review_escalation_minutes: float = Field(default=1440.0, ge=0)
+    data_review_reescalation_minutes: float = Field(default=1440.0, ge=0)
 
     def to_domain(self) -> LiquidationExecutionPolicy:
         return LiquidationExecutionPolicy(**self.model_dump())
