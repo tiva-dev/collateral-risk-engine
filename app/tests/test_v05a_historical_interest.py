@@ -176,10 +176,14 @@ class TestV05A(unittest.TestCase):
         )
         loan, _detail = accrue_interest(Loan(1000), InterestPolicy(0.365), s, e)
         self.assertAlmostEqual(loan.accrued_interest, 1)
+        # Approved correction (26 Nov 2026): accrual never capitalizes; compound
+        # interest is capitalized only at contractual boundaries by
+        # accrue_scheduled_periods, and uncapitalized interest earns none.
         comp, _ = accrue_interest(
             Loan(1000, 10), InterestPolicy(0.365, compounding="compound"), s, e
         )
-        self.assertAlmostEqual(comp.principal, 1011.01)
+        self.assertAlmostEqual(comp.principal, 1000)
+        self.assertAlmostEqual(comp.accrued_interest, 11)
         unchanged, _ = accrue_interest(
             Loan(1000),
             InterestPolicy(0.1, interest_accrual_mode="client_supplied"),

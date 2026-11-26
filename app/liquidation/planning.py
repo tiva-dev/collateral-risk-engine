@@ -214,9 +214,21 @@ def _interest(
     from app.credit.interest import accrue_scheduled_periods
 
     _, result = accrue_scheduled_periods(
-        balance_loan, interest_policy, as_of, as_of + timedelta(days=observations)
+        balance_loan, interest_policy, as_of, as_of + timedelta(days=calendar_days(observations))
     )
     return float(result.interest_accrued)
+
+
+def calendar_days(observations: int) -> int:
+    """Calendar days spanned by ``observations`` trading sessions (5 per week).
+
+    Interest accrues on calendar time, so a 5-session execution window costs
+    7 days of interest; counting sessions as days under-reserves interest.
+    """
+    if observations <= 0:
+        return 0
+    weeks, rest = divmod(observations, 5)
+    return weeks * 7 + rest + (2 if rest else 0)
 
 
 def plan_recovery(
@@ -293,8 +305,18 @@ def plan_recovery(
 
     max_net = sum(s.max_quantity * s.net_price for s in sellables)
     if forced and execution_policy.full_liquidation_on_forced_trigger:
+        # Interest reserve covers the delay, the whole execution window of the
+        # forced sale and settlement (previously the execution window was
+        # omitted from the target). Iterate because the execution window
+        # depends on the target.
         target = balance + _interest(loan, interest_policy, as_of, delay + settle)
         ok, info = outcome(min(target, max_net), "priority")
+        for _ in range(3):
+            new_target = balance + _interest(loan, interest_policy, as_of, delay + info["exec_obs"] + settle)
+            if abs(new_target - target) <= 0.005:
+                break
+            target = new_target
+            ok, info = outcome(min(target, max_net), "priority")
         return _build(state, "full_recovery", sellables, info, target, ok, "priority",
                       execution_policy, {"max_net": max_net})
 

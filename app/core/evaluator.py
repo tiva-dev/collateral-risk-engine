@@ -69,6 +69,14 @@ class CollateralRiskEngine:
             raise RiskEvaluationError("requested_draw_amount cannot be negative")
 
         holdings = self._aggregate_holdings(holdings)
+        if execution_policy is not None and (
+            execution_policy.max_participation_rate < policy.max_participation_rate
+        ):
+            # Participation consistency: the liquidity horizon the risk model
+            # assumes must use the rate execution will actually be allowed to
+            # trade at, otherwise the model assumes faster exits than the
+            # executor can perform.
+            policy = replace(policy, max_participation_rate=execution_policy.max_participation_rate)
         market_by_holding = self._resolve_market_data(holdings, market_data)
         outstanding_balance = loan.balance
         requested_draw_amount = max(0.0, requested_draw_amount)

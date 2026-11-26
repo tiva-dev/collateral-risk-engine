@@ -807,9 +807,29 @@ class HistoricalReplayEngine:
             if (
                 active_episode is not None
                 and active_episode["status"] == "settling"
-                and float(active_episode["settled_recovery"])
-                >= float(active_episode["target_net_recovery"]) - 0.01
+                and (
+                    float(active_episode["settled_recovery"])
+                    >= float(active_episode["target_net_recovery"]) - 0.01
+                    # The interest reserve is a conservative estimate; once
+                    # every sale has settled and the obligation is repaid the
+                    # episode is complete and any excess belongs to the
+                    # borrower.
+                    or (
+                        loans["dynamic"].balance <= 0.01
+                        and not any(
+                            item["episode_id"] == active_episode["episode_id"]
+                            for item in pending_settlements
+                        )
+                    )
+                )
             ):
+                active_episode["surplus_to_borrower"] = round_money(
+                    max(
+                        0.0,
+                        float(active_episode["net_proceeds"])
+                        - float(active_episode["settled_recovery"]),
+                    )
+                )
                 active_episode["status"] = (
                     "fully_recovered"
                     if loans["dynamic"].balance <= 0.01

@@ -86,6 +86,13 @@ class MonitoringService:
         run_initial_evaluation: bool = True,
     ) -> tuple[MonitoredAccount, list[MonitoringEvent]]:
         now = utc_now()
+        interest_policy = interest_policy or InterestPolicy(0.0)
+        if interest_policy.schedule_anchor is None:
+            # The contractual capitalization schedule starts when monitoring of
+            # the drawn loan starts, unless the client supplied the anchor.
+            from dataclasses import replace as _replace
+
+            interest_policy = _replace(interest_policy, schedule_anchor=now)
         account = MonitoredAccount(
             account_ref=account_ref,
             holdings=holdings,

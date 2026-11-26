@@ -245,6 +245,9 @@ class InterestPolicyIn(BaseModel):
     interest_accrual_mode: Literal[
         "engine_calculated", "client_supplied"
     ] = "engine_calculated"
+    # Start of the contractual capitalization schedule (normally the drawdown
+    # date). Defaults to the time monitoring starts.
+    schedule_anchor: datetime | None = None
 
     def to_domain(self) -> InterestPolicy:
         return InterestPolicy(
@@ -253,6 +256,7 @@ class InterestPolicyIn(BaseModel):
             compounding=self.compounding,
             day_count_convention=self.day_count_convention,
             interest_accrual_mode=self.interest_accrual_mode,
+            schedule_anchor=self.schedule_anchor,
         )
 
 

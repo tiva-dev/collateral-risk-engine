@@ -197,15 +197,6 @@ def test_two_asset_margin_call_plan_restores_coverage() -> None:
     assert plan.target_cash_recovery > result.trigger_levels.required_cure_amount
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "Found 25 Nov 2026 (M7 follow-up): compound accrual capitalises interest on "
-        "every call, so splitting a monthly period into monitoring ticks compounds "
-        "more often than the contract's accrual frequency"
-    ),
-)
 def test_compound_interest_capitalises_only_at_period_boundaries() -> None:
     from datetime import UTC, datetime
 
