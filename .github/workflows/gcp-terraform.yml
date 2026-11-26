@@ -67,7 +67,7 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: projects/${{ steps.ops.outputs.number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
-          service_account: terraform@tiva-cri-ops-cda9.iam.gserviceaccount.com
+          service_account: ${{ needs.request.outputs.environment == 'production' && 'terraform-prod' || format('terraform-{0}', needs.request.outputs.environment) }}@tiva-cri-ops-cda9.iam.gserviceaccount.com
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.8

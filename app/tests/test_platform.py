@@ -236,12 +236,12 @@ class WebhookTests(_DbCase):
         delivery = self._event_delivery()
         client = _FakeClient([200])
         s = _settings(self.db.url)
-        original = webhooks.validate_url
-        webhooks.validate_url = lambda url, allow_http=False: None
+        original = webhooks.resolve_destination
+        webhooks.resolve_destination = lambda url, allow_http=False: ("example.com", 443, ["93.184.216.34"])
         try:
             result = webhooks.deliver_one(self.db, delivery, s, client)
         finally:
-            webhooks.validate_url = original
+            webhooks.resolve_destination = original
         self.assertEqual(result["status"], "delivered")
         call = client.calls[0]
         ts = call["headers"]["X-CRI-Timestamp"]
@@ -252,24 +252,59 @@ class WebhookTests(_DbCase):
     def test_failures_back_off_then_dead_letter(self) -> None:
         delivery = self._event_delivery()
         s = _settings(self.db.url, webhook_max_attempts=3)
-        original = webhooks.validate_url
-        webhooks.validate_url = lambda url, allow_http=False: None
+        original = webhooks.resolve_destination
+        webhooks.resolve_destination = lambda url, allow_http=False: ("example.com", 443, ["93.184.216.34"])
         try:
-            r1 = webhooks.deliver_one(self.db, delivery, s, _FakeClient([500]))
+            r1 = webhooks.deliver_one(self.db, delivery, s, _FakeClient([302]))
+            self.assertIn("redirects are not followed", r1["error"])
             self.assertEqual(r1["status"], "retrying")
             self.assertNotIn(delivery, webhooks.due_deliveries(self.db))  # backoff in force
             webhooks.deliver_one(self.db, delivery, s, _FakeClient([503]))
             r3 = webhooks.deliver_one(self.db, delivery, s, _FakeClient([500]))
         finally:
-            webhooks.validate_url = original
+            webhooks.resolve_destination = original
         self.assertEqual(r3["status"], "dead")
         self.assertEqual(webhooks.backoff(1), timedelta(seconds=30))
         self.assertEqual(webhooks.backoff(20), timedelta(hours=6))
 
     def test_private_addresses_are_rejected(self) -> None:
-        for url in ("http://example.com/x", "https://127.0.0.1/x", "https://10.0.0.1/x", "https://localhost/x"):
-            with self.assertRaises(webhooks.WebhookError):
+        for url in ("http://example.com/x", "https://127.0.0.1/x", "https://10.0.0.1/x", "https://localhost/x",
+                    "https://169.254.169.254/computeMetadata/v1/", "https://[::ffff:10.0.0.1]/x",
+                    "https://100.64.1.1/x", "https://user:pw@example.com/x", "https://example.com:22/x",
+                    "https://metadata.google.internal/x", "https://[fd00::1]/x"):
+            with self.assertRaises(webhooks.WebhookError, msg=url):
                 webhooks.validate_url(url)
+
+    def test_dns_rebinding_is_defeated_by_pinning_the_validated_address(self) -> None:
+        import socket as _socket
+
+        answers = [[(2, 1, 6, "", ("93.184.216.34", 443))], [(2, 1, 6, "", ("10.0.0.5", 443))]]
+        original = _socket.getaddrinfo
+        _socket.getaddrinfo = lambda *a, **k: answers.pop(0) if answers else original(*a, **k)
+        try:
+            _host, _port, addrs = webhooks.resolve_destination("https://hooks.example.com/cri")
+        finally:
+            _socket.getaddrinfo = original
+        self.assertEqual(addrs, ["93.184.216.34"])
+        url, headers, ext = webhooks.pinned_request("https://hooks.example.com/cri?x=1", addrs[0])
+        self.assertEqual(url, "https://93.184.216.34/cri?x=1")
+        self.assertEqual(headers["Host"], "hooks.example.com")
+        self.assertEqual(ext["sni_hostname"], "hooks.example.com")
+        # A later lookup that returns a private address is never consulted:
+        # the delivery connects to the pinned public address.
+        url6, _, _ = webhooks.pinned_request("https://hooks.example.com:8443/cri", "2606:2800:220:1::1")
+        self.assertEqual(url6, "https://[2606:2800:220:1::1]:8443/cri")
+
+    def test_mixed_public_and_private_answers_are_rejected(self) -> None:
+        import socket as _socket
+
+        original = _socket.getaddrinfo
+        _socket.getaddrinfo = lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443)), (2, 1, 6, "", ("192.168.1.9", 443))]
+        try:
+            with self.assertRaises(webhooks.WebhookError):
+                webhooks.resolve_destination("https://hooks.example.com/cri")
+        finally:
+            _socket.getaddrinfo = original
 
 
 class IngestionTests(unittest.TestCase):
@@ -362,6 +397,81 @@ class ApiTests(_DbCase):
         r4 = self.client.post("/monitoring/accounts", json=self._account_body(), headers=self.h(self.beta, "k1"))
         self.assertEqual(r4.status_code, 200, r4.text)
         self.assertNotIn("Idempotent-Replayed", r4.headers)
+
+    def _idem_row(self, key: str, status: str, age_minutes: float, body: dict, tenant: str = "alpha") -> bytes:
+        import hashlib as _h
+
+        raw = json.dumps(body, separators=(",", ":")).encode()
+        digest = _h.sha256(b"POST /monitoring/accounts\n" + raw).hexdigest()
+        with self.db.transaction("*") as conn:
+            conn.execute(
+                "INSERT INTO idempotency_keys (tenant_id, idem_key, method, path, request_sha256, status, created_at) "
+                "VALUES (%s,%s,'POST','/monitoring/accounts',%s,%s,%s)",
+                (tenant, key, digest, status, (datetime.now(UTC) - timedelta(minutes=age_minutes)).isoformat()))
+        return raw
+
+    def test_in_flight_duplicate_is_refused_and_stale_claim_is_recovered(self) -> None:
+        body = self._account_body("acct-crash")
+        raw = self._idem_row("k-crash", "in_progress", 1, body)
+        h = {**self.h(self.alpha, "k-crash"), "Content-Type": "application/json"}
+        r1 = self.client.post("/monitoring/accounts", content=raw, headers=h)
+        self.assertEqual(r1.status_code, 409, r1.text)  # a live request still owns the key
+        with self.db.transaction("*") as conn:
+            conn.execute("UPDATE idempotency_keys SET created_at=%s WHERE idem_key='k-crash'",
+                         ((datetime.now(UTC) - timedelta(minutes=11)).isoformat(),))
+        r2 = self.client.post("/monitoring/accounts", content=raw, headers=h)  # worker crashed: claim is stale
+        self.assertEqual(r2.status_code, 200, r2.text)
+        r3 = self.client.post("/monitoring/accounts", content=raw, headers=h)  # delayed duplicate
+        self.assertEqual(r3.headers.get("Idempotent-Replayed"), "true")
+        self.assertEqual(r3.json(), r2.json())
+
+    def test_failed_request_releases_key_and_rolls_back(self) -> None:
+        from fastapi.testclient import TestClient as _TC
+
+        app = self.client.app
+
+        def boom() -> dict:
+            from app.platform.audit import append_audit
+
+            append_audit("should_roll_back", {"x": 1})
+            raise RuntimeError("simulated crash inside the request")
+
+        app.add_api_route("/monitoring/accounts-boom", boom, methods=["POST"])
+        c = _TC(app, raise_server_exceptions=False)
+        r = c.post("/monitoring/accounts-boom", json={}, headers=self.h(self.alpha, "k-boom"))
+        self.assertEqual(r.status_code, 500)
+        with self.db.transaction("*") as conn:
+            self.assertIsNone(conn.fetchone("SELECT 1 FROM idempotency_keys WHERE idem_key='k-boom'"))
+            self.assertIsNone(conn.fetchone("SELECT 1 FROM audit_log WHERE action='should_roll_back'"))
+
+    @unittest.skipUnless(os.environ.get("CRI_TEST_DATABASE_URL"), "concurrency needs Postgres")
+    def test_concurrent_duplicates_execute_once(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        body = self._account_body("acct-race")
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: self.client.post(
+                "/monitoring/accounts", json=body, headers=self.h(self.alpha, "k-race")), range(8)))
+        codes = sorted(r.status_code for r in results)
+        fresh = [r for r in results if r.status_code == 200 and r.headers.get("Idempotent-Replayed") != "true"]
+        self.assertEqual(len(fresh), 1, codes)
+        self.assertTrue(all(c in (200, 409) for c in codes), codes)
+        with self.db.transaction("*") as conn:
+            n = conn.fetchone("SELECT COUNT(*) AS n FROM monitored_accounts WHERE account_ref='acct-race'")["n"]
+        self.assertEqual(n, 1)
+
+    def test_console_and_operator_tenant_view(self) -> None:
+        r = self.client.get("/console/")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("frame-ancestors 'none'", r.headers.get("content-security-policy", ""))
+        self.client.post("/monitoring/accounts", json=self._account_body(), headers=self.h(self.alpha, "op1"))
+        view = self.client.get("/monitoring/accounts", headers={**self.h(self.admin), "X-CRI-Tenant": "alpha"})
+        self.assertEqual([a["account_ref"] for a in view.json()["accounts"]], ["acct-1"])
+        blocked = self.client.post("/monitoring/accounts", json=self._account_body("x"),
+                                   headers={**self.h(self.admin, "op2"), "X-CRI-Tenant": "alpha"})
+        self.assertEqual(blocked.status_code, 403)
+        ignored = self.client.get("/monitoring/accounts", headers={**self.h(self.beta), "X-CRI-Tenant": "alpha"})
+        self.assertEqual(ignored.json()["accounts"], [])  # only operators may switch tenant
 
     def test_tenants_cannot_see_each_other(self) -> None:
         self.client.post("/monitoring/accounts", json=self._account_body(), headers=self.h(self.alpha, "a"))

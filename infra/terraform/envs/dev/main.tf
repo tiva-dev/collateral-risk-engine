@@ -1,7 +1,7 @@
 terraform {
   required_version = ">= 1.6"
   backend "gcs" {
-    bucket = "tiva-cri-ops-cda9-tfstate"
+    bucket = "tiva-cri-ops-cda9-tfstate-dev"
     prefix = "cri/dev"
   }
 }

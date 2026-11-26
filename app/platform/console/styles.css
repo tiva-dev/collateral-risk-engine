@@ -1,0 +1,36 @@
+:root{--bg:#0f1216;--panel:#171b21;--panel2:#1d222a;--line:#2a313b;--text:#e6e9ee;--muted:#8b95a3;--accent:#4f8cff;
+--ok:#2fb47c;--warn:#e0a526;--bad:#e5484d;--crit:#ff6a3d;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 var(--font)}
+a{color:var(--accent)}button{font:inherit;background:var(--accent);color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}button:disabled{opacity:.5;cursor:default}
+input,select,textarea{font:inherit;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+textarea{width:100%;min-height:120px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.login{display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login form{background:var(--panel);padding:32px;border-radius:12px;width:380px;display:flex;flex-direction:column;gap:12px;border:1px solid var(--line)}
+.login h1{margin:0;font-size:20px}.muted{color:var(--muted)}.error{color:var(--bad);min-height:1em}
+.top{display:flex;align-items:center;gap:16px;padding:10px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+.brand{font-weight:700;letter-spacing:.3px}.brand span{font-weight:400;color:var(--muted)}
+.env{font-size:12px;padding:2px 8px;border-radius:10px;background:#263247;color:#9fc0ff}
+.banner{flex:1;font-size:12px;color:var(--warn)}.who{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:13px}
+nav{display:flex;gap:2px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel);overflow-x:auto}
+nav button{background:transparent;color:var(--muted);border-radius:0;padding:10px 12px;border-bottom:2px solid transparent;white-space:nowrap}
+nav button.active{color:var(--text);border-bottom-color:var(--accent)}
+main{padding:20px;max-width:1500px}
+h2{font-size:17px;margin:4px 0 12px}h3{font-size:14px;margin:18px 0 8px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+.kpi .v{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums}.kpi .l{color:var(--muted);font-size:12px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px}td.n,th.n{text-align:right}
+tr.click{cursor:pointer}tr.click:hover{background:var(--panel2)}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;background:var(--panel2);border:1px solid var(--line)}
+.s-safe,.s-delivered,.s-succeeded,.s-ok{color:var(--ok);border-color:#1f5f45}.s-warning,.s-restricted,.s-pending,.s-running,.s-queued{color:var(--warn);border-color:#6b5317}
+.s-margin_call,.s-failed,.s-dead,.s-bad{color:var(--bad);border-color:#7a2a2d}.s-liquidation,.s-critical{color:var(--crit);border-color:#7a3a22}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.reasons li{margin:4px 0}.small{font-size:12px}.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:1000px){.split{grid-template-columns:1fr}}
+svg.chart{width:100%;height:220px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)}.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
+pre.md{white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;font-size:12.5px;max-height:70vh;overflow:auto}
+.notice{background:#2a2412;border:1px solid #6b5317;color:#f1d08a;padding:10px 12px;border-radius:8px;margin-bottom:12px;font-size:13px}

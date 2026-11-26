@@ -77,7 +77,7 @@ class PlatformMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
             if path.startswith("/console"):
                 response.headers["Content-Security-Policy"] = (
-                    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
                     "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
                 response.headers["X-Frame-Options"] = "DENY"
                 response.headers["Referrer-Policy"] = "no-referrer"
@@ -107,6 +107,20 @@ class PlatformMiddleware(BaseHTTPMiddleware):
             return _json_error(401, "missing or invalid API key")
         method = request.method.upper()
         mutating = method in {"POST", "PUT", "PATCH", "DELETE"}
+        act_as = request.headers.get("x-cri-tenant")
+        if act_as and principal.role == "admin" and not path.startswith("/admin"):
+            # Operator view of a tenant: reads, plus backtest requests. Every
+            # use is recorded in the operator audit chain.
+            if mutating and not path.startswith("/backtests"):
+                return _json_error(403, "operators may only read tenant data or request backtests")
+            with self.p.db.transaction("*") as conn:
+                t = conn.fetchone("SELECT kind, status FROM tenants WHERE tenant_id=%s", (act_as,))
+                if t is None:
+                    return _json_error(404, "tenant not found")
+                if mutating:
+                    append_audit("operator_acted_as_tenant", {"tenant_id": act_as, "method": method, "path": path},
+                                 tenant_id="*", actor=principal.actor)
+            principal = Principal(tenant_id=act_as, role="admin", key_id=principal.key_id, tenant_kind=t["kind"])
         if path.startswith("/admin") and principal.role != "admin":
             return _json_error(403, "admin role required")
         if principal.role == "readonly" and mutating and not path.startswith(("/risk/", "/portfolio/", "/market-data/normalize")):

@@ -42,20 +42,69 @@ class WebhookError(ValueError):
     pass
 
 
-def validate_url(url: str, allow_http: bool = False) -> None:
+ALLOWED_PORTS = frozenset({443, 8443})
+_BLOCKED_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+    "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
+    "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8", "64:ff9b::/96",
+))
+
+
+def _address_allowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if not ip.is_global:
+        return False
+    return not any(ip in net for net in _BLOCKED_NETS if net.version == ip.version)
+
+
+def resolve_destination(url: str, allow_http: bool = False) -> tuple[str, int, list[str]]:
+    """Validate a webhook URL and return (host, port, public addresses).
+
+    Every address the name resolves to must be public; delivery then connects
+    to one of these exact addresses (no second lookup), which defeats DNS
+    rebinding. Only ports 443/8443 are allowed (plus 80 when http is enabled
+    for local testing), userinfo is rejected, and literal IPs must be public.
+    """
     parsed = urlparse(url)
     if parsed.scheme != "https" and not (allow_http and parsed.scheme == "http"):
         raise WebhookError("webhook URL must use https")
     if not parsed.hostname:
         raise WebhookError("webhook URL needs a host")
+    if parsed.username or parsed.password:
+        raise WebhookError("webhook URL must not contain credentials")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if port not in ALLOWED_PORTS and not (allow_http and port == 80):
+        raise WebhookError("webhook port must be 443 or 8443")
+    host = parsed.hostname.rstrip(".").lower()
+    if host == "localhost" or host.endswith((".localhost", ".internal", ".local")):
+        raise WebhookError("webhook host must be a public name")
     try:
-        infos = socket.getaddrinfo(parsed.hostname, parsed.port or 443, proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except OSError as exc:
-        raise WebhookError(f"webhook host does not resolve: {parsed.hostname}") from exc
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if not ip.is_global:
+        raise WebhookError(f"webhook host does not resolve: {host}") from exc
+    addresses = sorted({info[4][0] for info in infos})
+    if not addresses:
+        raise WebhookError("webhook host has no addresses")
+    for a in addresses:
+        if not _address_allowed(ipaddress.ip_address(a.split("%")[0])):
             raise WebhookError("webhook URL must resolve to public addresses only")
+    return host, port, addresses
+
+
+def validate_url(url: str, allow_http: bool = False) -> None:
+    resolve_destination(url, allow_http)
+
+
+def pinned_request(url: str, address: str) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """URL rewritten to the validated address, Host header and TLS SNI kept on the name."""
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    ip_host = f"[{address}]" if ":" in address else address
+    netloc = ip_host + (f":{parsed.port}" if parsed.port else "")
+    pinned = parsed._replace(netloc=netloc).geturl()
+    host_header = host + (f":{parsed.port}" if parsed.port else "")
+    return pinned, {"Host": host_header}, {"sni_hostname": host}
 
 
 def sign(secret: str, timestamp: str, body: bytes) -> str:
@@ -177,15 +226,23 @@ def deliver_one(db: Database, delivery_id: str, settings: PlatformSettings,
                 "X-CRI-Signature": sign(row["signing_secret"], ts, body),
             }
             try:
-                validate_url(row["url"], settings.webhook_allow_http)
-                http = client or httpx.Client(timeout=10.0, follow_redirects=False)
+                _host, _port, addresses = resolve_destination(row["url"], settings.webhook_allow_http)
+                http = client or httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=False,
+                                              trust_env=False)
                 try:
-                    resp = http.post(row["url"], content=body, headers=headers)
+                    if client is None:
+                        target, extra_headers, extensions = pinned_request(row["url"], addresses[0])
+                        resp = http.post(target, content=body, headers={**headers, **extra_headers},
+                                         extensions=extensions)
+                    else:
+                        resp = http.post(row["url"], content=body, headers=headers)
                 finally:
                     if client is None:
                         http.close()
                 status_code = resp.status_code
-                if not 200 <= resp.status_code < 300:
+                if 300 <= resp.status_code < 400:
+                    error = f"HTTP {resp.status_code}: redirects are not followed"
+                elif not 200 <= resp.status_code < 300:
                     error = f"HTTP {resp.status_code}"
             except (*http_errors, WebhookError) as exc:  # type: ignore[misc]
                 error = f"{type(exc).__name__}: {exc}"[:500]

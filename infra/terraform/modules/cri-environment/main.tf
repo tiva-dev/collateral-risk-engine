@@ -128,23 +128,7 @@ resource "google_service_account_iam_member" "deployer_acts_as" {
   member             = "serviceAccount:${google_service_account.deployer.email}"
 }
 
-resource "google_artifact_registry_repository_iam_member" "deployer_push" {
-  project    = var.ops_project_id
-  location   = var.region
-  repository = "cri"
-  role       = "roles/artifactregistry.writer"
-  member     = "serviceAccount:${google_service_account.deployer.email}"
-}
 
-# Cloud Run's service agent in this project pulls images from the shared ops repository.
-resource "google_artifact_registry_repository_iam_member" "run_agent_pull" {
-  project    = var.ops_project_id
-  location   = var.region
-  repository = "cri"
-  role       = "roles/artifactregistry.reader"
-  member     = "serviceAccount:service-${data.google_project.this.number}@serverless-robot-prod.iam.gserviceaccount.com"
-  depends_on = [google_project_service.apis]
-}
 
 resource "google_project_iam_member" "runtime_roles" {
   for_each = {
@@ -614,6 +598,7 @@ resource "google_cloud_run_v2_service" "worker" {
       network_interfaces {
         network    = google_compute_network.vpc.id
         subnetwork = google_compute_subnetwork.run.id
+        tags       = ["cri-run"]
       }
       egress = "PRIVATE_RANGES_ONLY"
     }
@@ -725,6 +710,7 @@ resource "google_cloud_run_v2_service" "api" {
       network_interfaces {
         network    = google_compute_network.vpc.id
         subnetwork = google_compute_subnetwork.run.id
+        tags       = ["cri-run"]
       }
       egress = "PRIVATE_RANGES_ONLY"
     }
@@ -817,15 +803,13 @@ locals {
       }
     }
     "cri-backtest" = {
-      args    = ["python", "-m", "app.simulations.run_official_validation"]
-      timeout = "7200s"
+      args    = ["python", "-m", "app.platform.cli", "backtest"]
+      timeout = "3600s"
       memory  = "4Gi"
       cpu     = "2"
       secrets = {
-        ALPACA_API_KEY        = ["provider", "alpaca-api-key"]
-        ALPACA_SECRET_KEY     = ["provider", "alpaca-secret-key"]
-        NGNMARKET_API_KEY     = ["provider", "ngnmarket-api-key"]
-        ALPHA_VANTAGE_API_KEY = ["provider", "alpha-vantage-api-key"]
+        CRI_DATABASE_URL   = ["generated", "cri-database-url-app"]
+        CRI_API_KEY_PEPPER = ["generated", "cri-api-key-pepper"]
       }
     }
   }
@@ -849,6 +833,7 @@ resource "google_cloud_run_v2_job" "jobs" {
         network_interfaces {
           network    = google_compute_network.vpc.id
           subnetwork = google_compute_subnetwork.run.id
+          tags       = ["cri-run"]
         }
         egress = "PRIVATE_RANGES_ONLY"
       }
@@ -915,6 +900,7 @@ locals {
     "cri-ingest-market-data" = { schedule = "*/15 9-22 * * 1-5", path = "/internal/market-data/ingest", deadline = "600s" }
     "cri-monitoring-tick"    = { schedule = "*/5 * * * *", path = "/internal/monitoring/tick-all", deadline = "300s" }
     "cri-webhook-sweep"      = { schedule = "* * * * *", path = "/internal/webhooks/dispatch", deadline = "120s" }
+    "cri-shadow-models"      = { schedule = "7,37 * * * *", path = "/internal/shadow/run-all", deadline = "900s" }
   } : {}
 }
 
@@ -1140,36 +1126,78 @@ resource "google_monitoring_alert_policy" "sql" {
 
 # ------------------------------------------------------------------ budget
 
-resource "google_billing_budget" "project" {
-  billing_account = var.billing_account
-  display_name    = "CRI ${local.env} monthly"
-  budget_filter {
-    projects = ["projects/${data.google_project.this.number}"]
-    # Measure gross usage so alerts fire on consumption even while credits pay for it.
-    credit_types_treatment = "EXCLUDE_ALL_CREDITS"
+
+# Cross-project grants and budgets moved to infra/bootstrap/harden.sh so that
+# each environment's Terraform identity needs rights only in its own project.
+# These blocks forget the old resources without deleting them.
+removed {
+  from = google_artifact_registry_repository_iam_member.deployer_push
+  lifecycle {
+    destroy = false
   }
-  amount {
-    specified_amount {
-      currency_code = "USD"
-      units         = tostring(var.monthly_budget_usd)
-    }
+}
+
+removed {
+  from = google_artifact_registry_repository_iam_member.run_agent_pull
+  lifecycle {
+    destroy = false
   }
-  threshold_rules {
-    threshold_percent = 0.5
+}
+
+removed {
+  from = google_billing_budget.project
+  lifecycle {
+    destroy = false
   }
-  threshold_rules {
-    threshold_percent = 0.9
+}
+
+# ------------------------------------------------- egress lockdown (SSRF)
+# Cloud Run sends private-range traffic into the VPC. Only PostgreSQL to the
+# Cloud SQL peering range is allowed; every other private destination is
+# denied, so a webhook or provider URL can never reach internal services even
+# if application-level validation were bypassed.
+resource "google_compute_firewall" "run_allow_sql" {
+  project            = var.project_id
+  name               = "cri-run-allow-sql"
+  network            = google_compute_network.vpc.id
+  direction          = "EGRESS"
+  priority           = 900
+  target_tags        = ["cri-run"]
+  destination_ranges = ["${google_compute_global_address.psa.address}/${google_compute_global_address.psa.prefix_length}"]
+  allow {
+    protocol = "tcp"
+    ports    = ["5432"]
   }
-  threshold_rules {
-    threshold_percent = 1.0
+}
+
+resource "google_compute_firewall" "run_deny_private" {
+  project            = var.project_id
+  name               = "cri-run-deny-private"
+  network            = google_compute_network.vpc.id
+  direction          = "EGRESS"
+  priority           = 1000
+  target_tags        = ["cri-run"]
+  destination_ranges = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"]
+  deny {
+    protocol = "all"
   }
-  threshold_rules {
-    threshold_percent = 1.0
-    spend_basis       = "FORECASTED_SPEND"
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
   }
-  all_updates_rule {
-    monitoring_notification_channels = local.channels
-    disable_default_iam_recipients   = false
-  }
-  depends_on = [google_project_service.apis]
+}
+
+# ------------------------------------- Control Centre and backtest access
+resource "google_project_iam_member" "api_read_roles" {
+  for_each = toset(["roles/run.viewer", "roles/cloudscheduler.viewer", "roles/monitoring.viewer"])
+  project  = var.project_id
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.api.email}"
+}
+
+resource "google_cloud_run_v2_job_iam_member" "api_runs_backtests" {
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_job.jobs["cri-backtest"].name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.api.email}"
 }
