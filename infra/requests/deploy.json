@@ -1,1 +1,1 @@
-{"environment": "staging", "report_only": true, "note": "report with scheduler and worker logs"}
+{"environment": "staging", "report_only": true, "note": "verification report after scheduled ingestion cycles"}
