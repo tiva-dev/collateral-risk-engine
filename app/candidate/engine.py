@@ -131,6 +131,7 @@ class CandidateEvaluation:
     cash_value: float
     current_outstanding_balance: float
     thresholds: dict[str, float]
+    thresholds_economic: dict[str, float]   # on the latest reliable data for degraded holdings
     threshold_ltv: dict[str, float | None]
     approved_credit_limit: float
     current_available_credit: float
@@ -553,7 +554,7 @@ class CandidateEngine:
         return CandidateEvaluation(
             model_version=VERSION, account_ref=account_ref, as_of=as_of.isoformat(), loan_currency=ccy,
             portfolio_market_value=total_value, securities_value=securities_value, cash_value=cash,
-            current_outstanding_balance=balance, thresholds=th,
+            current_outstanding_balance=balance, thresholds=th, thresholds_economic=th_econ,
             threshold_ltv={k: ratio(th[k]) for k in ("initial_capacity", "early_warning", "margin_call",
                                                      "forced_recovery", "restoration_target")}
             | {"current": ratio(balance)},

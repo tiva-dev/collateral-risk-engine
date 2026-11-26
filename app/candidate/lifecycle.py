@@ -212,7 +212,7 @@ def run_cohort(
         return cache[k]
 
     def plan(v: Variant, qty: dict[str, float], loan: Loan, d: date, md: dict[str, MarketData], state: MarginState,
-             ltv0: float, anchored: InterestPolicy) -> dict[str, float]:
+             ltv0: float, anchored: InterestPolicy) -> tuple[dict[str, float], bool]:
         """The actual candidate recovery decision through the unified planner."""
         hs = [replace(h, quantity=qty.get(h.stable_key, 0.0)) for h in holdings if qty.get(h.stable_key, 0.0) > 0]
         override = None
@@ -226,7 +226,7 @@ def run_cohort(
         orders: dict[str, float] = {}
         for o in (ev.recovery_plan or {}).get("orders", []):
             orders[o["instrument_key"]] = orders.get(o["instrument_key"], 0.0) + float(o["quantity"])
-        return orders
+        return orders, bool(ev.data_review_required)
 
     md0 = market(origination, {})
     q0 = {h.stable_key: h.quantity for h in holdings}
@@ -303,7 +303,11 @@ def run_cohort(
                     b0, b_ew, b_mc, b_f = (th["initial_capacity"], th["early_warning"], th["margin_call"],
                                            th["forced_recovery"])
                     target = th["initial_capacity_uncapped"] if v.restoration == "initial_capacity" else b_ew
-                    data_hold = ev.data_review_required or ev.deterioration == "data"
+                    # Data deterioration never triggers a sale: if the breach disappears on the
+                    # latest reliable data (or a price is missing), the account is held for review.
+                    te = ev.thresholds_economic
+                    data_hold = ev.data_status == "missing" or (
+                        ev.data_status == "degraded" and net_bal <= te["margin_call"])
                 else:
                     b0 = ltv0 * value
                     b_ew = b0
@@ -361,9 +365,14 @@ def run_cohort(
                         episode = "selling"
                 if episode == "selling" and sale_start < 0:
                     plan_state = state if state in BAD else MarginState.MARGIN_CALL
-                    orders = plan(v, qty, loan, d, md, plan_state, ltv0, anchored)
+                    orders, review = plan(v, qty, loan, d, md, plan_state, ltv0, anchored)
                     if not orders:
-                        orders = {k: q for k, q in qty.items() if k not in cash_keys and q > 0}
+                        # No plan: data review holds the account (no sale); otherwise
+                        # nothing is sellable by the planner today and nothing is sold.
+                        out.events.append({"session": i, "date": d.isoformat(),
+                                           "event": "data_review_hold" if review else "no_executable_plan"})
+                        episode, sale_start = (None, -1)
+                        continue
                     sale_start = i
                     out.liquidation_episodes += 1
                     out.unnecessary_liquidations += unnecessary(i)

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-VERSION = "candidate-2026.11.2"
+VERSION = "candidate-2026.11.3"
 
 
 @dataclass(frozen=True)
