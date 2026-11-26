@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import itertools
 import json
 import logging
+import math
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -673,6 +675,42 @@ def build_router(p: Platform) -> APIRouter:
             return {"available": False, "reason": "not running on Google Cloud"}
         return {"available": True, "project": p.settings.gcp_project, "region": p.settings.gcp_region,
                 **gcp.infrastructure(p.settings.gcp_project, p.settings.gcp_region)}
+
+    @r.get("/admin/markets/onboarding")
+    def admin_market_onboarding() -> dict[str, Any]:
+        from app.markets.hierarchical import prior_from_full_histories, shrink_log_vol
+        from app.markets.onboarding import validate_market
+        from app.markets.profiles import PROFILES
+        from app.platform.ingestion import load_bars
+
+        conn = current_connection()
+        keys = [r["stable_key"] for r in conn.fetchall("SELECT DISTINCT stable_key FROM market_bars ORDER BY stable_key")]
+        reports = {}
+        log_vols: dict[str, dict[str, tuple[float, int]]] = {}
+        for code, prof in PROFILES.items():
+            mine = {k: load_bars(k, 1000) for k in keys if k.split(":")[0] in prof.exchanges}
+            if not mine:
+                continue
+            reports[code] = validate_market(prof, mine)
+            for k, bars in mine.items():
+                closes = [b["close"] for b in bars if b["close"]]
+                r = [math.log(b / a) for a, b in itertools.pairwise(closes) if a > 0 and b > 0]
+                if len(r) > 20:
+                    mu = sum(r) / len(r)
+                    sd = math.sqrt(sum((x - mu) ** 2 for x in r) / (len(r) - 1))
+                    log_vols.setdefault(code, {})[k] = (math.log(max(sd, 1e-6)), len(r))
+        # Cross-market sharing illustration on live data: each market's
+        # instruments shrunk toward a prior estimated from the OTHER market.
+        sharing = {}
+        for code, inst in log_vols.items():
+            others = [v[0] for c, d in log_vols.items() if c != code for v in d.values()]
+            if len(others) < 2:
+                continue
+            prior = prior_from_full_histories(others, f"other markets ({len(others)} instruments)")
+            sharing[code] = {k: {"own_annual_vol": math.exp(lv) * math.sqrt(252), "sessions": n,
+                                 "weight_on_own_with_full_history": shrink_log_vol(lv, n, prior)[1]}
+                             for k, (lv, n) in inst.items()}
+        return {"markets": reports, "cross_market_prior_weights": sharing}
 
     @r.get("/admin/research/findings")
     def admin_research_findings() -> Response:

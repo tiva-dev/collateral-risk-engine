@@ -222,6 +222,8 @@ async function renderAlerts() {
 
 async function renderMarket() {
   const m = await api("/platform/market-data/status");
+  let onb = null;
+  if (S.who.role === "admin") { try { onb = await api("/admin/markets/onboarding"); } catch { onb = null; } }
   const stale = (m.quotes || []).filter((q) => q.age_hours > 30).length;
   return h("div", {}, h("h2", {}, "Market data freshness, coverage and provider health"),
     h("div", { class: "grid" }, kpi("Instruments", (m.quotes || []).length), kpi("Older than 30h", stale),
@@ -235,6 +237,11 @@ async function renderMarket() {
     table([{ t: "Instrument", k: "stable_key" }, { t: "Sessions", n: 1, k: "sessions" }, { t: "First", k: "first_bar" }, { t: "Last", k: "last_bar" },
       { t: "High/low reported", n: 1, f: (r) => `${fmt(r.ranges_reported)} / ${fmt(r.sessions)}` },
       { t: "Volume reported", n: 1, f: (r) => `${fmt(r.volumes_reported)} / ${fmt(r.sessions)}` }], m.coverage || []),
+    onb ? h("div", {}, h("h3", {}, "Market onboarding validation (universal estimators; no market-specific model)"),
+      ...Object.values(onb.markets || {}).map((mk) => card(
+        h("div", { class: "row" }, h("b", {}, mk.market), pill(mk.decision === "usable" ? "ok" : mk.decision === "blocked" ? "bad" : "warning"),
+          h("span", { class: "small muted" }, `${mk.decision} · ${mk.instruments_with_history}/${mk.instruments} instruments with history`)),
+        table([{ t: "Check", k: "check" }, { t: "Result", f: (r) => pill(r.result === "recorded_only" ? "ok" : "warning") }, { t: "Detail", f: (r) => h("span", { class: "small" }, r.detail) }], mk.findings || [])))) : null,
     h("h3", {}, "Ingestion runs"),
     table([{ t: "Started", f: (r) => String(r.started_at).slice(0, 19) }, { t: "Instruments", n: 1, k: "instruments" }, { t: "Quotes", n: 1, k: "quotes_written" },
       { t: "Errors", f: (r) => { const e = JSON.parse(r.errors || "[]"); return e.length ? h("span", { class: "small" }, e.map((x) => `${x.instrument}: ${x.error}`).join("; ")) : pill("ok"); } }], m.ingestion_runs || []));
