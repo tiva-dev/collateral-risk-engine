@@ -19,10 +19,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [dev, staging, production]
+        env: [dev, staging]
     name: verify (${{ matrix.env }})
     runs-on: ubuntu-latest
-    # production is impersonable only from refs/heads/main (run this from main)
     environment: terraform-${{ matrix.env }}
     steps:
       - uses: actions/checkout@v4
@@ -68,3 +67,58 @@ jobs:
               && { echo "FAIL: can read the production image repository policy"; exit 1; }
           fi
           echo "isolation OK for ${{ matrix.env }}"
+
+  # Pre-merge gate: dev and staging (any branch). Post-merge gate: production,
+  # which is impersonable only from refs/heads/main, so this job runs only there.
+  verify-production:
+    name: verify (production)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: terraform-production
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          echo "ops_number=$(cat infra/terraform/OPS_PROJECT_NUMBER)" >> "$GITHUB_OUTPUT"
+          case "production" in dev) echo "own=tiva-cri-dev-cda9" >> "$GITHUB_OUTPUT"; echo "other=tiva-cri-stg-cda9" >> "$GITHUB_OUTPUT";;
+            staging) echo "own=tiva-cri-stg-cda9" >> "$GITHUB_OUTPUT"; echo "other=tiva-cri-dev-cda9" >> "$GITHUB_OUTPUT";;
+            production) echo "own=tiva-cri-prd-cda9" >> "$GITHUB_OUTPUT"; echo "other=tiva-cri-stg-cda9" >> "$GITHUB_OUTPUT";; esac
+          echo "sa=$([ "production" = production ] && echo terraform-prod || echo terraform-production)" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ steps.cfg.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: ${{ steps.cfg.outputs.sa }}@tiva-cri-ops-cda9.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: Authenticated identity
+        run: gcloud auth list --filter=status:ACTIVE --format='value(account)' | tee who.txt; grep -q "${{ steps.cfg.outputs.sa }}@" who.txt
+      - name: Own state readable; plan succeeds
+        working-directory: infra/terraform/envs/production
+        run: |
+          terraform init -input=false
+          terraform state list | wc -l | tee count.txt
+          # Production is unprovisioned: its state may be empty; dev and staging must not be.
+          [ "production" = production ] || test "$(cat count.txt)" -gt 0
+          # Production is unprovisioned: no plan (its APIs and billing are off by design).
+      - name: Production remains unprovisioned
+        run: |
+          test -z "$(gcloud run services list --project tiva-cri-prd-cda9 --format='value(name)' 2>/dev/null)"
+          test -z "$(gcloud sql instances list --project tiva-cri-prd-cda9 --format='value(name)' 2>/dev/null)"
+          echo "no Cloud Run services or Cloud SQL instances in production"
+      - name: Isolation (must fail)
+        run: |
+          set +e
+          other=${{ steps.cfg.outputs.other }}
+          gcloud projects get-iam-policy "$other" >/dev/null 2>&1 && { echo "FAIL: can read $other IAM"; exit 1; }
+          for e in dev staging production; do
+            [ "$e" = "production" ] && continue
+            gcloud storage ls "gs://tiva-cri-ops-cda9-tfstate-$e/" >/dev/null 2>&1 && { echo "FAIL: can read $e state"; exit 1; }
+          done
+          if [ "production" != production ]; then
+            gcloud projects get-iam-policy tiva-cri-prd-cda9 >/dev/null 2>&1 && { echo "FAIL: can read production IAM"; exit 1; }
+            gcloud artifacts repositories get-iam-policy cri-prod --project tiva-cri-ops-cda9 --location europe-west1 >/dev/null 2>&1 \
+              && { echo "FAIL: can read the production image repository policy"; exit 1; }
+          fi
+          echo "isolation OK for production"

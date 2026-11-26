@@ -1,73 +1,129 @@
 #!/usr/bin/env bash
 # Hardening STAGE 2: retire the old shared Terraform identity.
 #
-# Refuses to run unless VERIFIED_RUN_ID names a successful run of the
-# "GCP Identity Verification" workflow on this repository, in which every
-# environment-specific identity authenticated through Workload Identity
-# Federation, read its own state and failed to reach the other environments.
-# Then it re-checks stage 1, removes every grant of the old identity and
-# disables it (it is not deleted, so it can be re-enabled if needed).
+# Runs only when ALL of the following hold, checked here, not assumed:
+# 1. VERIFIED_RUN_ID is a run of .github/workflows/gcp-identity-verify.yml
+#    ("GCP Identity Verification") on this repository, on branch main, at
+#    commit TRUSTED_SHA (supplied by engineering and the founder), concluded
+#    "success", started after stage 1 completed, with the jobs verify (dev),
+#    verify (staging) and verify (production) all successful.
+# 2. The current configuration still matches stage 1: each environment
+#    identity exists, is enabled, has roles only on its own project and is
+#    impersonable only through its intended Workload Identity principal.
+# Then it removes every grant of the old identity, failing on any removal
+# error, disables it (not deleted) and verifies that no grant remains.
 set -euo pipefail
 : "${BILLING_ACCOUNT:?set BILLING_ACCOUNT}"
-: "${VERIFIED_RUN_ID:?set VERIFIED_RUN_ID to the successful GCP Identity Verification run id}"
+: "${VERIFIED_RUN_ID:?set VERIFIED_RUN_ID}"
+: "${TRUSTED_SHA:?set TRUSTED_SHA (full 40-character commit on main)}"
 REPO_SLUG="${REPO_SLUG:-tiva-dev/collateral-risk-engine}"
-SUFFIX="${SUFFIX:-cda9}"
+SUFFIX="${SUFFIX:-cda9}"; REGION="${REGION:-europe-west1}"
 OPS="tiva-cri-ops-${SUFFIX}"
 declare -A PROJ=([dev]="tiva-cri-dev-${SUFFIX}" [staging]="tiva-cri-stg-${SUFFIX}" [production]="tiva-cri-prd-${SUFFIX}")
 declare -A SA_ID=([dev]=terraform-dev [staging]=terraform-staging [production]=terraform-prod)
+OPS_NUMBER="$(gcloud projects describe "$OPS" --format='value(projectNumber)')"
+POOL="projects/${OPS_NUMBER}/locations/global/workloadIdentityPools/github"
 OLD_SA="terraform@${OPS}.iam.gserviceaccount.com"
 OLD_BUCKET="gs://${OPS}-tfstate"
+API="https://api.github.com/repos/${REPO_SLUG}"
 
-run=$(curl -fsSL "https://api.github.com/repos/${REPO_SLUG}/actions/runs/${VERIFIED_RUN_ID}")
-python3 - "$run" <<'PY'
+stage1=$(gcloud storage cat "gs://${OPS}-tfstate-staging/hardening/stage1-complete.json")
+run=$(curl -fsSL "${API}/actions/runs/${VERIFIED_RUN_ID}")
+jobs=$(curl -fsSL "${API}/actions/runs/${VERIFIED_RUN_ID}/jobs")
+main_has=$(curl -fsSL "${API}/compare/${TRUSTED_SHA}...main" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+python3 - "$run" "$jobs" "$stage1" "$TRUSTED_SHA" "$main_has" <<'PY'
 import json, sys
-r = json.loads(sys.argv[1])
-ok = r.get("name") == "GCP Identity Verification" and r.get("conclusion") == "success"
-print(f"verification run {r.get('id')}: {r.get('name')} / {r.get('conclusion')} at {r.get('head_sha', '')[:12]}")
-sys.exit(0 if ok else 1)
-PY
-jobs=$(curl -fsSL "https://api.github.com/repos/${REPO_SLUG}/actions/runs/${VERIFIED_RUN_ID}/jobs")
-python3 - "$jobs" <<'PY'
-import json, sys
-j = json.loads(sys.argv[1])["jobs"]
-need = {"verify (dev)", "verify (staging)", "verify (production)"}
-done = {x["name"] for x in j if x["conclusion"] == "success"}
-missing = need - done
-print("jobs:", ", ".join(f"{x['name']}={x['conclusion']}" for x in j))
-sys.exit(1 if missing else 0)
+run, jobs, stage1 = (json.loads(x) for x in sys.argv[1:4])
+sha, rel = sys.argv[4], sys.argv[5]
+checks = {
+    "workflow path": run.get("path") == ".github/workflows/gcp-identity-verify.yml",
+    "workflow name": run.get("name") == "GCP Identity Verification",
+    "branch main": run.get("head_branch") == "main",
+    "trusted revision": run.get("head_sha") == sha and len(sha) == 40,
+    "revision on main": rel in ("identical", "ahead"),
+    "concluded success": run.get("conclusion") == "success",
+    "after stage 1": run.get("run_started_at", "") > stage1["completed_at"],
+}
+done = {j["name"]: j["conclusion"] for j in jobs["jobs"]}
+for name in ("verify (dev)", "verify (staging)", "verify (production)"):
+    checks[name] = done.get(name) == "success"
+for k, v in checks.items():
+    print(f"{'ok  ' if v else 'FAIL'} {k}")
+sys.exit(0 if all(checks.values()) else 1)
 PY
 
+echo "--- current configuration"
 for env in dev staging production; do
   sa="${SA_ID[$env]}@${OPS}.iam.gserviceaccount.com"
-  gcloud iam service-accounts describe "$sa" --project "$OPS" >/dev/null || { echo "FAIL: $sa missing (run stage 1)"; exit 1; }
+  [ "$(gcloud iam service-accounts describe "$sa" --project "$OPS" --format='value(disabled)')" != "True" ] ||
+    { echo "FAIL: $sa disabled"; exit 1; }
+  for e2 in dev staging production; do
+    roles=$(gcloud projects get-iam-policy "${PROJ[$e2]}" --flatten='bindings[].members' \
+      --filter="bindings.members:serviceAccount:${sa}" --format='value(bindings.role)')
+    if [ "$e2" = "$env" ]; then echo "$roles" | grep -qx roles/owner || { echo "FAIL: $sa lacks owner on ${PROJ[$e2]}"; exit 1; }
+    elif [ -n "$roles" ]; then echo "FAIL: $sa has roles on ${PROJ[$e2]}"; exit 1; fi
+  done
+  if [ "$env" = production ]; then
+    want="principalSet://iam.googleapis.com/${POOL}/attribute.env_ref/terraform-production@refs/heads/main"
+  else
+    want="principalSet://iam.googleapis.com/${POOL}/attribute.environment/terraform-${env}"
+  fi
+  got=$(gcloud iam service-accounts get-iam-policy "$sa" --project "$OPS" --format=json |
+        python3 -c 'import json,sys; print("\n".join(sorted(m for b in json.load(sys.stdin).get("bindings",[]) if b["role"]=="roles/iam.workloadIdentityUser" for m in b["members"])))')
+  [ "$got" = "$want" ] || { echo "FAIL: $sa impersonation principals: $got"; exit 1; }
+  echo "${SA_ID[$env]}: ok"
 done
 
-# Retire the shared identity: remove every grant, then disable it.
-for p in "${PROJ[@]}"; do
-  gcloud projects remove-iam-policy-binding "$p" --member "serviceAccount:${OLD_SA}" --role roles/owner \
-    --condition=None >/dev/null 2>&1 || true
+echo "--- retiring ${OLD_SA}"
+remove_project_roles() {  # $1 project
+  for role in $(gcloud projects get-iam-policy "$1" --flatten='bindings[].members' \
+                 --filter="bindings.members:serviceAccount:${OLD_SA}" --format='value(bindings.role)'); do
+    gcloud projects remove-iam-policy-binding "$1" --member "serviceAccount:${OLD_SA}" --role "$role" --all >/dev/null
+    echo "removed $role on $1"
+  done
+}
+for p in "${PROJ[@]}" "$OPS"; do remove_project_roles "$p"; done
+for role in $(gcloud storage buckets get-iam-policy "$OLD_BUCKET" --format=json |
+              python3 -c "import json,sys; [print(b['role']) for b in json.load(sys.stdin).get('bindings',[]) if 'serviceAccount:${OLD_SA}' in b['members']]"); do
+  gcloud storage buckets remove-iam-policy-binding "$OLD_BUCKET" --member "serviceAccount:${OLD_SA}" --role "$role" >/dev/null
+  echo "removed $role on $OLD_BUCKET"
 done
-gcloud projects remove-iam-policy-binding "$OPS" --member "serviceAccount:${OLD_SA}" --role roles/artifactregistry.admin --condition=None >/dev/null 2>&1 || true
-gcloud projects remove-iam-policy-binding "$OPS" --member "serviceAccount:${OLD_SA}" --role roles/iam.workloadIdentityPoolViewer --condition=None >/dev/null 2>&1 || true
-gcloud storage buckets remove-iam-policy-binding "$OLD_BUCKET" --member "serviceAccount:${OLD_SA}" --role roles/storage.objectAdmin >/dev/null 2>&1 || true
-gcloud billing accounts remove-iam-policy-binding "$BILLING_ACCOUNT" --member "serviceAccount:${OLD_SA}" --role roles/billing.costsManager >/dev/null 2>&1 || true
-gcloud billing accounts remove-iam-policy-binding "$BILLING_ACCOUNT" --member "serviceAccount:${OLD_SA}" --role roles/billing.viewer >/dev/null 2>&1 || true
-for b in $(gcloud iam service-accounts get-iam-policy "$OLD_SA" --project "$OPS" --format=json | \
-           python3 -c 'import json,sys; [print(m) for b in json.load(sys.stdin).get("bindings",[]) for m in b["members"]]'); do
-  gcloud iam service-accounts remove-iam-policy-binding "$OLD_SA" --project "$OPS" --role roles/iam.workloadIdentityUser --member "$b" >/dev/null 2>&1 || true
+for role in $(gcloud billing accounts get-iam-policy "$BILLING_ACCOUNT" --format=json |
+              python3 -c "import json,sys; [print(b['role']) for b in json.load(sys.stdin).get('bindings',[]) if 'serviceAccount:${OLD_SA}' in b['members']]"); do
+  gcloud billing accounts remove-iam-policy-binding "$BILLING_ACCOUNT" --member "serviceAccount:${OLD_SA}" --role "$role" >/dev/null
+  echo "removed $role on billing account"
 done
-gcloud iam service-accounts disable "$OLD_SA" --project "$OPS" >/dev/null 2>&1 || true
-
-for b in $(gcloud iam service-accounts get-iam-policy "$OLD_SA" --project "$OPS" --format=json | \
-           python3 -c 'import json,sys; [print(m) for b in json.load(sys.stdin).get("bindings",[]) for m in b["members"]]'); do
-  gcloud iam service-accounts remove-iam-policy-binding "$OLD_SA" --project "$OPS" --role roles/iam.workloadIdentityUser --member "$b" >/dev/null 2>&1 || true
+for repo in cri cri-prod; do
+  for role in $(gcloud artifacts repositories get-iam-policy "$repo" --project "$OPS" --location "$REGION" --format=json |
+                python3 -c "import json,sys; [print(b['role']) for b in json.load(sys.stdin).get('bindings',[]) if 'serviceAccount:${OLD_SA}' in b['members']]"); do
+    gcloud artifacts repositories remove-iam-policy-binding "$repo" --project "$OPS" --location "$REGION" \
+      --member "serviceAccount:${OLD_SA}" --role "$role" >/dev/null
+    echo "removed $role on repository $repo"
+  done
 done
-gcloud iam service-accounts disable "$OLD_SA" --project "$OPS" >/dev/null 2>&1 || true
+gcloud iam service-accounts get-iam-policy "$OLD_SA" --project "$OPS" --format=json |
+  python3 -c 'import json,sys; [print(b["role"], m) for b in json.load(sys.stdin).get("bindings",[]) for m in b["members"]]' |
+  while read -r role member; do
+    gcloud iam service-accounts remove-iam-policy-binding "$OLD_SA" --project "$OPS" --role "$role" --member "$member" >/dev/null
+    echo "removed impersonation $role for $member"
+  done
+gcloud iam service-accounts disable "$OLD_SA" --project "$OPS"
+for key in $(gcloud iam service-accounts keys list --iam-account "$OLD_SA" --project "$OPS" --managed-by=user --format='value(name)'); do
+  gcloud iam service-accounts keys disable "$key" --iam-account "$OLD_SA" --project "$OPS"
+done
 
 echo "--- stage 2 verification"
+fail=0
 for p in "${PROJ[@]}" "$OPS"; do
-  roles=$(gcloud projects get-iam-policy "$p" --flatten='bindings[].members' --filter="bindings.members:serviceAccount:${OLD_SA}" --format='value(bindings.role)' | tr '\n' ' ')
-  echo "old SA on ${p}: ${roles:-none}"
+  r=$(gcloud projects get-iam-policy "$p" --flatten='bindings[].members' --filter="bindings.members:serviceAccount:${OLD_SA}" --format='value(bindings.role)')
+  [ -z "$r" ] || { echo "FAIL: old SA still has $r on $p"; fail=1; }
 done
-echo "old shared SA disabled: $(gcloud iam service-accounts describe "$OLD_SA" --project "$OPS" --format='value(disabled)')"
+gcloud storage buckets get-iam-policy "$OLD_BUCKET" --format=json | grep -q "$OLD_SA" && { echo "FAIL: old SA on state bucket"; fail=1; }
+gcloud billing accounts get-iam-policy "$BILLING_ACCOUNT" --format=json | grep -q "$OLD_SA" && { echo "FAIL: old SA on billing"; fail=1; }
+[ -z "$(gcloud iam service-accounts get-iam-policy "$OLD_SA" --project "$OPS" --format='value(bindings)')" ] ||
+  { echo "FAIL: old SA still impersonable"; fail=1; }
+[ "$(gcloud iam service-accounts describe "$OLD_SA" --project "$OPS" --format='value(disabled)')" = "True" ] ||
+  { echo "FAIL: old SA not disabled"; fail=1; }
+[ $fail = 0 ] || { echo "STAGE 2 VERIFICATION FAILED"; exit 1; }
+echo "old shared SA: disabled, no grants, not impersonable"
 echo "STAGE 2 COMPLETE"
