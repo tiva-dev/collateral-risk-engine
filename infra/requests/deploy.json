@@ -1,1 +1,1 @@
-{"environment": "staging", "run_jobs": ["shadow"], "request_backtest": "sbx-us-tsla-concentrated", "note": "deploy, run shadow models, request a backtest, report"}
+{"environment": "staging", "report_only": true, "run_jobs": ["shadow", "backtest-pending"], "note": "shadow models and queued backtests after bar ingestion"}
