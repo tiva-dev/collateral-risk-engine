@@ -22,11 +22,11 @@
       "kind": "backtest",
       "selector": {
         "requested_by": "cli:lifecycle-all",
-        "engine_version_not": "candidate-2026.11.4"
+        "engine_version_not": "candidate-2026.11.5"
       },
       "model_id": "*",
-      "reason": "lifecycle batches of 26 Nov ran candidate versions before 2026.11.4 (simplified executor, terminal headroom, sell-all fallback, suspensions treated as data problems); superseded by candidate-2026.11.4.",
-      "fixed_in": "candidate-2026.11.4"
+      "reason": "lifecycle batches produced by candidate versions before 2026.11.5 (same-session execution, shared market state between passes, unsold collateral marked as recovered, and the earlier defects); superseded by 2026.11.5.",
+      "fixed_in": "candidate-2026.11.5"
     }
   ]
 }

@@ -437,8 +437,11 @@ def candidate_priors(as_of: datetime, extra_bars: dict[str, list[dict[str, Any]]
     return out
 
 
-def candidate_model(inp: ShadowInputs) -> ShadowResult:
-    from app.candidate import CandidateEngine
+def candidate_model(inp: ShadowInputs, overrides: tuple[tuple[str, Any], ...] = (),
+                    model_id: str = "candidate") -> ShadowResult:
+    from dataclasses import replace as _replace
+
+    from app.candidate import CandidateConfig, CandidateEngine
     from app.candidate.engine import data_key
     from app.platform.ingestion import load_bars
 
@@ -446,14 +449,15 @@ def candidate_model(inp: ShadowInputs) -> ShadowResult:
     keys = {data_key(h) for h in inp.holdings if h.asset_type.value != "cash"}
     bars = ({k: inp.bars.get(k, []) for k in keys} if inp.bars is not None
             else {k: load_bars(k, 501) for k in keys})
-    engine = CandidateEngine(priors=candidate_priors(inp.now, inp.bars))
+    engine = CandidateEngine(_replace(CandidateConfig(), **dict(overrides)), priors=candidate_priors(inp.now, inp.bars))
     ev = engine.evaluate(a.account_ref, inp.holdings, a.loan, a.policy, inp.market_data, bars=bars,
                          execution_policy=a.liquidation_execution_policy, interest_policy=a.interest_policy,
                          as_of=inp.now)
     state = ev.margin_state.value
     plan = ev.recovery_plan or {}
     return ShadowResult(
-        model_id="candidate", model_version=ev.model_version, role="candidate",
+        model_id=model_id, model_version=ev.model_version + ("+" + ",".join(k for k, _ in overrides) if overrides else ""),
+        role="candidate",
         collateral_value=ev.portfolio_market_value, loan_balance=ev.current_outstanding_balance,
         approved_credit=ev.approved_credit_limit, available_credit=ev.current_available_credit,
         capacity_ltv=ev.threshold_ltv.get("initial_capacity"), risk_state=state,
@@ -485,6 +489,11 @@ MODELS: dict[str, Callable[[ShadowInputs], ShadowResult]] = {
     "B_gap": _research_model("B_gap", _b_gap),
     "C_balanced": _research_model("C_balanced", _c),
     "candidate": candidate_model,
+    # Research variant (27 Nov review): adaptive headroom, long-run restoration
+    # volatility, concentration add-on, delayed value of suspended instruments.
+    "candidate_combined": lambda inp: candidate_model(
+        inp, (("headroom_mode", "adaptive"), ("restoration_volatility", "long_run"),
+              ("concentration_control", True), ("suspension_value", "delayed")), "candidate_combined"),
 }
 
 
