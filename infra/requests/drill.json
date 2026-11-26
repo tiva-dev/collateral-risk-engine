@@ -1,0 +1,1 @@
+{"environment": "staging", "drills": ["rollback", "load", "security", "dr"], "tf_sa": "terraform", "note": "first drills before the per-environment identity split (old shared identity still bound to terraform-staging)"}

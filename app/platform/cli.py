@@ -81,6 +81,29 @@ def main(argv: list[str]) -> int:
                 except Exception as exc:  # noqa: BLE001 - recorded as failed in the run row
                     done[run_id] = {"error": str(exc)[:300]}
             print(json.dumps(done, default=str)[:6000])
+        elif cmd == "dr-verify":
+            # Compare the live database with a restored clone reached at argv[2].
+            import re as _re
+
+            from app.platform.audit import verify_chain
+
+            clone_url = _re.sub(r"@[^:/]+:", f"@{argv[2]}:", s.database_url, count=1)
+            clone = Database(clone_url)
+            tables = ["tenants", "api_keys", "monitored_accounts", "monitoring_events", "audit_log",
+                      "idempotency_keys", "webhook_deliveries", "market_bars", "shadow_evaluations",
+                      "schema_migrations"]
+            report: dict = {"tables": {}}
+            for name, d in (("live", db), ("clone", clone)):
+                with d.transaction("*") as conn:
+                    for t in tables:
+                        n = conn.fetchone(f"SELECT COUNT(*) AS n FROM {t}")["n"]
+                        report["tables"].setdefault(t, {})[name] = n
+                    latest = conn.fetchone("SELECT MAX(created_at) AS m FROM audit_log")["m"]
+                    report.setdefault("latest_audit_record", {})[name] = str(latest)
+                    tenants = [r["tenant_id"] for r in conn.fetchall("SELECT DISTINCT tenant_id FROM audit_log")]
+                    report.setdefault("audit_chains_valid", {})[name] = {t: verify_chain(t)["valid"] for t in tenants}
+            clone.close()
+            print(json.dumps(report, default=str))
         elif cmd == "shadow":
             from app.platform import shadow
             from app.platform.app import Platform
