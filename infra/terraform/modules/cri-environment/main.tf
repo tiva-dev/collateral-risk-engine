@@ -384,6 +384,17 @@ resource "google_secret_manager_secret" "provider" {
   depends_on = [google_project_service.apis]
 }
 
+# Cloud Run refuses to start a revision whose secret has no version, so each
+# provider secret starts with a placeholder that the sync workflow supersedes.
+resource "google_secret_manager_secret_version" "provider_placeholder" {
+  for_each    = toset(local.provider_secrets)
+  secret      = google_secret_manager_secret.provider[each.value].id
+  secret_data = "UNSET"
+  lifecycle {
+    ignore_changes = [secret_data, enabled]
+  }
+}
+
 resource "google_secret_manager_secret_iam_member" "access" {
   for_each = {
     "api-db"         = ["cri-database-url-app", google_service_account.api.email]
@@ -669,7 +680,12 @@ resource "google_cloud_run_v2_service" "worker" {
     ]
   }
 
-  depends_on = [google_secret_manager_secret_iam_member.access, google_secret_manager_secret_iam_member.provider_access]
+  depends_on = [
+    google_secret_manager_secret_iam_member.access,
+    google_secret_manager_secret_iam_member.provider_access,
+    google_secret_manager_secret_version.generated,
+    google_secret_manager_secret_version.provider_placeholder,
+  ]
 }
 
 resource "google_cloud_run_v2_service_iam_member" "worker_invoker" {
@@ -764,7 +780,7 @@ resource "google_cloud_run_v2_service" "api" {
     ]
   }
 
-  depends_on = [google_secret_manager_secret_iam_member.access]
+  depends_on = [google_secret_manager_secret_iam_member.access, google_secret_manager_secret_version.generated]
 }
 
 # --------------------------------------------------------------- Cloud Run Jobs
@@ -878,7 +894,12 @@ resource "google_cloud_run_v2_job" "jobs" {
     ]
   }
 
-  depends_on = [google_secret_manager_secret_iam_member.access, google_secret_manager_secret_iam_member.provider_access]
+  depends_on = [
+    google_secret_manager_secret_iam_member.access,
+    google_secret_manager_secret_iam_member.provider_access,
+    google_secret_manager_secret_version.generated,
+    google_secret_manager_secret_version.provider_placeholder,
+  ]
 }
 
 # -------------------------------------------------------------- schedules
