@@ -83,7 +83,7 @@ def resolve_destination(url: str, allow_http: bool = False) -> tuple[str, int, l
         infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except OSError as exc:
         raise WebhookError(f"webhook host does not resolve: {host}") from exc
-    addresses = sorted({info[4][0] for info in infos})
+    addresses = sorted({str(info[4][0]) for info in infos})
     if not addresses:
         raise WebhookError("webhook host has no addresses")
     for a in addresses:
