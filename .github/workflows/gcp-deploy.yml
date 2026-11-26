@@ -91,7 +91,9 @@ jobs:
     env:
       ENVIRONMENT: ${{ needs.request.outputs.environment }}
       REGION: europe-west1
-      REPO: europe-west1-docker.pkg.dev/tiva-cri-ops-cda9/cri
+      # Production images live in their own repository (written only by the
+      # production deployer); dev and staging share cri.
+      REPO: europe-west1-docker.pkg.dev/tiva-cri-ops-cda9/${{ needs.request.outputs.environment == 'production' && 'cri-prod' || 'cri' }}
     steps:
       - uses: actions/checkout@v4
       - id: cfg
