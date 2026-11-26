@@ -1,6 +1,12 @@
 name: GCP Terraform
 
 on:
+  # Before these workflows reach the default branch they cannot be dispatched,
+  # so a committed request file triggers them instead. Each run is therefore
+  # tied to a reviewed commit that states exactly what was requested.
+  push:
+    branches-ignore: [main]
+    paths: ["infra/requests/terraform.json"]
   workflow_dispatch:
     inputs:
       environment:
@@ -19,18 +25,40 @@ permissions:
   id-token: write
 
 concurrency:
-  group: terraform-${{ inputs.environment }}
+  group: terraform
   cancel-in-progress: false
 
 jobs:
+  request:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.r.outputs.environment }}
+      action: ${{ steps.r.outputs.action }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            env=$(jq -r .environment infra/requests/terraform.json); act=$(jq -r .action infra/requests/terraform.json)
+          else
+            env="${{ needs.request.outputs.environment }}"; act="${{ inputs.action }}"
+          fi
+          case "$env" in dev|staging|production) ;; *) echo "bad environment"; exit 1;; esac
+          case "$act" in plan|apply) ;; *) echo "bad action"; exit 1;; esac
+          if [ "$env" = "production" ] && [ "$act" = "apply" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::production apply runs only from main"; exit 1
+          fi
+          echo "environment=$env" >> "$GITHUB_OUTPUT"; echo "action=$act" >> "$GITHUB_OUTPUT"
+
   terraform:
+    needs: request
     runs-on: ubuntu-latest
     # The GitHub environment is what Workload Identity Federation trusts.
     # terraform-production carries required reviewers.
-    environment: terraform-${{ inputs.environment }}
+    environment: terraform-${{ needs.request.outputs.environment }}
     defaults:
       run:
-        working-directory: infra/terraform/envs/${{ inputs.environment }}
+        working-directory: infra/terraform/envs/${{ needs.request.outputs.environment }}
     steps:
       - uses: actions/checkout@v4
       - id: ops
@@ -51,8 +79,8 @@ jobs:
             | tee plan.txt
           terraform show -no-color tfplan | grep -E '^\s+# .* will be|^Plan:' | tee summary.txt
       - name: Apply
-        if: inputs.action == 'apply'
+        if: needs.request.outputs.action == 'apply'
         run: terraform apply -input=false -lock-timeout=5m -auto-approve tfplan
       - name: Outputs
-        if: inputs.action == 'apply'
+        if: needs.request.outputs.action == 'apply'
         run: terraform output -json | jq 'del(.[] | select(.sensitive)) | map_values(.value)'

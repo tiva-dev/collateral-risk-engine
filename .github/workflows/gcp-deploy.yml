@@ -12,23 +12,43 @@ on:
         type: boolean
         default: false
   push:
-    branches: [main]
-    paths: ["app/**", "research/**", "requirements.txt", "Dockerfile"]
+    paths: ["infra/requests/deploy.json"]
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: deploy-${{ inputs.environment || 'staging' }}
+  group: deploy
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  request:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment || 'staging' }}
+    outputs:
+      environment: ${{ steps.r.outputs.environment }}
+      seed: ${{ steps.r.outputs.seed }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            env=$(jq -r .environment infra/requests/deploy.json); seed=$(jq -r '.seed_sandbox // false' infra/requests/deploy.json)
+          else
+            env="${{ inputs.environment }}"; seed="${{ inputs.seed_sandbox }}"
+          fi
+          case "$env" in dev|staging|production) ;; *) echo "bad environment"; exit 1;; esac
+          if [ "$env" = "production" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::production deploys run only from main"; exit 1
+          fi
+          echo "environment=$env" >> "$GITHUB_OUTPUT"; echo "seed=$seed" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: request
+    runs-on: ubuntu-latest
+    environment: ${{ needs.request.outputs.environment }}
     env:
-      ENVIRONMENT: ${{ inputs.environment || 'staging' }}
+      ENVIRONMENT: ${{ needs.request.outputs.environment }}
       REGION: europe-west1
       REPO: europe-west1-docker.pkg.dev/tiva-cri-ops-cda9/cri
     steps:
@@ -92,7 +112,7 @@ jobs:
           done
           gcloud run services describe cri-api --project $P --region $REGION --format='value(status.url)'
       - name: Seed sandbox portfolios
-        if: inputs.seed_sandbox
+        if: needs.request.outputs.seed == 'true'
         run: |
           pip install -q httpx
           URL=$(gcloud run services describe cri-api --project ${{ steps.cfg.outputs.project }} --region $REGION --format='value(status.url)')
