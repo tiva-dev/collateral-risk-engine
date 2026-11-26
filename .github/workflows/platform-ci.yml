@@ -44,7 +44,8 @@ jobs:
         run: |
           docker run -d --name cri -p 8080:8080 -e CRI_ENV=local -e CRI_API_KEY_PEPPER=ci \
             -e CRI_DATABASE_URL=sqlite:////tmp/cri.sqlite3 -e CRI_AUTO_MIGRATE=true cri-service:ci
-          for i in $(seq 1 30); do curl -fsS localhost:8080/health && break; sleep 1; done
+          for i in $(seq 1 30); do curl -fsS localhost:8080/health && break; sleep 1; done || true
+          docker logs cri 2>&1 | tail -40
           curl -fsS localhost:8080/ready
           test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/monitoring/accounts)" = "401"
           docker logs cri | tail -20

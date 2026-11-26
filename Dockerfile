@@ -10,7 +10,9 @@ ARG GIT_SHA=unknown
 ENV CRI_GIT_SHA=${GIT_SHA} \
     HISTORICAL_DATA_CACHE_DIR=/tmp/cri-cache \
     CRI_FALLBACK_AUDIT_PATH=/tmp/cri-audit/audit_log.jsonl
-RUN useradd --system --uid 10001 --no-create-home cri && mkdir -p /tmp/cri-cache /tmp/cri-audit && chown -R cri /tmp/cri-cache /tmp/cri-audit
+RUN useradd --system --uid 10001 --no-create-home cri \
+ && mkdir -p /tmp/cri-cache /tmp/cri-audit /service/data/audit \
+ && chown -R cri /tmp/cri-cache /tmp/cri-audit /service/data
 USER 10001
 EXPOSE 8080
 CMD ["sh", "-c", "exec uvicorn app.platform.app:create_app --factory --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers --forwarded-allow-ips='*' --no-server-header"]

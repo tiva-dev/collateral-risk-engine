@@ -291,7 +291,7 @@ def build_router(p: Platform) -> APIRouter:
         with p.db.transaction("*") as conn:
             ep = conn.fetchone("SELECT signing_secret FROM webhook_endpoints WHERE tenant_id=%s AND url=%s AND active=1",
                                (tenant_id, url))
-            valid = bool(ep) and hmac.compare_digest(webhooks.sign(ep["signing_secret"], ts, body), sig)
+            valid = ep is not None and hmac.compare_digest(webhooks.sign(ep["signing_secret"], ts, body), sig)
             try:
                 event_type = json.loads(body).get("type")
             except ValueError:

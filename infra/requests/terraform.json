@@ -1,1 +1,1 @@
-{"environment": "staging", "action": "plan", "note": "first staging plan"}
+{"environment": "staging", "action": "apply", "note": "create staging: 133 resources per plan in run 45789909983"}
