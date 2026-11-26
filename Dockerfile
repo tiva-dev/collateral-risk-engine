@@ -20,7 +20,5 @@ FROM base AS research
 USER root
 RUN pip install "numpy>=1.26"
 COPY research ./research
-COPY data ./data
-RUN chown -R cri /service/research /service/data
 USER 10001
 CMD ["python", "-m", "research.methodology_lab.run_experiments"]

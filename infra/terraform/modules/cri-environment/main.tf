@@ -306,12 +306,12 @@ resource "google_sql_user" "app" {
 }
 
 locals {
-  db_host       = google_sql_database_instance.main.private_ip_address
-  db_url_owner  = "postgresql://cri_owner:${random_password.db_owner.result}@${local.db_host}:5432/cri?sslmode=require"
-  db_url_app    = "postgresql://cri_app:${random_password.db_app.result}@${local.db_host}:5432/cri?sslmode=require"
-  worker_url    = google_cloud_run_v2_service.worker.uri
-  queue_path    = "projects/${var.project_id}/locations/${var.region}/queues/${google_cloud_tasks_queue.webhooks.name}"
-  topic_path    = google_pubsub_topic.market_data.id
+  db_host      = google_sql_database_instance.main.private_ip_address
+  db_url_owner = "postgresql://cri_owner:${random_password.db_owner.result}@${local.db_host}:5432/cri?sslmode=require"
+  db_url_app   = "postgresql://cri_app:${random_password.db_app.result}@${local.db_host}:5432/cri?sslmode=require"
+  worker_url   = google_cloud_run_v2_service.worker.uri
+  queue_path   = "projects/${var.project_id}/locations/${var.region}/queues/${google_cloud_tasks_queue.webhooks.name}"
+  topic_path   = google_pubsub_topic.market_data.id
   common_env = {
     CRI_ENV                 = local.env
     CRI_REGION              = var.region
@@ -619,8 +619,8 @@ resource "google_cloud_run_v2_service" "worker" {
       }
       dynamic "env" {
         for_each = {
-          CRI_DATABASE_URL      = "cri-database-url-app"
-          CRI_API_KEY_PEPPER    = "cri-api-key-pepper"
+          CRI_DATABASE_URL   = "cri-database-url-app"
+          CRI_API_KEY_PEPPER = "cri-api-key-pepper"
         }
         content {
           name = env.key
@@ -777,10 +777,10 @@ locals {
       memory  = "512Mi"
       cpu     = "1"
       secrets = {
-        CRI_DATABASE_URL           = ["generated", "cri-database-url-owner"]
-        CRI_API_KEY_PEPPER         = ["generated", "cri-api-key-pepper"]
-        CRI_BOOTSTRAP_ADMIN_KEY    = ["generated", "cri-admin-api-key"]
-        CRI_BOOTSTRAP_SANDBOX_KEY  = ["generated", "cri-sandbox-api-key"]
+        CRI_DATABASE_URL          = ["generated", "cri-database-url-owner"]
+        CRI_API_KEY_PEPPER        = ["generated", "cri-api-key-pepper"]
+        CRI_BOOTSTRAP_ADMIN_KEY   = ["generated", "cri-admin-api-key"]
+        CRI_BOOTSTRAP_SANDBOX_KEY = ["generated", "cri-sandbox-api-key"]
       }
     }
     "cri-research" = {

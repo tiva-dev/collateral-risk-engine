@@ -317,6 +317,8 @@ class ApiTests(_DbCase):
             out["Idempotency-Key"] = idem
         return out
 
+    _quote_time = datetime.now(UTC).isoformat()
+
     def _account_body(self, ref: str = "acct-1") -> dict:
         return {
             "account_ref": ref,
@@ -329,7 +331,7 @@ class ApiTests(_DbCase):
                                                "currency": "USD", "asset_type": "etf", "local_price": 100.0,
                                                "bid": 99.9, "ask": 100.1, "average_daily_volume": 1000000,
                                                "volatility_30d": 0.15,
-                                               "timestamp": datetime.now(UTC).isoformat()}},
+                                               "timestamp": self._quote_time}},
         }
 
     def test_authentication_and_internal_route_isolation(self) -> None:

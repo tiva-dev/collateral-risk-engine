@@ -46,7 +46,7 @@ def append_audit(action: str, payload: dict[str, Any], *, tenant_id: str | None 
     who = actor or (principal.actor if principal else "system")
     conn.advisory_lock(f"audit:{tenant}")
     last = conn.fetchone(
-        "SELECT record_hash FROM audit_log WHERE tenant_id = %s ORDER BY seq DESC LIMIT 1 FOR UPDATE",
+        "SELECT record_hash FROM audit_log WHERE tenant_id = %s ORDER BY seq DESC LIMIT 1",
         (tenant,),
     )
     prev = last["record_hash"] if last else GENESIS
