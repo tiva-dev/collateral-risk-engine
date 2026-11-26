@@ -96,7 +96,8 @@ def main(argv: list[str]) -> int:
             for name, d in (("live", db), ("clone", clone)):
                 with d.transaction("*") as conn:
                     for t in tables:
-                        row = conn.fetchone(f"SELECT COUNT(*) AS n FROM {t}")
+                        # Table names come from the fixed list above, never from input.
+                        row = conn.fetchone(f"SELECT COUNT(*) AS n FROM {t}")  # nosec B608
                         n = row["n"] if row else None
                         report["tables"].setdefault(t, {})[name] = n
                     mrow = conn.fetchone("SELECT MAX(created_at) AS m FROM audit_log")
