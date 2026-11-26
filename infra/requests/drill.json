@@ -1,1 +1,1 @@
-{"environment": "staging", "drills": ["security", "dr"], "tf_sa": "terraform", "note": "DR drill with clone cleanup and job logs; security checks"}
+{"environment": "staging", "drills": ["rollback", "load", "security", "dr"], "tf_sa": "terraform", "note": "full drill set with evidence recorded in the platform"}
