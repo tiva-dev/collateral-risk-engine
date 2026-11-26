@@ -233,10 +233,23 @@ END $$;
 """
 
 
+_M4 = """
+CREATE TABLE IF NOT EXISTS sandbox_webhook_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  delivery_id TEXT NOT NULL,
+  signature_valid INTEGER NOT NULL,
+  received_at {TS} NOT NULL,
+  event_type TEXT
+);
+"""
+
 MIGRATIONS: list[tuple[int, str, dict[str, str]]] = [
     (1, "initial platform schema", {"postgres": _M1, "sqlite": _M1}),
     (2, "append-only audit and row-level security", {"postgres": _M2_POSTGRES + _rls_statements(), "sqlite": ""}),
     (3, "application role grants", {"postgres": _grants(), "sqlite": ""}),
+    (4, "sandbox webhook receiver", {"postgres": _M4 + _grants(), "sqlite": _M4}),
 ]
 
 

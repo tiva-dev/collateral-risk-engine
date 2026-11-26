@@ -1,0 +1,58 @@
+name: GCP Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: dev | staging | production
+        required: true
+        type: choice
+        options: [dev, staging, production]
+      action:
+        description: plan only, or plan and apply
+        required: true
+        type: choice
+        options: [plan, apply]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    # The GitHub environment is what Workload Identity Federation trusts.
+    # terraform-production carries required reviewers.
+    environment: terraform-${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: infra/terraform/envs/${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ops
+        working-directory: .
+        run: echo "number=$(cat infra/terraform/OPS_PROJECT_NUMBER)" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ steps.ops.outputs.number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: terraform@tiva-cri-ops-cda9.iam.gserviceaccount.com
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - run: terraform init -input=false
+      - name: Plan
+        run: |
+          terraform plan -input=false -lock-timeout=5m -no-color -out=tfplan \
+            -var "wif_pool_name=projects/${{ steps.ops.outputs.number }}/locations/global/workloadIdentityPools/github" \
+            | tee plan.txt
+          terraform show -no-color tfplan | grep -E '^\s+# .* will be|^Plan:' | tee summary.txt
+      - name: Apply
+        if: inputs.action == 'apply'
+        run: terraform apply -input=false -lock-timeout=5m -auto-approve tfplan
+      - name: Outputs
+        if: inputs.action == 'apply'
+        run: terraform output -json | jq 'del(.[] | select(.sensitive)) | map_values(.value)'

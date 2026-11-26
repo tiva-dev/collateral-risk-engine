@@ -1,0 +1,101 @@
+name: GCP Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        options: [dev, staging, production]
+      seed_sandbox:
+        description: register or refresh the sandbox test portfolios after deploying (staging)
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ["app/**", "research/**", "requirements.txt", "Dockerfile"]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'staging' }}
+    env:
+      ENVIRONMENT: ${{ inputs.environment || 'staging' }}
+      REGION: europe-west1
+      REPO: europe-west1-docker.pkg.dev/tiva-cri-ops-cda9/cri
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          case "$ENVIRONMENT" in
+            dev) p=tiva-cri-dev-cda9;; staging) p=tiva-cri-stg-cda9;; production) p=tiva-cri-prd-cda9;;
+          esac
+          echo "project=$p" >> "$GITHUB_OUTPUT"
+          echo "ops_number=$(cat infra/terraform/OPS_PROJECT_NUMBER)" >> "$GITHUB_OUTPUT"
+          echo "tag=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ steps.cfg.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: cri-deployer@${{ steps.cfg.outputs.project }}.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Build and push images
+        run: |
+          gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+          T=${{ steps.cfg.outputs.tag }}
+          docker build --target base --build-arg GIT_SHA=$T -t $REPO/cri-service:$T .
+          docker build --target research --build-arg GIT_SHA=$T -t $REPO/cri-research:$T .
+          docker push $REPO/cri-service:$T
+          docker push $REPO/cri-research:$T
+          echo "SERVICE_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' $REPO/cri-service:$T)" >> "$GITHUB_ENV"
+          echo "RESEARCH_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' $REPO/cri-research:$T)" >> "$GITHUB_ENV"
+      - name: Migrate database (owner role, Cloud Run job)
+        run: |
+          P=${{ steps.cfg.outputs.project }}
+          gcloud run jobs update cri-migrate --project $P --region $REGION --image "$SERVICE_IMAGE" --quiet
+          gcloud run jobs execute cri-migrate --project $P --region $REGION --wait
+          for j in cri-research cri-backtest; do
+            gcloud run jobs update $j --project $P --region $REGION --image "$RESEARCH_IMAGE" --quiet
+          done
+      - name: Deploy new revisions without traffic
+        run: |
+          P=${{ steps.cfg.outputs.project }}; T=r-${{ steps.cfg.outputs.tag }}
+          for s in cri-worker cri-api; do
+            gcloud run deploy $s --project $P --region $REGION --image "$SERVICE_IMAGE" \
+              --no-traffic --tag $T --update-env-vars CRI_GIT_SHA=${{ steps.cfg.outputs.tag }} --quiet
+          done
+          echo "CANDIDATE_URL=$(gcloud run services describe cri-api --project $P --region $REGION \
+            --format=json | jq -r --arg t "$T" '.status.traffic[] | select(.tag==$t) | .url')" >> "$GITHUB_ENV"
+      - name: Smoke test candidate
+        run: |
+          set -euo pipefail
+          curl -fsS "$CANDIDATE_URL/health" | tee /dev/stderr | jq -e '.status=="ok"'
+          curl -fsS "$CANDIDATE_URL/ready" | tee /dev/stderr | jq -e '.status=="ready"'
+          KEY=$(gcloud secrets versions access latest --secret cri-sandbox-api-key --project ${{ steps.cfg.outputs.project }})
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$CANDIDATE_URL/monitoring/accounts")
+          test "$code" = "401"
+          curl -fsS -H "Authorization: Bearer $KEY" "$CANDIDATE_URL/platform/whoami" | jq -e '.tenant_id=="tiva-sandbox"'
+          curl -fsS -H "Authorization: Bearer $KEY" "$CANDIDATE_URL/platform/controls" | tee /dev/stderr \
+            | jq -e '.controls.lending_enabled==false and .controls.liquidation_execution_enabled==false'
+      - name: Shift traffic to candidate
+        run: |
+          P=${{ steps.cfg.outputs.project }}; T=r-${{ steps.cfg.outputs.tag }}
+          for s in cri-worker cri-api; do
+            gcloud run services update-traffic $s --project $P --region $REGION --to-tags $T=100 --quiet
+          done
+          gcloud run services describe cri-api --project $P --region $REGION --format='value(status.url)'
+      - name: Seed sandbox portfolios
+        if: inputs.seed_sandbox
+        run: |
+          pip install -q httpx
+          URL=$(gcloud run services describe cri-api --project ${{ steps.cfg.outputs.project }} --region $REGION --format='value(status.url)')
+          KEY=$(gcloud secrets versions access latest --secret cri-sandbox-api-key --project ${{ steps.cfg.outputs.project }})
+          ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project ${{ steps.cfg.outputs.project }})
+          python infra/scripts/seed_sandbox.py --url "$URL" --key "$KEY" --admin-key "$ADMIN"

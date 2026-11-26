@@ -1,0 +1,43 @@
+name: GCP Research job
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        options: [dev, staging]
+      job:
+        required: true
+        type: choice
+        options: [cri-research, cri-backtest]
+      args:
+        description: arguments, comma-separated (e.g. --market,NGX)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          case "${{ inputs.environment }}" in dev) p=tiva-cri-dev-cda9;; staging) p=tiva-cri-stg-cda9;; esac
+          echo "project=$p" >> "$GITHUB_OUTPUT"
+          echo "ops_number=$(cat infra/terraform/OPS_PROJECT_NUMBER)" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ steps.cfg.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: cri-deployer@${{ steps.cfg.outputs.project }}.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: |
+          extra=()
+          if [ -n "${{ inputs.args }}" ]; then extra=(--args "${{ inputs.args }}"); fi
+          gcloud run jobs execute ${{ inputs.job }} --project ${{ steps.cfg.outputs.project }} \
+            --region europe-west1 --wait "${extra[@]}"

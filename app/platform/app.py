@@ -9,6 +9,7 @@ Pub/Sub invoke through Cloud Run IAM.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -73,6 +74,9 @@ class PlatformMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         s = self.p.settings
         if path in PUBLIC_PATHS:
+            return await call_next(request)
+        if path.startswith("/sandbox/webhook-receiver/") and s.role == "api" and s.environment != "production":
+            # Signature-verified test receiver; authentication is the HMAC signature.
             return await call_next(request)
         is_internal = path.startswith("/internal/")
         if s.role == "worker":
@@ -276,6 +280,39 @@ def build_router(p: Platform) -> APIRouter:
         return {"status": "ready", "schema_version": version["v"] if version else None,
                 "environment": p.settings.environment, "role": p.settings.role}
 
+    @r.post("/sandbox/webhook-receiver/{tenant_id}")
+    async def sandbox_receiver(tenant_id: str, request: Request) -> dict[str, Any]:
+        if p.settings.environment == "production":
+            raise HTTPException(404, "not found")
+        body = await request.body()
+        ts = request.headers.get("x-cri-timestamp", "")
+        sig = request.headers.get("x-cri-signature", "")
+        url = str(request.url).split("?")[0].replace("http://", "https://", 1)
+        with p.db.transaction("*") as conn:
+            ep = conn.fetchone("SELECT signing_secret FROM webhook_endpoints WHERE tenant_id=%s AND url=%s AND active=1",
+                               (tenant_id, url))
+            valid = bool(ep) and hmac.compare_digest(webhooks.sign(ep["signing_secret"], ts, body), sig)
+            try:
+                event_type = json.loads(body).get("type")
+            except ValueError:
+                event_type = None
+            conn.execute(
+                "INSERT INTO sandbox_webhook_receipts (receipt_id, tenant_id, event_id, delivery_id, signature_valid, "
+                "received_at, event_type) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                ("rcpt_" + uuid.uuid4().hex[:16], tenant_id, request.headers.get("x-cri-event-id", ""),
+                 request.headers.get("x-cri-delivery-id", ""), 1 if valid else 0, datetime.now(UTC).isoformat(),
+                 event_type))
+        if not valid:
+            raise HTTPException(401, "invalid signature")
+        return {"received": True}
+
+    @r.get("/sandbox/webhook-receipts")
+    def sandbox_receipts(limit: int = 50) -> dict[str, Any]:
+        rows = current_connection().fetchall(
+            "SELECT event_id, delivery_id, event_type, signature_valid, received_at FROM sandbox_webhook_receipts "
+            "WHERE tenant_id=%s ORDER BY received_at DESC LIMIT %s", (require_principal().tenant_id, min(limit, 500)))
+        return {"receipts": rows}
+
     @r.get("/platform/whoami")
     def whoami() -> dict[str, Any]:
         pr = require_principal()
@@ -471,8 +508,12 @@ def build_router(p: Platform) -> APIRouter:
             "webhook_backlog": conn.fetchall("SELECT status, COUNT(*) AS n FROM webhook_deliveries GROUP BY status"),
             "accounts_by_state": conn.fetchall("SELECT tenant_id, margin_state, COUNT(*) AS n FROM monitored_accounts "
                                                "GROUP BY tenant_id, margin_state ORDER BY tenant_id"),
-            "latest_quotes": conn.fetchall("SELECT stable_key, observed_at, source, ingested_at FROM market_quotes "
-                                           "WHERE quote_key = stable_key ORDER BY stable_key"),
+            "latest_quotes": [
+                {"stable_key": q["stable_key"], "price": json.loads(q["quote"])["f"]["local_price"],
+                 "observed_at": q["observed_at"], "source": q["source"], "ingested_at": q["ingested_at"]}
+                for q in conn.fetchall("SELECT stable_key, quote, observed_at, source, ingested_at FROM market_quotes "
+                                       "WHERE quote_key = stable_key ORDER BY stable_key")
+            ],
         }
 
     return r
