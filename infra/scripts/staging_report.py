@@ -73,6 +73,7 @@ def main() -> None:
     out["onboarding"] = {k: {"decision": v["decision"], "findings": v["findings"]}
                          for k, v in c.get("/admin/markets/onboarding", headers=ad).json().get("markets", {}).items()}
     out["console_status"] = c.get("/console/").status_code
+    out["drills"] = c.get("/admin/drills?limit=20", headers=ad).json().get("drills", [])
     unauth = c.get("/monitoring/accounts").status_code
     cross = c.get("/admin/tenants", headers=sb).status_code
     lend = c.put("/admin/controls/lending_enabled", headers={**ad, "Idempotency-Key": "report-lending-probe"},

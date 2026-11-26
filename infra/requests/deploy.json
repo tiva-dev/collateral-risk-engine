@@ -1,1 +1,1 @@
-{"environment": "staging", "run_jobs": ["shadow"], "note": "deploy drill evidence recording (migration 6) and Control Centre drill view"}
+{"environment": "staging", "report_only": true, "note": "final verification report"}
