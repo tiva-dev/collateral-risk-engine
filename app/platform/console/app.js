@@ -405,30 +405,56 @@ async function renderInfra() {
 }
 
 // ---------------------------------------------------------------- session
-async function start() {
-  S.who = await api("/platform/whoami");
+function showLogin(message) {
+  $("shell").hidden = true; $("login").hidden = false;
+  $("main").replaceChildren();
+  $("login-error").textContent = message || "";
+  $("login-key").value = ""; $("login-key").focus();
+  window.scrollTo(0, 0);
+}
+
+function showApp() {
   $("login").hidden = true; $("shell").hidden = false;
+  $("login-key").value = ""; $("login-error").textContent = "";
+  window.scrollTo(0, 0);
+}
+
+async function start() {
+  // Authenticate and load the session before revealing the application, so a
+  // failure leaves the login screen in place and nothing renders underneath it.
+  const who = await api("/platform/whoami");
+  const c = await api("/platform/controls");
+  let tenants = null;
+  if (who.role === "admin") tenants = (await api("/admin/tenants")).tenants || [];
+  S.who = who;
   $("env").textContent = S.who.environment;
   $("who").textContent = `${S.who.role} · ${S.who.tenant_id}`;
-  const c = await api("/platform/controls");
   $("safety").textContent = (!c.controls.lending_enabled && !c.controls.liquidation_execution_enabled)
     ? "Lending disabled · liquidation advisory only" : "Warning: lending or execution enabled";
-  if (S.who.role === "admin") {
-    const t = (await api("/admin/tenants")).tenants || [];
-    const sel = $("tenant-select"); sel.hidden = false;
-    sel.replaceChildren(...t.filter((x) => x.kind !== "internal").map((x) => h("option", { value: x.tenant_id }, x.tenant_id)));
-    S.tenant = sessionStorage.getItem("cri_tenant") || (t.find((x) => x.kind === "sandbox") || t[0] || {}).tenant_id;
+  const sel = $("tenant-select");
+  if (tenants) {
+    sel.hidden = false;
+    sel.replaceChildren(...tenants.filter((x) => x.kind !== "internal").map((x) => h("option", { value: x.tenant_id }, x.tenant_id)));
+    S.tenant = sessionStorage.getItem("cri_tenant") || (tenants.find((x) => x.kind === "sandbox") || tenants[0] || {}).tenant_id;
     sel.value = S.tenant; sel.onchange = () => { S.tenant = sel.value; sessionStorage.setItem("cri_tenant", S.tenant); S.account = null; go(S.tab); };
-  }
+  } else { sel.hidden = true; S.tenant = null; }
+  showApp();
   go("overview");
 }
 
 document.addEventListener("DOMContentLoaded", () => {
   $("login-form").addEventListener("submit", async (e) => {
     e.preventDefault(); S.key = $("login-key").value.trim(); $("login-error").textContent = "";
-    try { await start(); sessionStorage.setItem("cri_key", S.key); } catch (err) { $("login-error").textContent = err.message; S.key = null; }
+    try { await start(); sessionStorage.setItem("cri_key", S.key); }
+    catch (err) { S.key = null; S.who = null; showLogin(err.message || "Sign-in failed"); }
   });
-  $("logout").addEventListener("click", () => { sessionStorage.clear(); location.reload(); });
+  $("logout").addEventListener("click", () => {
+    sessionStorage.clear(); S.key = null; S.who = null; S.tenant = null; S.account = null;
+    showLogin("Signed out.");
+  });
   const saved = sessionStorage.getItem("cri_key");
-  if (saved) { S.key = saved; start().catch(() => { sessionStorage.clear(); }); }
+  if (saved) {
+    S.key = saved;
+    start().catch(() => { sessionStorage.clear(); S.key = null; showLogin("Session expired. Sign in again."); });
+  }
 });

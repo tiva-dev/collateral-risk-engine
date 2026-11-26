@@ -63,3 +63,14 @@ jobs:
           for e in dev staging production; do
             (cd infra/terraform/envs/$e && terraform init -backend=false -input=false >/dev/null && terraform validate)
           done
+
+  console-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install playwright==1.48.0
+      - name: Control Centre session flow (headless Chrome, desktop and mobile)
+        run: python infra/scripts/console_browser_check.py
