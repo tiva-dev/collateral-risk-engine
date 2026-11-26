@@ -59,24 +59,25 @@ jobs:
         run: |
           set -euo pipefail
           URL=$(gcloud run services describe cri-api --project $P --region $REGION --format='value(status.url)')
-          for s in cri-api cri-worker; do
-            serving=$(gcloud run services describe $s --project $P --region $REGION --format=json | jq -r '[.status.traffic[]|select(.percent==100)][0].revisionName')
-            prev=$(gcloud run revisions list --service $s --project $P --region $REGION --sort-by=~metadata.creationTimestamp \
-                   --format='value(metadata.name)' | grep -A1 -x "$serving" | tail -1)
-            echo "$s serving=$serving previous=$prev"
-            echo "${s}_serving=$serving" >> $GITHUB_ENV; echo "${s}_prev=$prev" >> $GITHUB_ENV
-          done
+          serving=$(gcloud run services describe cri-api --project $P --region $REGION --format=json | jq -r '[.status.traffic[]|select(.percent==100)][0].revisionName')
+          prev=$(gcloud run revisions list --service cri-api --project $P --region $REGION --sort-by=~metadata.creationTimestamp \
+                 --format='value(metadata.name)' | grep -A1 -x "$serving" | tail -1)
+          echo "cri-api serving=$serving previous=$prev"
           before=$(curl -fsS $URL/health | jq -r .git_sha)
           t0=$(date +%s)
-          gcloud run services update-traffic cri-api --project $P --region $REGION --to-revisions "${cri_api_prev:-$(echo)}=100" --quiet 2>/dev/null || \
-            gcloud run services update-traffic cri-api --project $P --region $REGION --to-revisions "$(printenv cri-api_prev)=100" --quiet
+          gcloud run services update-traffic cri-api --project $P --region $REGION --to-revisions "$prev=100" --quiet
           t1=$(date +%s)
-          for i in $(seq 1 30); do rb=$(curl -fsS $URL/health | jq -r .git_sha) && [ "$rb" != "$before" ] && break; sleep 2; done
+          rb="$before"
+          for i in $(seq 1 30); do rb=$(curl -fsS $URL/health | jq -r .git_sha); [ "$rb" != "$before" ] && break; sleep 2; done
+          t1b=$(date +%s)
           ready=$(curl -fsS $URL/ready | jq -r .status)
-          gcloud run services update-traffic cri-api --project $P --region $REGION --to-latest --quiet
           t2=$(date +%s)
-          for i in $(seq 1 30); do after=$(curl -fsS $URL/health | jq -r .git_sha) && [ "$after" = "$before" ] && break; sleep 2; done
-          echo "ROLLBACK_RESULT {\"serving_before\":\"$before\",\"after_rollback\":\"$rb\",\"ready_after_rollback\":\"$ready\",\"rollback_seconds\":$((t1-t0)),\"roll_forward_seconds\":$(( $(date +%s)-t2 )),\"after_roll_forward\":\"$after\"}"
+          gcloud run services update-traffic cri-api --project $P --region $REGION --to-revisions "$serving=100" --quiet
+          after=""
+          for i in $(seq 1 30); do after=$(curl -fsS $URL/health | jq -r .git_sha); [ "$after" = "$before" ] && break; sleep 2; done
+          t3=$(date +%s)
+          echo "ROLLBACK_RESULT {\"revision_before\":\"$serving\",\"rolled_back_to\":\"$prev\",\"sha_before\":\"$before\",\"sha_after_rollback\":\"$rb\",\"ready_after_rollback\":\"$ready\",\"rollback_command_s\":$((t1-t0)),\"rollback_observed_s\":$((t1b-t0)),\"roll_forward_s\":$((t3-t2)),\"sha_after_roll_forward\":\"$after\"}"
+          test "$rb" != "$before" && test "$ready" = "ready" && test "$after" = "$before"
       - name: Load test
         if: contains(fromJSON(needs.request.outputs.drills), 'load')
         run: |
