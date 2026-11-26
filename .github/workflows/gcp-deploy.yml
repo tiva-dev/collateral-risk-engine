@@ -28,15 +28,18 @@ jobs:
     outputs:
       environment: ${{ steps.r.outputs.environment }}
       seed: ${{ steps.r.outputs.seed }}
+      sync: ${{ steps.r.outputs.sync }}
     steps:
       - uses: actions/checkout@v4
       - id: r
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             env=$(jq -r .environment infra/requests/deploy.json); seed=$(jq -r '.seed_sandbox // false' infra/requests/deploy.json)
+            sync=$(jq -r '.sync_provider_secrets // false' infra/requests/deploy.json)
           else
-            env="${{ inputs.environment }}"; seed="${{ inputs.seed_sandbox }}"
+            env="${{ inputs.environment }}"; seed="${{ inputs.seed_sandbox }}"; sync=false
           fi
+          echo "sync=$sync" >> "$GITHUB_OUTPUT"
           case "$env" in dev|staging|production) ;; *) echo "bad environment"; exit 1;; esac
           if [ "$env" = "production" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
             echo "::error::production deploys run only from main"; exit 1
@@ -66,6 +69,21 @@ jobs:
           workload_identity_provider: projects/${{ steps.cfg.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
           service_account: cri-deployer@${{ steps.cfg.outputs.project }}.iam.gserviceaccount.com
       - uses: google-github-actions/setup-gcloud@v2
+      - name: Sync provider secrets from GitHub secrets (values never printed)
+        if: needs.request.outputs.sync == 'true'
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          NGNMARKET_API_KEY: ${{ secrets.NGNMARKET_API_KEY }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+        run: |
+          for pair in alpaca-api-key:ALPACA_API_KEY alpaca-secret-key:ALPACA_SECRET_KEY \
+                      ngnmarket-api-key:NGNMARKET_API_KEY alpha-vantage-api-key:ALPHA_VANTAGE_API_KEY; do
+            name=${pair%%:*}; var=${pair##*:}
+            if [ -z "${!var}" ]; then echo "::warning::$var is empty; skipped"; continue; fi
+            printf '%s' "${!var}" | gcloud secrets versions add "$name" --project "${{ steps.cfg.outputs.project }}" --data-file=- >/dev/null
+            echo "$name: new version added"
+          done
       - name: Build and push images
         run: |
           gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
