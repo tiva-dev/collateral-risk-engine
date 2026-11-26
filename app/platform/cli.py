@@ -81,6 +81,36 @@ def main(argv: list[str]) -> int:
                 except Exception as exc:  # noqa: BLE001 - recorded as failed in the run row
                     done[run_id] = {"error": str(exc)[:300]}
             print(json.dumps(done, default=str)[:6000])
+        elif cmd == "lifecycle-all":
+            # Queue and run a lifecycle validation for every active account.
+            import uuid as _uuid
+            from datetime import UTC, datetime
+
+            from app.platform import backtest
+            from app.platform.app import Platform
+
+            platform = Platform(s, db)
+            every = int(argv[2]) if len(argv) > 2 else 10
+            with db.transaction("*") as conn:
+                accounts = conn.fetchall("SELECT tenant_id, account_ref FROM monitored_accounts "
+                                         "WHERE monitoring_status='active' ORDER BY tenant_id, account_ref")
+                ids = []
+                for a in accounts:
+                    rid = "btr_" + _uuid.uuid4().hex[:16]
+                    conn.execute(
+                        "INSERT INTO backtest_runs (run_id, tenant_id, account_ref, requested_by, models, params, "
+                        "status, created_at) VALUES (%s,%s,%s,'cli:lifecycle-all',%s,%s,'queued',%s)",
+                        (rid, a["tenant_id"], a["account_ref"], json.dumps(["candidate"]),
+                         json.dumps({"kind": "lifecycle", "term_sessions": 63, "every": every,
+                                     "cure_probability": 0.5}), datetime.now(UTC).isoformat()))
+                    ids.append(rid)
+            done = {}
+            for rid in ids:
+                try:
+                    done[rid] = backtest.run(db, platform.services, rid)["variants"]
+                except Exception as exc:  # noqa: BLE001 - recorded as failed in the run row
+                    done[rid] = {"error": str(exc)[:300]}
+            print(json.dumps(done, default=str)[:8000])
         elif cmd == "dr-verify":
             # Compare the live database with a restored clone reached at argv[2].
             import re as _re

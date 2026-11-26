@@ -17,6 +17,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  checks: read
 
 concurrency:
   group: deploy
@@ -50,8 +51,41 @@ jobs:
           fi
           echo "environment=$env" >> "$GITHUB_OUTPUT"; echo "seed=$seed" >> "$GITHUB_OUTPUT"
 
-  deploy:
+  # Deploy only a commit whose applicable test suites succeeded. Both suites run
+  # on every push of a deploy request (CI on all pushes; Platform CI on infra/**).
+  tests-passed:
     needs: request
+    if: needs.request.outputs.report_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          required="quality-gates postgres"
+          for i in $(seq 1 80); do
+            gh api "repos/${{ github.repository }}/commits/$SHA/check-runs?per_page=100" > runs.json
+            pending=0; failed=0
+            for name in $required; do
+              c=$(jq -r --arg n "$name" '[.check_runs[] | select(.name==$n)] | sort_by(.started_at) | last | .conclusion // "pending"' runs.json)
+              s=$(jq -r --arg n "$name" '[.check_runs[] | select(.name==$n)] | sort_by(.started_at) | last | .status // "missing"' runs.json)
+              echo "$name: status=$s conclusion=$c"
+              if [ "$s" != "completed" ]; then pending=1; elif [ "$c" != "success" ]; then failed=1; fi
+            done
+            if [ $failed = 1 ]; then echo "::error::required checks failed for $SHA; not deploying"; exit 1; fi
+            if [ $pending = 0 ]; then
+              jq -c --arg r "$required" '[.check_runs[] | select(.name as $n | ($r | split(" ")) | index($n)) | {name, conclusion, html_url, head_sha}]' runs.json | tee checks.json
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::required checks did not complete in time for $SHA"; exit 1
+
+  deploy:
+    needs: [request, tests-passed]
+    if: always() && needs.request.result == 'success' && (needs.tests-passed.result == 'success' || needs.request.outputs.report_only == 'true')
     runs-on: ubuntu-latest
     environment: ${{ needs.request.outputs.environment }}
     env:
@@ -93,8 +127,9 @@ jobs:
         run: |
           gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
           T=${{ steps.cfg.outputs.tag }}
-          docker build --target base --build-arg GIT_SHA=$T -t $REPO/cri-service:$T .
-          docker build --target research --build-arg GIT_SHA=$T -t $REPO/cri-research:$T .
+          L="--label org.opencontainers.image.revision=${{ github.sha }} --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
+          docker build --target base --build-arg GIT_SHA=$T $L -t $REPO/cri-service:$T .
+          docker build --target research --build-arg GIT_SHA=$T $L -t $REPO/cri-research:$T .
           docker push $REPO/cri-service:$T
           docker push $REPO/cri-research:$T
           echo "SERVICE_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' $REPO/cri-service:$T)" >> "$GITHUB_ENV"
@@ -114,7 +149,8 @@ jobs:
           P=${{ steps.cfg.outputs.project }}; T=r-${{ steps.cfg.outputs.tag }}
           for s in cri-worker cri-api; do
             gcloud run deploy $s --project $P --region $REGION --image "$SERVICE_IMAGE" \
-              --no-traffic --tag $T --update-env-vars CRI_GIT_SHA=${{ steps.cfg.outputs.tag }} --quiet
+              --no-traffic --tag $T --update-env-vars CRI_GIT_SHA=${{ steps.cfg.outputs.tag }} \
+              --update-labels commit-sha=${{ github.sha }},ci-verified=true --quiet
           done
           echo "CANDIDATE_URL=$(gcloud run services describe cri-api --project $P --region $REGION \
             --format=json | jq -r --arg t "$T" '.status.traffic[] | select(.tag==$t) | .url')" >> "$GITHUB_ENV"
@@ -130,6 +166,23 @@ jobs:
           curl -fsS -H "Authorization: Bearer $KEY" "$CANDIDATE_URL/platform/whoami" | jq -e '.tenant_id=="tiva-sandbox"'
           curl -fsS -H "Authorization: Bearer $KEY" "$CANDIDATE_URL/platform/controls" | tee /dev/stderr \
             | jq -e '.controls.lending_enabled==false and .controls.liquidation_execution_enabled==false'
+      - name: Verify provenance before shifting traffic
+        if: needs.request.outputs.report_only != 'true'
+        run: |
+          set -euo pipefail
+          P=${{ steps.cfg.outputs.project }}; T=r-${{ steps.cfg.outputs.tag }}
+          # The tagged revision must run the digest built from this commit.
+          for s in cri-worker cri-api; do
+            rev=$(gcloud run services describe $s --project $P --region $REGION --format=json \
+              | jq -r --arg t "$T" '.status.traffic[] | select(.tag==$t) | .revisionName')
+            img=$(gcloud run revisions describe "$rev" --project $P --region $REGION --format='value(spec.containers[0].image)')
+            sha=$(gcloud run revisions describe "$rev" --project $P --region $REGION --format='value(metadata.labels.commit-sha)')
+            echo "$s $rev $img $sha"
+            test "$img" = "$SERVICE_IMAGE" && test "$sha" = "${{ github.sha }}"
+          done
+          rev_label=$(gcloud artifacts docker images describe "$SERVICE_IMAGE" --format=json \
+            | jq -r '.image_summary.digest // empty' || true)
+          echo "service digest ${rev_label:-unverified}"
       - name: Shift traffic to candidate
         if: needs.request.outputs.report_only != 'true'
         run: |
@@ -152,7 +205,7 @@ jobs:
           P=${{ steps.cfg.outputs.project }}
           for cmd in $(echo '${{ needs.request.outputs.jobs }}' | jq -r '.[]'); do
             echo "== $cmd"
-            gcloud run jobs execute cri-migrate --project $P --region $REGION --wait \
+            gcloud run jobs execute cri-migrate --project $P --region $REGION --wait --task-timeout=3600s \
               --args="-m,app.platform.cli,$cmd"
           done
       - name: Operational report

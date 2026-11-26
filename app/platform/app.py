@@ -17,7 +17,7 @@ import math
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -300,6 +300,12 @@ class BacktestCreate(BaseModel):
     account_ref: str
     models: list[str] | None = None
     step: int = Field(default=5, ge=1, le=21)
+    # decision: decision replay of each model on past dates for a fixed loan.
+    # lifecycle: matched loans run to maturity under each intervention variant.
+    kind: Literal["decision", "lifecycle"] = "decision"
+    term_sessions: int = Field(default=63, ge=10, le=252)
+    every: int = Field(default=10, ge=1, le=63)
+    cure_probability: float = Field(default=0.5, ge=0, le=1)
 
 
 class PolicyCreate(BaseModel):
@@ -533,7 +539,10 @@ def build_router(p: Platform) -> APIRouter:
         current_connection().execute(
             "INSERT INTO backtest_runs (run_id, tenant_id, account_ref, requested_by, models, params, status, "
             "created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued',%s)",
-            (run_id, pr.tenant_id, req.account_ref, pr.actor, json.dumps(models), json.dumps({"step": req.step}),
+            (run_id, pr.tenant_id, req.account_ref, pr.actor, json.dumps(models),
+             json.dumps({"step": req.step} if req.kind == "decision" else
+                        {"kind": "lifecycle", "term_sessions": req.term_sessions, "every": req.every,
+                         "cure_probability": req.cure_probability}),
              datetime.now(UTC).isoformat()))
         append_audit("backtest_requested", {"run_id": run_id, "account_ref": req.account_ref, "models": models})
         execution = None
