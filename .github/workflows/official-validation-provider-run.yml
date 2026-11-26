@@ -21,6 +21,12 @@ on:
         default: "all"
         type: choice
         options: ["alpaca", "ngnmarket", "alpha_vantage", "cbn", "all"]
+      data_feed:
+        description: "Alpaca feed: iex (IEX venue, from mid-2020) or sip (consolidated, from 2016 on the existing plan)"
+        required: false
+        default: "iex"
+        type: choice
+        options: ["iex", "sip"]
       start_date:
         description: "Dataset start date"
         required: true
@@ -58,7 +64,7 @@ jobs:
     env:
       ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
       ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-      ALPACA_DATA_FEED: "iex"
+      ALPACA_DATA_FEED: ${{ inputs.data_feed || 'iex' }}
       ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
       NGNMARKET_API_KEY: ${{ secrets.NGNMARKET_API_KEY }}
       NGNMARKET_MONTHLY_CALL_BUDGET: "3000"
