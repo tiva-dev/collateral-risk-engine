@@ -1,1 +1,1 @@
-{"note": "NGX full rerun, candidate-2026.11.6", "source_run_id": "45681534542", "parts": ["hist-NGX", "sim-NGX", "frontier-NGX", "repay-NGX", "sens-NGX"]}
+{"note": "US full rerun on the SIP 2018-2026 dataset, candidate-2026.11.6", "source_run_id": "45873299276", "parts": ["hist-US", "sim-US", "frontier-US", "repay-US", "sens-US"]}
