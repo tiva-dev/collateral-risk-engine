@@ -1,6 +1,6 @@
 # CRI candidate risk and recovery engine
 
-Status: **candidate, shadow only.** It is not approved methodology and does not
+Version: candidate-2026.11.3. Status: **candidate, shadow only.** It is not approved methodology and does not
 drive account state, margin events, webhooks or orders. Confidence levels and
 horizons are research defaults (`app/candidate/config.py`) awaiting Tiva's
 risk-appetite decision.
@@ -21,6 +21,30 @@ States: balance ≤ B_0 safe; ≤ B_ew restricted (no new borrowing); ≤ B_mc e
 warning; ≤ B_f margin call (grace, cure to the restoration target, otherwise
 partial liquidation after grace); above B_f forced recovery (immediate partial
 liquidation to the restoration target).
+
+## 1a. Corrections of 27 November 2026
+
+* Initial capacity and early warning use **first passage**: the probability
+  that the balance crosses the margin-call level at any session within the
+  horizon (path-wise, with the obligation growing under the contract), not the
+  terminal quantile.
+* Obligation growth is projected with the **contractual interest engine**
+  (capitalization schedule, day count, outstanding accrued interest).
+* **Stressed liquidity** in every scenario: AR(1) session volume that falls
+  with the portfolio's drawdown, no-fill sessions (from the observed stale
+  share), suspensions with a catch-up move on resumption, and the market
+  profile's daily price limit as an execution constraint (limit-down sessions
+  do not fill; the excess move carries over). Sale completion and interest are
+  path-dependent; quantity unsold within the horizon counts for nothing.
+* **Restoration** counts only collateral that had lending value.
+* **Data quality**: material missing, stale (quote > 1 business day, last bar
+  > 2 business days) or unreliable data blocks additional borrowing. A breach
+  that disappears on the latest reliable data is data deterioration: no sale,
+  escalation. A missing price always holds the account for review.
+* **Execution consistency**: the planner receives the candidate's reference
+  bid, stressed extra spread, expected impact, reported-volume ADV,
+  participation and settlement.
+* **Lifecycle** executes the candidate's own planner decisions.
 
 ## 2. How the levels are computed
 

@@ -10,17 +10,23 @@
     },
     {
       "kind": "backtest",
-      "selector": {"requested_by": "cli:lifecycle-all", "created_before": "2026-11-26T14:00:00+00:00"},
+      "selector": {
+        "requested_by": "cli:lifecycle-all",
+        "created_before": "2026-11-26T14:00:00+00:00"
+      },
       "model_id": "*",
       "reason": "first lifecycle validation batch ran with the candidate-2026.11.1 bid defect; superseded by the 14:12 UTC batch.",
       "fixed_in": "34b8cb5"
     },
     {
       "kind": "backtest",
-      "selector": {"requested_by": "cli:lifecycle-all", "created_before": "2026-11-27T00:00:00+00:00"},
+      "selector": {
+        "requested_by": "cli:lifecycle-all",
+        "created_before": "2026-11-27T00:00:00+00:00"
+      },
       "model_id": "*",
-      "reason": "lifecycle batches of 26 Nov used the simplified executor and terminal headroom quantiles; superseded by candidate-2026.11.2 (first-passage thresholds, planner-driven lifecycle).",
-      "fixed_in": "candidate-2026.11.2"
+      "reason": "lifecycle batches of 26 Nov used the simplified executor, terminal headroom quantiles or the sell-all fallback; superseded by candidate-2026.11.3 (first-passage thresholds, planner-driven lifecycle, data holds).",
+      "fixed_in": "candidate-2026.11.3"
     }
   ]
 }
