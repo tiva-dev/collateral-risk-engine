@@ -341,20 +341,25 @@ def provider_from_env() -> LLMProvider:
     region = os.environ.get("CRI_LLM_REGION", "europe-west1")
     if kind == "vertex-gemini":
         configured = os.environ.get("CRI_LLM_MODEL", "")
-        if configured:
-            models = configured.split(",")
-        else:
-            models = []
-            for loc in (region, "global"):
+        locations = [region, "global"] if region != "global" else ["global"]
+        listed: dict[str, list[str]] = {}          # model id -> locations whose catalogue lists it
+        if not configured:
+            for loc in locations:
                 try:
-                    models = discover_gemini_models(project, loc)[:10]
-                except Exception:  # noqa: BLE001 - discovery is best effort; fall back to known ids
-                    models = []
-                if models:
-                    break
-            models = models or ["gemini-2.5-flash", "gemini-2.0-flash-001", "gemini-3-flash-preview"]
-        regions = [region, "global"] if region != "global" else ["global"]
-        return FirstAvailable([VertexGemini(project=project, region=r, model=m.strip()) for m in models for r in regions])
+                    for m in discover_gemini_models(project, loc):
+                        listed.setdefault(m, []).append(loc)
+                except Exception as e:  # noqa: BLE001 - discovery is best effort; fall back to known ids
+                    import logging
+                    logging.getLogger(__name__).warning("Gemini model discovery failed at %s: %s", loc, e)
+        if configured:
+            pairs = [(m.strip(), loc) for m in configured.split(",") for loc in locations]
+        elif listed:
+            ranked = _rank_gemini([(f"publishers/google/models/{m}", "") for m in listed])[:8]
+            pairs = [(m, loc) for m in ranked for loc in listed[m]]
+        else:
+            fallback = ["gemini-3.1-flash-lite", "gemini-3-flash", "gemini-3-flash-preview"]
+            pairs = [(m, loc) for m in fallback for loc in locations]
+        return FirstAvailable([VertexGemini(project=project, region=loc, model=m) for m, loc in pairs])
     if kind == "vertex-claude":
         return VertexClaude(project=project, region=region, model=os.environ.get("CRI_LLM_MODEL", "claude-sonnet-4-5"))
     if kind == "openai-compatible":
