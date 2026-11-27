@@ -663,7 +663,11 @@ resource "google_cloud_run_v2_service" "worker" {
   lifecycle {
     ignore_changes = [
       template[0].containers[0].image,
-      template[0].revision,
+      # template[0].revision is deliberately NOT ignored: `gcloud run deploy`
+      # writes a client-generated revision name into the template, and an
+      # ignored name is re-sent on every later Terraform update, which Cloud
+      # Run rejects (409 "revision ... with different configuration already
+      # exists"). Leaving it unset lets Cloud Run auto-name the new revision.
       template[0].labels,
       client,
       client_version,
@@ -764,7 +768,11 @@ resource "google_cloud_run_v2_service" "api" {
   lifecycle {
     ignore_changes = [
       template[0].containers[0].image,
-      template[0].revision,
+      # template[0].revision is deliberately NOT ignored: `gcloud run deploy`
+      # writes a client-generated revision name into the template, and an
+      # ignored name is re-sent on every later Terraform update, which Cloud
+      # Run rejects (409 "revision ... with different configuration already
+      # exists"). Leaving it unset lets Cloud Run auto-name the new revision.
       template[0].labels,
       client,
       client_version,
