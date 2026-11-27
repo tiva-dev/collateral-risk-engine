@@ -1,1 +1,1 @@
-{"note": "CRI-1.0.0-rc1 confirmation (frozen at cd54902), NGX", "source_run_id": "45681534542", "variant_set": "rc1", "parts": ["hist-NGX", "sim-NGX", "frontier-NGX", "repay-NGX"]}
+{"note": "US per-mechanism stress ablation (partitioned), candidate-2026.11.8, 400 paths like the NGX ablation", "source_run_id": "45873299276", "variant_set": "ablation", "shards": 8, "parts": ["sim-US"]}
