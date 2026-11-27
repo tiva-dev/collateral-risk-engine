@@ -6,9 +6,9 @@ import json
 
 import pytest
 
+from app.analyst import gateway as gateway_mod
 from app.analyst.agent import Analyst, grounded_values, ungrounded_numbers
 from app.analyst.book import InMemoryBook, synthetic_book
-from app.analyst import gateway as gateway_mod
 from app.analyst.gateway import BudgetExceeded, GatewayError, Limits, ToolGateway
 from app.analyst.llm import (
     LLMResponse,
