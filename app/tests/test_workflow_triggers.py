@@ -20,8 +20,12 @@ def test_push_triggers_are_branch_only() -> None:
         if not isinstance(on, dict) or "push" not in on:
             continue
         push = on["push"] or {}
-        assert push.get("branches"), f"{path.name}: push trigger without a branch filter also fires on tags"
-        assert "tags" not in push, f"{path.name}: push trigger must not run on tags"
+        # Only a branch filter (branches OR branches-ignore) keeps tags out; GitHub
+        # rejects a workflow that sets both on the same event.
+        has_b, has_bi = bool(push.get("branches")), bool(push.get("branches-ignore"))
+        assert has_b or has_bi, f"{path.name}: push trigger without a branch filter also fires on tags"
+        assert not (has_b and has_bi), f"{path.name}: branches and branches-ignore together make the workflow invalid"
+        assert "tags" not in push and "tags-ignore" not in push, f"{path.name}: push trigger must not name tags"
         checked += 1
     assert checked >= 8
 

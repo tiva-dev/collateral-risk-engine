@@ -8,8 +8,8 @@ name: GCP Operational Drills
 #              state-bucket and audit-log configuration
 on:
   push:
-    # Branch pushes only: a release-tag push must never deploy, apply or verify.
-    branches: ['**']
+    # Branch pushes only (branches-ignore alone excludes tags): a release-tag push
+    # must never deploy, apply or verify.
     branches-ignore: [main]
     paths: ["infra/requests/drill.json"]
   workflow_dispatch:

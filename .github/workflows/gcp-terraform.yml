@@ -5,8 +5,8 @@ on:
   # so a committed request file triggers them instead. Each run is therefore
   # tied to a reviewed commit that states exactly what was requested.
   push:
-    # Branch pushes only: a release-tag push must never deploy, apply or verify.
-    branches: ['**']
+    # Branch pushes only (branches-ignore alone excludes tags): a release-tag push
+    # must never deploy, apply or verify.
     branches-ignore: [main]
     paths: ["infra/requests/terraform.json"]
   workflow_dispatch:
