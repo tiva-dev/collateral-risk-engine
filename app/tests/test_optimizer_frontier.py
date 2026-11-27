@@ -99,3 +99,19 @@ def test_allocation_respects_budget_and_concentration() -> None:
     assert r["status"] == "optimal" and r["total"] <= 150 + 1e-6
     assert al["d"] == pytest.approx(0.0, abs=1e-6)
     assert al["a"] + al["b"] <= 0.6 * 150 + 1e-6 and max(al.values()) <= 75 + 1e-6
+
+
+def test_minimum_return_is_enforced_or_refused(evals) -> None:
+    a = RiskAppetite(max_p_shortfall=0.05, min_risk_adjusted_return=0.15)
+    with pytest.raises(ValueError):
+        capacity_for_appetite(evals, a)
+    with pytest.raises(ValueError):
+        capacity_for_appetite(evals, a, econ=LendingEconomics(0.18, 0.10))      # no intervention assumption
+    free = capacity_for_appetite(evals, RiskAppetite(max_p_shortfall=0.05))["risk_supported_capacity"]
+    econ = LendingEconomics(0.18, 0.10, capital_ratio=0.10, intervention_probability=0.25)
+    tight = capacity_for_appetite(evals, a, econ=econ)
+    assert tight["risk_supported_capacity"] <= free + 1e-6
+    m = tight["metrics_at_capacity"]
+    if m is not None:
+        from app.optimizer import economics
+        assert economics(m, econ)["raroc"] >= 0.15 - 1e-6

@@ -171,26 +171,33 @@ def frontier(evals: Sequence[Any], balances: Sequence[float] | None = None, alph
                            else "single replica: Monte Carlo uncertainty not estimated"])
 
 
-def _feasible(m: dict[str, float], a: RiskAppetite) -> bool:
+def _feasible(m: dict[str, float], a: RiskAppetite, econ: LendingEconomics | None = None) -> bool:
+    if a.min_risk_adjusted_return is not None:
+        if econ is None:
+            raise ValueError("min_risk_adjusted_return requires LendingEconomics")
+        raroc = economics(m, econ)["raroc"]
+        if raroc is None or raroc < a.min_risk_adjusted_return:
+            return False
     return ((a.max_p_shortfall is None or m["p_shortfall"] <= a.max_p_shortfall)
             and (a.max_expected_shortfall_rate is None or m["expected_shortfall_rate"] <= a.max_expected_shortfall_rate)
             and (a.max_cvar_rate is None or m["cvar_rate"] <= a.max_cvar_rate))
 
 
-def _max_balance(proceeds: np.ndarray, a: RiskAppetite, upper: float) -> float:
+def _max_balance(proceeds: np.ndarray, a: RiskAppetite, upper: float,
+                 econ: LendingEconomics | None = None) -> float:
     """Largest B in [0, upper] meeting the appetite. Every metric is monotone
     non-decreasing in B (rates too, for B above the proceeds floor), so a
     bisection on feasibility is exact up to tolerance; guarded by a scan."""
     if upper <= 0:
         return 0.0
     grid = np.linspace(upper / 400, upper, 400)
-    ok = [b for b in grid if _feasible(shortfall_metrics(proceeds, b, a.alpha), a)]
+    ok = [b for b in grid if _feasible(shortfall_metrics(proceeds, b, a.alpha), a, econ)]
     if not ok:
         return 0.0
     lo, hi = max(ok), min([b for b in grid if b > max(ok)], default=max(ok))
     for _ in range(40):
         mid = 0.5 * (lo + hi)
-        if _feasible(shortfall_metrics(proceeds, mid, a.alpha), a):
+        if _feasible(shortfall_metrics(proceeds, mid, a.alpha), a, econ):
             lo = mid
         else:
             hi = mid
@@ -198,18 +205,22 @@ def _max_balance(proceeds: np.ndarray, a: RiskAppetite, upper: float) -> float:
 
 
 def capacity_for_appetite(evals: Sequence[Any], appetite: RiskAppetite,
-                          institutional_limit: float | None = None) -> dict[str, Any]:
+                          institutional_limit: float | None = None,
+                          econ: LendingEconomics | None = None) -> dict[str, Any]:
     """Highest balance supported by the appetite, with Monte Carlo spread.
 
     The risk-supported capacity and the independent institutional limit are
     reported separately; the binding one is named."""
+    if appetite.min_risk_adjusted_return is not None and (econ is None or econ.intervention_probability is None):
+        raise ValueError("a minimum risk-adjusted return needs LendingEconomics with an explicit "
+                         "intervention_probability assumption")
     samples = _proceeds_from(evals)
     pooled = np.concatenate(samples)
     upper = float(pooled.max()) * 1.5
     # Point estimate on the pooled replicas (largest Monte Carlo sample); the
     # per-replica capacities measure Monte Carlo spread only.
-    risk_cap = _max_balance(pooled, appetite, upper)
-    caps = np.array([_max_balance(s, appetite, upper) for s in samples])
+    risk_cap = _max_balance(pooled, appetite, upper, econ)
+    caps = np.array([_max_balance(s, appetite, upper, econ) for s in samples])
     final = risk_cap if institutional_limit is None else min(risk_cap, institutional_limit)
     e0 = evals[0]
     at = shortfall_metrics(pooled, risk_cap, appetite.alpha) if risk_cap > 0 else None

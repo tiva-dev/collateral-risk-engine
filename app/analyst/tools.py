@@ -94,7 +94,7 @@ class Toolset:
     def stress_test(self, scenario: dict[str, Any], account_refs: list[str] | None = None) -> dict[str, Any]:
         sc = Scenario.from_dict(scenario)
         sectors = self.book.sector_of()
-        refs = account_refs or self.book.account_refs()
+        refs = list(dict.fromkeys(account_refs)) if account_refs else self.book.account_refs()
         rows: list[dict[str, Any]] = []
         tot: dict[str, float] = {"base_collateral": 0.0, "stressed_collateral": 0.0, "balance": 0.0,
                          "base_available": 0.0, "stressed_available": 0.0, "base_cure": 0.0, "stressed_cure": 0.0}
@@ -198,7 +198,8 @@ class Toolset:
                                 "(price shocks by sector/market/instrument, volume change, settlement delay).",
                                 {"type": "object", "required": ["scenario"], "additionalProperties": False,
                                  "properties": {"scenario": SCENARIO_SCHEMA,
-                                                "account_refs": {"type": "array", "maxItems": 200, "items": acct}}},
+                                                "account_refs": {"type": "array", "maxItems": 200, "uniqueItems": True,
+                                                                 "items": acct}}},
                                 self.stress_test),
             "capacity_frontier": Tool("capacity_frontier", "Recovery-conditional risk-capacity frontier for one "
                                       "account and the capacity supported by a risk-appetite preset.",

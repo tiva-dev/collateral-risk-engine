@@ -203,3 +203,21 @@ def test_openai_compatible_wire_format() -> None:
     r = OpenAICompatible(base_url="http://llm:8000/v1", model="Qwen/Qwen3-8B", post=post).complete("sys", MSGS, TOOLS)
     assert seen["url"] == "http://llm:8000/v1/chat/completions" and seen["body"]["messages"][0]["role"] == "system"
     assert r.tool_calls == [{"id": "c1", "name": "account_risk", "args": {"account_ref": "A"}}]
+
+
+def test_question_is_pseudonymised_for_external_providers(book) -> None:
+    seen = {}
+
+    def s0(m):
+        seen["q"] = m[0]["content"]
+        return LLMResponse("No figures.", [], 10, 2)
+    r = Analyst(ScriptedPlanner(script=[s0]), gw(book, external=True)).ask("Assess ACC-001 versus ACC-0010 please")
+    assert "ACC-001 " not in seen["q"] and "acct_" in seen["q"] and "ACC-0010" in seen["q"]
+    assert r.status == "answered"
+
+
+def test_stress_deduplicates_account_selection(book) -> None:
+    g = gw(book)
+    assert g.call("stress_test", {"scenario": STRESS, "account_refs": ["ACC-002", "ACC-002"]})["type"] == "cri_tool_error"
+    one = Toolset(book, n_paths=300).stress_test(STRESS, ["ACC-002", "ACC-002"])
+    assert len(one["accounts"]) == 1

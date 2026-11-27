@@ -151,7 +151,7 @@ class Analyst:
         except BudgetExceeded as e:
             return AnalystResult("refused", str(e))
         specs = self.gw.tool_specs()
-        msgs: list[dict[str, Any]] = [{"role": "user", "content": question}]
+        msgs: list[dict[str, Any]] = [{"role": "user", "content": self.gw.pseudonymise_text(question)}]
         results: list[dict[str, Any]] = []
         calls_log: list[dict[str, Any]] = []
         tin = tout = 0

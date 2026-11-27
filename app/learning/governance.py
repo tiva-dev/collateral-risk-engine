@@ -19,8 +19,11 @@ transition are auditable and the current state is a pure function of the log.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from enum import Enum
@@ -91,7 +94,17 @@ class ModelRegistry:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Serialise read-modify-write transitions across threads and processes."""
+        with self._lock, (self.path.parent / (self.path.name + ".lock")).open("a") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
     # ------------------------------------------------------------- log
 
@@ -124,6 +137,10 @@ class ModelRegistry:
     # ------------------------------------------------------- operations
 
     def register(self, rec: ModelRecord) -> ModelRecord:
+        with self._exclusive():
+            return self._register(rec)
+
+    def _register(self, rec: ModelRecord) -> ModelRecord:
         assert_research_window(rec.data_through)
         if rec.key in self.records():
             raise ValueError(f"{rec.key} already registered (versions are immutable)")
@@ -138,14 +155,19 @@ class ModelRegistry:
 
     def promote(self, key: str, to: Stage, *, actor: str, reason: str,
                 approval: dict[str, Any] | None = None) -> ModelRecord:
+        with self._exclusive():
+            return self._promote(key, to, actor=actor, reason=reason, approval=approval)
+
+    def _promote(self, key: str, to: Stage, *, actor: str, reason: str,
+                 approval: dict[str, Any] | None) -> ModelRecord:
         rec = self._get(key)
         if to not in _ALLOWED[rec.stage]:
             raise ValueError(f"{key}: {rec.stage.value} -> {to.value} is not an allowed transition")
         if to is Stage.APPROVED:
             if not approval or not approval.get("approver") or not approval.get("evidence"):
                 raise ApprovalRequired("approval needs a named human approver and evidence references")
-            if approval.get("approver") == actor and approval.get("automated"):
-                raise ApprovalRequired("automated actors cannot approve")
+            if approval.get("automated"):
+                raise ApprovalRequired("automated approvals are never accepted")
             if actor.startswith(("federation:", "pipeline:", "agent:", "analyst:")):
                 raise ApprovalRequired(f"{actor} cannot approve models")
             # one approved version per model id: the previous champion is retired
@@ -159,6 +181,10 @@ class ModelRegistry:
 
     def rollback(self, model_id: str, *, actor: str, reason: str) -> ModelRecord | None:
         """Retire the approved version and restore its approved parent, if any."""
+        with self._exclusive():
+            return self._rollback(model_id, actor=actor, reason=reason)
+
+    def _rollback(self, model_id: str, *, actor: str, reason: str) -> ModelRecord | None:
         recs = self.records()
         cur = next((r for r in recs.values() if r.model_id == model_id and r.stage is Stage.APPROVED), None)
         if cur is None:

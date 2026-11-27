@@ -212,6 +212,16 @@ class ToolGateway:
             return self.session.real(obj)
         return obj
 
+    def pseudonymise_text(self, text: str) -> str:
+        """Replace this tenant's account references in free text (e.g. the user's
+        question) before it is sent to an external provider."""
+        if not self.session.external_provider:
+            return text
+        for ref in sorted(self.toolset.book.account_refs(), key=len, reverse=True):
+            if ref in text:
+                text = re.sub(rf"(?<![A-Za-z0-9_-]){re.escape(ref)}(?![A-Za-z0-9_-])", self.session.pseudo(ref), text)
+        return text
+
     def restore_refs(self, text: str) -> str:
         for p, r in self.session.pseudonyms.items():
             text = text.replace(p, r)

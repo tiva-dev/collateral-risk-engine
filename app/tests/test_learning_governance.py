@@ -89,3 +89,34 @@ def test_drift_index_detects_shift() -> None:
     base = rng.normal(size=5000)
     assert population_stability(base, rng.normal(size=5000)) < 0.05
     assert population_stability(base, rng.normal(1.0, 1.0, size=5000)) > 0.25
+
+
+def test_automated_approvals_are_rejected_for_any_actor(tmp_path) -> None:
+    reg = ModelRegistry(tmp_path / "r.jsonl")
+    reg.register(rec("1"))
+    for st in (Stage.SHADOW, Stage.CANDIDATE):
+        reg.promote("intelligence.forward_vol@1", st, actor="pipeline:x", reason="ok")
+    with pytest.raises(ApprovalRequired):
+        reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="scheduler", reason="x",
+                    approval={"approver": "alice", "evidence": ["x"], "automated": True})
+
+
+def test_concurrent_promotions_leave_one_champion(tmp_path) -> None:
+    import threading
+    reg = ModelRegistry(tmp_path / "r.jsonl")
+    for v in ("1", "2", "3"):
+        reg.register(rec(v))
+        for st in (Stage.SHADOW, Stage.CANDIDATE):
+            reg.promote(f"intelligence.forward_vol@{v}", st, actor="pipeline:x", reason="ok")
+    barrier = threading.Barrier(3)
+
+    def go(v: str) -> None:
+        barrier.wait()
+        reg.promote(f"intelligence.forward_vol@{v}", Stage.APPROVED, actor="g.e", reason="ok", approval=APPROVAL)
+    ts = [threading.Thread(target=go, args=(v,)) for v in ("1", "2", "3")]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    approved = [r for r in reg.records().values() if r.stage is Stage.APPROVED]
+    assert len(approved) == 1
