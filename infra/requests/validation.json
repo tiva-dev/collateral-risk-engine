@@ -1,1 +1,1 @@
-{"note": "CRI-1.0.0-rc1 confirmation (frozen at cd54902), US SIP 2018-2026", "source_run_id": "45873299276", "variant_set": "rc1", "parts": ["hist-US", "sim-US", "frontier-US", "repay-US"]}
+{"note": "CRI-1.0.0-rc1 confirmation (frozen at cd54902), NGX", "source_run_id": "45681534542", "variant_set": "rc1", "parts": ["hist-NGX", "sim-NGX", "frontier-NGX", "repay-NGX"]}
