@@ -228,7 +228,8 @@ def test_gemini_discovery_ranks_text_models_and_pages(monkeypatch) -> None:
     monkeypatch.setenv("CRI_GCP_ACCESS_TOKEN", "tok")
     pages = [{"publisherModels": [{"name": "publishers/google/models/gemini-2.5-pro", "launchStage": "GA"},
                                   {"name": "publishers/google/models/gemini-embedding-001", "launchStage": "GA"},
-                                  {"name": "publishers/google/models/gemini-3-flash-preview", "launchStage": "PUBLIC_PREVIEW"}],
+                                  {"name": "publishers/google/models/gemini-3-flash-preview", "launchStage": "PUBLIC_PREVIEW"},
+                                  {"name": "publishers/google/models/gemini-9-pro", "launchStage": "PRIVATE_PREVIEW"}],
               "nextPageToken": "a+b&c=d#e"},
              {"publisherModels": [{"name": "publishers/google/models/gemini-2.5-flash", "launchStage": "GA"},
                                   {"name": "publishers/google/models/gemini-2.5-flash-image", "launchStage": "GA"},
@@ -239,7 +240,7 @@ def test_gemini_discovery_ranks_text_models_and_pages(monkeypatch) -> None:
         seen.append((url, headers))
         return pages[len(seen) - 1]
     out = discover_gemini_models("proj", "europe-west1", get=get)
-    assert out == ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"]
+    assert out == ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"]
     assert "pageToken=a%2Bb%26c%3Dd%23e" in seen[1][0] and seen[0][1]["x-goog-user-project"] == "proj"
 
 
