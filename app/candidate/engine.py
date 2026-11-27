@@ -66,6 +66,25 @@ from app.market_data.identity import InstrumentIdentity
 from app.markets.hierarchical import Prior
 from app.markets.profiles import profile_for_exchange
 
+_CAL_EXCHANGES = {"NYSE": "nyse", "NASDAQ": "nyse", "NYSEARCA": "nyse", "AMEX": "nyse", "ARCA": "nyse",
+                  "BATS": "nyse", "NGX": "ngx", "NSE": "ngx"}
+
+
+def session_lag(last: date, day: date, exchange: str | None) -> int:
+    """Exchange sessions between ``last`` and ``day`` (excluding ``day``), on the
+    exchange's holiday calendar where one is known, else on weekdays. A quote from
+    the last session before a holiday is not stale on the holiday."""
+    if last >= day:
+        return 0
+    which = _CAL_EXCHANGES.get((exchange or "").upper())
+    if which is None:
+        return int(np.busday_count(last, day))
+    from app.historical_data.calendars import ngx_calendar, nyse_calendar
+
+    cal = (nyse_calendar if which == "nyse" else ngx_calendar)(last, day)
+    hol = [d for d in cal.holidays if last <= d < day]
+    return int(np.busday_count(last, day, holidays=hol))
+
 T4_SCALE = math.sqrt(2.0 / 4.0)  # unit-variance Student-t(4)
 BAD = {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}
 
@@ -454,7 +473,7 @@ class CandidateEngine:
             if not rows:
                 return 99
             last = max(date.fromisoformat(str(b["bar_date"])[:10]) for b in rows)
-            return int(np.busday_count(last, day))
+            return session_lag(last, day, h.exchange)
 
         # A market is trading if some instrument of it in this portfolio has a
         # current bar. Then an instrument without new bars is not trading
@@ -502,7 +521,7 @@ class CandidateEngine:
                 assets.append(CandidateAsset(h.stable_key, h.asset_id, 0.0, False, False, 0.0, 1.0, 0.0, dkey,
                                              "missing", ["no current price"]))
                 continue
-            age_bd = int(np.busday_count(md.timestamp.date(), day)) if md.timestamp else 0
+            age_bd = session_lag(md.timestamp.date(), day, h.exchange) if md.timestamp else 0
             prof = profile_for_exchange(h.exchange)
             if prof is None:
                 reasons.append(f"{h.asset_id}: exchange {h.exchange} has no onboarded market profile; no lending value")
@@ -526,7 +545,7 @@ class CandidateEngine:
             participation = min(prof.max_participation_rate, ex.max_participation_rate)
             mv = h.quantity * md.last_price
             # Data deterioration (distinct from economic deterioration).
-            bar_lag = int(np.busday_count(est.dates[-1], day)) if est.dates else 99
+            bar_lag = session_lag(est.dates[-1], day, h.exchange) if est.dates else 99
             degraded = []
             if age_bd > cfg.max_quote_lag_business_days:
                 degraded.append(f"quote {age_bd} business days old")

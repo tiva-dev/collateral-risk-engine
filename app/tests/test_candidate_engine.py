@@ -619,3 +619,16 @@ def test_interest_and_maturity_boundaries_are_consistent() -> None:
     t1 = datetime.combine(dates[340], time(21), UTC)           # maturity: term sessions after origination
     expect, _ = acc(Loan(c["principal"]), replace(terms, schedule_anchor=t0), t0, t1)
     assert v["interest_accrued"] == pytest.approx(expect.balance - c["principal"], rel=1e-9)
+
+
+def test_staleness_is_measured_in_exchange_sessions() -> None:
+    from app.candidate.engine import session_lag
+
+    # 26 Nov 2026 is Thanksgiving (NYSE closed): the 25 Nov close is the latest session.
+    assert session_lag(date(2026, 11, 25), date(2026, 11, 27), "NASDAQ") == 1
+    assert session_lag(date(2026, 11, 25), date(2026, 11, 27), "NYSE") == 1
+    # Without a known calendar, weekdays are counted (conservative).
+    assert session_lag(date(2026, 11, 25), date(2026, 11, 27), "XYZ") == 2
+    # NGX: Christmas and Boxing Day are not sessions.
+    assert session_lag(date(2026, 12, 24), date(2026, 12, 29), "NGX") == 1
+    assert session_lag(date(2026, 11, 27), date(2026, 11, 27), "NYSE") == 0
