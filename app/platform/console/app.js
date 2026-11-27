@@ -154,7 +154,7 @@ async function renderAccount() {
     api(`/monitoring/events?account_ref=${ref}&limit=30`), api(`/shadow/history/${ref}?limit=2000`)]);
   const x = ex.explanation;
   const histBy = {};
-  (hist.history || []).forEach((r) => { if (!r.error) (histBy[r.model_id] = histBy[r.model_id] || []).push({ x: r.evaluated_at, y: r.capacity_ltv }); });
+  (hist.history || []).forEach((r) => { if (!r.error) (histBy[r.model_id] = histBy[r.model_id] || []).push({ x: r.evaluated_at, y: r.approved_ltv ?? r.capacity_ltv }); });
   return h("div", {},
     h("div", { class: "row" }, h("h2", {}, "Account analysis"), pick, h("button", { class: "ghost", onclick: () => go("account") }, "Refresh")),
     h("div", { class: "grid" },
@@ -185,7 +185,9 @@ async function renderAccount() {
       { t: "Model", f: (r) => `${r.model_id}${r.role === "baseline" ? " (baseline)" : ""}` },
       { t: "Version", f: (r) => h("span", { class: "small mono" }, r.model_version) },
       { t: "State", f: (r) => r.error ? h("span", { class: "pill s-bad", title: r.error }, "error") : pill(r.risk_state) },
-      { t: "Capacity LTV", n: 1, f: (r) => pct(r.capacity_ltv) }, { t: "Approved credit", n: 1, f: (r) => fmt(r.approved_credit, 0) },
+      { t: "Approved LTV", n: 1, f: (r) => pct(r.approved_ltv ?? (r.collateral_value ? r.approved_credit / r.collateral_value : null)) },
+      { t: "Risk capacity LTV (uncapped)", n: 1, f: (r) => pct(r.uncapped_capacity_ltv) },
+      { t: "Approved credit", n: 1, f: (r) => fmt(r.approved_credit, 0) },
       { t: "Est. recovery", n: 1, f: (r) => fmt(r.estimated_recovery, 0) },
       { t: "Proposed sale qty", n: 1, f: (r) => r.liquidation && r.liquidation.length ? r.liquidation.map((o) => `${fmt(o.quantity, 1)} ${String(o.instrument).split(":")[1] || o.instrument}`).join(", ") : "—" },
       { t: "Why", f: (r) => h("span", { class: "small" }, r.error || ((r.explanation && r.explanation.reasons) || []).slice(0, 2).join(" · ")) },
@@ -261,7 +263,8 @@ async function renderModels() {
       { t: "Version", f: (r) => h("span", { class: "small mono" }, r.model_version) },
       { t: "Evaluations", n: 1, k: "evaluations" }, { t: "Errors", n: 1, k: "errors" },
       { t: "Margin-call frequency", n: 1, f: (r) => pct(r.margin_call_frequency) },
-      { t: "Avg capacity LTV", n: 1, f: (r) => pct(r.avg_capacity_ltv) },
+      { t: "Avg approved LTV", n: 1, f: (r) => pct(r.avg_approved_ltv) },
+      { t: "Avg risk capacity LTV (uncapped)", n: 1, f: (r) => pct(r.avg_uncapped_capacity_ltv) },
       { t: "Avg recovery / collateral", n: 1, f: (r) => pct(r.avg_recovery_ratio) },
       { t: "Accounts disagreeing now", n: 1, k: "accounts_disagreeing_with_baseline_now" }], sum.models || []),
     h("h3", {}, "Current disagreements and their explanations"),

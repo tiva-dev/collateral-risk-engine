@@ -661,3 +661,23 @@ def test_rc1_frozen_configuration_matches_published_spec() -> None:
     cfg = rc_config()
     assert cfg.suspension_value == "delayed" and cfg.regime_conditioning and cfg.capacity_utilisation == 0.925
     assert not cfg.stress_protection and cfg.headroom_mode == "fixed" and not cfg.concentration_control
+
+
+def test_rc1_financial_definition_is_frozen() -> None:
+    """Any change to a file that defines RC1's financial behaviour must be released
+    as RC2 (new manifest), never silently applied to RC1."""
+    import hashlib
+    import json
+    from pathlib import Path
+
+    from app.candidate.rc import rc_fingerprint
+
+    root = Path(__file__).resolve().parents[2]
+    man = json.loads((root / "release/CRI-1.0.0-rc1/manifest.json").read_text())
+    assert man["configuration"]["fingerprint_sha256"] == rc_fingerprint()
+    engine_files = ["app/candidate/config.py", "app/candidate/engine.py", "app/candidate/estimation.py",
+                    "app/candidate/rc.py", "app/markets/profiles.py", "app/markets/hierarchical.py",
+                    "app/liquidation/planning.py", "app/liquidation/policy.py", "app/credit/interest.py",
+                    "app/historical_data/calendars.py"]
+    for f in engine_files:
+        assert hashlib.sha256((root / f).read_bytes()).hexdigest() == man["source"]["file_sha256"][f], f

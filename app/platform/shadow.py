@@ -57,6 +57,10 @@ class ShadowResult:
     liquidation: list[dict[str, Any]] = field(default_factory=list)
     explanation: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    # Reported separately in every summary: approved credit / collateral value, and
+    # the model's risk capacity before client ceilings and utilisation.
+    approved_ltv: float | None = None
+    uncapped_capacity_ltv: float | None = None
 
 
 def _plain(x: Any) -> Any:
@@ -156,6 +160,7 @@ def _engine_result(model_id: str, version: str, role: str, ev: Any, loan_balance
         collateral_value=mv, loan_balance=loan_balance,
         approved_credit=ev.approved_credit_limit, available_credit=ev.current_available_credit,
         capacity_ltv=ev.approved_credit_limit / mv if mv else None,
+        approved_ltv=ev.approved_credit_limit / mv if mv else None,
         risk_state=state, margin_call=state in {"margin_call", "liquidation"},
         estimated_recovery=ev.stressed_liquidation_value,
         liquidation=_orders_from_evaluation(ev) if state in {"margin_call", "liquidation"} else [],
@@ -360,6 +365,7 @@ def _research_model(model_id: str, run: Callable[..., tuple[float, Any]]) -> Cal
             model_id=model_id, model_version=f"research-{model_id}-2026-11", role="candidate",
             collateral_value=v, loan_balance=loan, approved_credit=approved,
             available_credit=max(0.0, approved - loan), capacity_ltv=ell_capped, risk_state=state,
+            approved_ltv=approved / v if v else None, uncapped_capacity_ltv=ell,
             margin_call=state == "margin_call",
             estimated_recovery=v * (1 - haircut) if haircut is not None else None,
             liquidation=liquidation, explanation=_plain(explanation),
@@ -438,7 +444,7 @@ def candidate_priors(as_of: datetime, extra_bars: dict[str, list[dict[str, Any]]
 
 
 def candidate_model(inp: ShadowInputs, overrides: tuple[tuple[str, Any], ...] = (),
-                    model_id: str = "candidate") -> ShadowResult:
+                    model_id: str = "candidate", config: Any = None) -> ShadowResult:
     from dataclasses import replace as _replace
 
     from app.candidate import CandidateConfig, CandidateEngine
@@ -449,7 +455,8 @@ def candidate_model(inp: ShadowInputs, overrides: tuple[tuple[str, Any], ...] = 
     keys = {data_key(h) for h in inp.holdings if h.asset_type.value != "cash"}
     bars = ({k: inp.bars.get(k, []) for k in keys} if inp.bars is not None
             else {k: load_bars(k, 501) for k in keys})
-    engine = CandidateEngine(_replace(CandidateConfig(), **dict(overrides)), priors=candidate_priors(inp.now, inp.bars))
+    cfg = config if config is not None else _replace(CandidateConfig(), **dict(overrides))
+    engine = CandidateEngine(cfg, priors=candidate_priors(inp.now, inp.bars))
     ev = engine.evaluate(a.account_ref, inp.holdings, a.loan, a.policy, inp.market_data, bars=bars,
                          execution_policy=a.liquidation_execution_policy, interest_policy=a.interest_policy,
                          as_of=inp.now)
@@ -461,6 +468,9 @@ def candidate_model(inp: ShadowInputs, overrides: tuple[tuple[str, Any], ...] = 
         collateral_value=ev.portfolio_market_value, loan_balance=ev.current_outstanding_balance,
         approved_credit=ev.approved_credit_limit, available_credit=ev.current_available_credit,
         capacity_ltv=ev.threshold_ltv.get("initial_capacity"), risk_state=state,
+        approved_ltv=(ev.approved_credit_limit / ev.portfolio_market_value) if ev.portfolio_market_value else None,
+        uncapped_capacity_ltv=((ev.thresholds.get("initial_capacity_uncapped") or 0.0) / ev.portfolio_market_value
+                               if ev.portfolio_market_value else None),
         margin_call=state in {"margin_call", "liquidation"},
         estimated_recovery=ev.thresholds.get("margin_call_proceeds"),
         liquidation=[{"instrument": o["instrument_key"], "quantity": o["quantity"],
@@ -500,12 +510,17 @@ MODELS: dict[str, Callable[[ShadowInputs], ShadowResult]] = {
 
 
 def _rc_model(inp: ShadowInputs) -> ShadowResult:
+    """RC1 instantiated from the frozen configuration itself (not re-derived from
+    overrides); every evaluation persists the release identity and fingerprint."""
     from dataclasses import replace
 
-    from app.candidate.rc import RC_ID, RC_OVERRIDES
+    from app.candidate.rc import ENGINE_VERSION, RC_ID, rc_config, rc_fingerprint
 
-    r = candidate_model(inp, RC_OVERRIDES, "candidate_rc")
-    return replace(r, model_version=f"{RC_ID} ({r.model_version.split('+')[0]})")
+    r = candidate_model(inp, (), "candidate_rc", config=rc_config())
+    fp = rc_fingerprint()
+    release = {"release": RC_ID, "engine": ENGINE_VERSION, "fingerprint_sha256": fp}
+    return replace(r, model_version=f"{RC_ID} ({ENGINE_VERSION}; fp {fp[:12]})",
+                   explanation={**r.explanation, "release": release})
 
 
 def build_inputs(services: Any, tenant_id: str, account: Any, now: datetime) -> ShadowInputs:
@@ -535,12 +550,14 @@ def persist(run_id: str, tenant_id: str, account_ref: str, results: list[ShadowR
         conn.execute(
             "INSERT INTO shadow_evaluations (evaluation_id, run_id, tenant_id, account_ref, model_id, model_version, "
             "role, evaluated_at, collateral_value, loan_balance, approved_credit, available_credit, capacity_ltv, "
-            "risk_state, margin_call, estimated_recovery, liquidation, explanation, error) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "risk_state, margin_call, estimated_recovery, liquidation, explanation, error, approved_ltv, "
+            "uncapped_capacity_ltv) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             ("sev_" + uuid.uuid4().hex[:20], run_id, tenant_id, account_ref, r.model_id, r.model_version, r.role,
              now.isoformat(), r.collateral_value, r.loan_balance, r.approved_credit, r.available_credit,
              r.capacity_ltv, r.risk_state, 1 if r.margin_call else 0, r.estimated_recovery,
-             json.dumps(_plain(r.liquidation)), json.dumps(_plain(r.explanation), default=str), r.error))
+             json.dumps(_plain(r.liquidation)), json.dumps(_plain(r.explanation), default=str), r.error,
+             r.approved_ltv, r.uncapped_capacity_ltv))
 
 
 def run_all(db: Database, services: Any, models: dict[str, Callable[[ShadowInputs], ShadowResult]] | None = None) -> dict[str, Any]:
@@ -625,7 +642,8 @@ def summary(tenant_id: str, since: datetime) -> dict[str, Any]:
     conn = current_connection()
     rows = conn.fetchall(
         "SELECT model_id, model_version, role, COUNT(*) AS evaluations, SUM(margin_call) AS margin_calls, "
-        "AVG(capacity_ltv) AS avg_capacity_ltv, SUM(approved_credit) AS total_approved_credit, "
+        "AVG(approved_ltv) AS avg_approved_ltv, AVG(uncapped_capacity_ltv) AS avg_uncapped_capacity_ltv, "
+        "AVG(capacity_ltv) AS avg_capacity_ltv_legacy, SUM(approved_credit) AS total_approved_credit, "
         "AVG(estimated_recovery / NULLIF(collateral_value, 0)) AS avg_recovery_ratio, "
         "SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS errors "
         "FROM shadow_evaluations e WHERE tenant_id=%s AND evaluated_at >= %s "

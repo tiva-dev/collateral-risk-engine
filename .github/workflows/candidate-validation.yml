@@ -49,7 +49,7 @@ jobs:
       with:
         python-version: '3.11'
       if: steps.req.outputs.run == 'true'
-    - run: pip install -r requirements.txt
+    - run: pip install -r requirements.txt -c release/CRI-1.0.0-rc1/constraints.txt
       if: steps.req.outputs.run == 'true'
     - uses: actions/download-artifact@v4
       with:
