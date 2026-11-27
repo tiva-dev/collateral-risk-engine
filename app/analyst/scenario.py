@@ -55,9 +55,7 @@ class PriceShock:
             return False
         if self.asset_type and h.asset_type.value != self.asset_type.lower():
             return False
-        if self.sector and sector_of.get(h.asset_id.upper(), "").lower() != self.sector.lower():
-            return False
-        return True
+        return not (self.sector and sector_of.get(h.asset_id.upper(), "").lower() != self.sector.lower())
 
 
 @dataclass(frozen=True)
@@ -70,8 +68,8 @@ class Scenario:
     notes: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Scenario":
-        import jsonschema
+    def from_dict(cls, d: dict[str, Any]) -> Scenario:
+        import jsonschema  # type: ignore[import-untyped]
 
         jsonschema.validate(d, SCHEMA)
         return cls(name=d.get("name", "scenario"),
@@ -111,7 +109,7 @@ def apply(view: Any, sc: Scenario, sector_of: dict[str, str]) -> tuple[Any, list
         f = 1.0 + sc.volume_change
         for h in view.holdings:
             k = data_key(h)
-            if k in bars and bars[k]:
+            if bars.get(k):
                 n = min(sc.volume_sessions, len(bars[k]))
                 bars[k] = bars[k][:-n] + [{**b, "volume": b["volume"] * f} for b in bars[k][-n:]]
     ex = view.execution_policy

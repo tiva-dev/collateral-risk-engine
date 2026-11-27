@@ -25,8 +25,9 @@ contractual limits separately (they are never folded into the risk numbers).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -44,7 +45,7 @@ def _proceeds_sample(quantiles: Sequence[float]) -> np.ndarray:
 
 def shortfall_metrics(proceeds: np.ndarray, balance: float, alpha: float = 0.99) -> dict[str, float]:
     loss = np.maximum(balance - proceeds, 0.0)
-    k = max(1, int(round((1 - alpha) * loss.size)))
+    k = max(1, round((1 - alpha) * loss.size))
     tail = np.sort(loss)[-k:]
     return {"balance": float(balance), "p_shortfall": float(np.mean(loss > 1e-9)),
             "expected_shortfall": float(loss.mean()), "cvar": float(tail.mean()),
@@ -147,9 +148,11 @@ def frontier(evals: Sequence[Any], balances: Sequence[float] | None = None, alph
     samples = _proceeds_from(evals)
     if balances is None:
         hi = float(np.quantile(np.concatenate(samples), 0.995)) * 1.2
-        balances = np.linspace(0.0, max(hi, 1.0), n_points)[1:]
+        grid = [float(x) for x in np.linspace(0.0, max(hi, 1.0), n_points)[1:]]
+    else:
+        grid = [float(x) for x in balances]
     pts = []
-    for b in balances:
+    for b in grid:
         per = [shortfall_metrics(s, float(b), alpha) for s in samples]
         row: dict[str, Any] = {"balance": float(b),
                                "ltv": float(b / e0.portfolio_market_value) if e0.portfolio_market_value else None}
@@ -161,8 +164,8 @@ def frontier(evals: Sequence[Any], balances: Sequence[float] | None = None, alph
             row["economics"] = economics({**per[0], **{k: row[k] for k in ("expected_shortfall", "cvar")}}, econ)
         pts.append(row)
     return Frontier(VIEW, e0.account_ref, e0.model_version, float(e0.portfolio_market_value), pts, len(evals),
-                    notes=["recovery-conditional: assumes recovery starts after the grace period; not a lifetime "
-                           "loss probability and not an upper bound on lifecycle losses",
+                    notes=[("recovery-conditional: assumes recovery starts after the grace period; not a lifetime "
+                            "loss probability and not an upper bound on lifecycle losses"),
                            f"tail measure: CVaR at alpha={alpha}",
                            "Monte Carlo uncertainty: standard deviation across seed replicas" if len(evals) > 1
                            else "single replica: Monte Carlo uncertainty not estimated"])

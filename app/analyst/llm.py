@@ -23,8 +23,9 @@ import json
 import os
 import urllib.request
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 
 @dataclass
@@ -38,9 +39,12 @@ class LLMResponse:
 
 
 class LLMProvider(Protocol):
-    name: str
-    model: str
-    external: bool          # data leaves Tiva's GCP boundary
+    @property
+    def name(self) -> str: ...
+    @property
+    def model(self) -> str: ...
+    @property
+    def external(self) -> bool: ...      # data leaves Tiva's GCP boundary
 
     def complete(self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse: ...
     def cost_usd(self, r: LLMResponse) -> float: ...
@@ -49,7 +53,7 @@ class LLMProvider(Protocol):
 def _post(url: str, body: dict[str, Any], headers: dict[str, str], timeout: int = 90) -> dict[str, Any]:
     req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", **headers})
-    with urllib.request.urlopen(req, timeout=timeout) as r:   # noqa: S310 (fixed https endpoints)
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310 - fixed Vertex AI / metadata-server / configured endpoint
         return json.loads(r.read())
 
 
@@ -60,7 +64,7 @@ def gcp_access_token() -> str:
     req = urllib.request.Request(
         "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
         headers={"Metadata-Flavor": "Google"})
-    with urllib.request.urlopen(req, timeout=5) as r:   # noqa: S310
+    with urllib.request.urlopen(req, timeout=5) as r:  # nosec B310 - fixed Vertex AI / metadata-server / configured endpoint
         return json.loads(r.read())["access_token"]
 
 
@@ -230,7 +234,7 @@ def gcp_project() -> str:
         return p
     req = urllib.request.Request("http://metadata.google.internal/computeMetadata/v1/project/project-id",
                                  headers={"Metadata-Flavor": "Google"})
-    with urllib.request.urlopen(req, timeout=5) as r:   # noqa: S310
+    with urllib.request.urlopen(req, timeout=5) as r:  # nosec B310 - fixed Vertex AI / metadata-server / configured endpoint
         return r.read().decode()
 
 

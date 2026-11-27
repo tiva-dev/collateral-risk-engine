@@ -48,12 +48,12 @@ def dataset_hash(*arrays: Any) -> str:
 
 def code_revision() -> str:
     try:
-        rev = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5,
+        rev = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, check=False,
                              cwd=Path(__file__).resolve().parents[2]).stdout.strip()
         dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], capture_output=True,
-                               text=True, timeout=5, cwd=Path(__file__).resolve().parents[2]).stdout.strip()
+                               text=True, timeout=5, check=False, cwd=Path(__file__).resolve().parents[2]).stdout.strip()
         return (rev[:12] + ("+dirty" if dirty else "")) if rev else "unknown"
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return "unknown"
 
 

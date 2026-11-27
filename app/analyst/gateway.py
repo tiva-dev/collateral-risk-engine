@@ -36,14 +36,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import jsonschema
+import jsonschema  # type: ignore[import-untyped]
 
 from app.analyst.tools import Tool, Toolset, release_info
 
 _INJECTION = re.compile(r"(ignore (all |any )?(previous|prior|above) instructions|disregard .{0,40}instructions|"
                         r"you are now|system prompt|developer message|<\s*/?\s*(system|assistant|tool)\s*>|"
                         r"(now |please )?(call|invoke) the [a-z_]+ tool|approve (this|the) loan|"
-                        r"(execute|start|trigger) (a |the )?liquidation)", re.I)
+                        r"(execute|start|trigger) (a |the )?liquidation)", re.IGNORECASE)
 _REF_KEYS = {"account_ref"}
 
 

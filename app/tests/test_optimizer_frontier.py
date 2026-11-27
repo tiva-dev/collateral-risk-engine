@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from itertools import pairwise
 
 import numpy as np
 import pytest
@@ -44,8 +45,8 @@ def test_frontier_is_monotone_and_labelled_conditional(evals) -> None:
     assert f.model_version.startswith("candidate") and f.replicas == 3
     p = [pt["p_shortfall"] for pt in f.points]
     el = [pt["expected_shortfall"] for pt in f.points]
-    assert all(b >= a - 1e-12 for a, b in zip(p, p[1:]))
-    assert all(b >= a - 1e-9 for a, b in zip(el, el[1:]))
+    assert all(b >= a - 1e-12 for a, b in pairwise(p))
+    assert all(b >= a - 1e-9 for a, b in pairwise(el))
     assert f.points[0]["p_shortfall"] == 0.0 and f.points[-1]["p_shortfall"] > 0.5
     assert f.points[10]["p_shortfall_mc_sd"] is not None
 

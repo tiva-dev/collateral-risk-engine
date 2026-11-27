@@ -8,9 +8,9 @@ No tool can lend, change limits, message borrowers, or liquidate.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from functools import lru_cache
-from typing import Any, Callable
+from typing import Any
 
 from app.analyst.book import AccountView, BookSource
 from app.analyst.scenario import SCHEMA as SCENARIO_SCHEMA
@@ -95,7 +95,8 @@ class Toolset:
         sc = Scenario.from_dict(scenario)
         sectors = self.book.sector_of()
         refs = account_refs or self.book.account_refs()
-        rows, tot = [], {"base_collateral": 0.0, "stressed_collateral": 0.0, "balance": 0.0,
+        rows: list[dict[str, Any]] = []
+        tot: dict[str, float] = {"base_collateral": 0.0, "stressed_collateral": 0.0, "balance": 0.0,
                          "base_available": 0.0, "stressed_available": 0.0, "base_cure": 0.0, "stressed_cure": 0.0}
         for ref in refs:
             v = self.book.account(ref)

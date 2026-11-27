@@ -73,7 +73,8 @@ _SYN = {  # symbol: (exchange, currency, sector, daily vol, price, ADV)
 
 def _bars(seed: int, n: int, vol: float, p0: float, adv: float, end: date) -> list[dict[str, Any]]:
     rng = np.random.default_rng(seed)
-    days, d = [], end
+    days: list[date] = []
+    d = end
     while len(days) < n:
         if d.weekday() < 5:
             days.append(d)
@@ -109,7 +110,7 @@ def synthetic_book(tenant_id: str = "sandbox-demo", end: date = date(2026, 11, 2
     for ref, (pos, cash, bal) in mix.items():
         hs, md, bx = [], {}, {}
         for sym, q in pos.items():
-            ex, ccy, _, _, _, adv = _SYN[sym]
+            ex, ccy, *_ = _SYN[sym]
             h = Holding(sym, AssetType.ETF if sym == "IDXF" else AssetType.LISTED_EQUITY, float(q), ccy, ex)
             last = bars[sym][-1]["close"]
             spread = 0.0005 if sym == "IDXF" else 0.001 + 0.001 * float(rng.random())

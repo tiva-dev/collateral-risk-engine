@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 
 import pytest
 
 from app.analyst.agent import Analyst, grounded_values, ungrounded_numbers
 from app.analyst.book import InMemoryBook, synthetic_book
-from app.analyst.gateway import BudgetExceeded, GatewayError, Limits, ToolGateway, _TenantMeter
+from app.analyst import gateway as gateway_mod
+from app.analyst.gateway import BudgetExceeded, GatewayError, Limits, ToolGateway
 from app.analyst.llm import LLMResponse, OpenAICompatible, ScriptedPlanner, VertexClaude, VertexGemini
 from app.analyst.tools import Tool, Toolset
 
@@ -25,7 +25,7 @@ def book() -> InMemoryBook:
 
 def gw(book, external=False, limits=None):
     return ToolGateway(Toolset(book, n_paths=300), "analyst@bank", external_provider=external,
-                       limits=limits, meter=_TenantMeter())
+                       limits=limits, meter=gateway_mod._TenantMeter())
 
 
 # --------------------------------------------------------------- gateway
@@ -51,7 +51,7 @@ def test_mutating_tools_cannot_be_registered(book) -> None:
 
     def tools():
         t = orig()
-        t["approve_loan"] = Tool("approve_loan", "x", {"type": "object"}, lambda: {}, mutates=True)
+        t["approve_loan"] = Tool("approve_loan", "x", {"type": "object"}, dict, mutates=True)
         return t
     ts.tools = tools
     with pytest.raises(GatewayError):

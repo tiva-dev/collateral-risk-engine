@@ -93,10 +93,10 @@ def grounded_values(results: list[dict[str, Any]], question: str) -> list[float]
             for lst in (x for x in r["data"].values() if isinstance(x, list)):
                 vals.append(float(len(lst)))
     for m in _NUM.finditer(question):
-        p = _parse(m.group())
-        if p:
-            vals.append(p[0] / (100 if p[2] in ("%", "pp") else 1))
-            vals.append(p[0])
+        parsed = _parse(m.group())
+        if parsed:
+            vals.append(parsed[0] / (100 if parsed[2] in ("%", "pp") else 1))
+            vals.append(parsed[0])
     return vals
 
 
@@ -108,9 +108,10 @@ def ungrounded_numbers(answer: str, values: list[float]) -> list[str]:
         if p is None:
             continue
         x, dec, unit = p
-        if unit in ("", ) and dec == 0 and abs(x) <= 12:        # small counts and list numbering
-            if any(abs(abs(v) - abs(x)) < 1e-9 for v in values) or abs(x) <= 3:
-                continue
+        # small counts and list numbering
+        if (unit == "" and dec == 0 and abs(x) <= 12
+                and (any(abs(abs(v) - abs(x)) < 1e-9 for v in values) or abs(x) <= 3)):
+            continue
         candidates = [x / 100] if unit in ("%", "pp") else [x]
         tol_abs = 0.5 * 10 ** (-dec) / (100 if unit in ("%", "pp") else 1)
         ok = False
