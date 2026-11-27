@@ -239,7 +239,7 @@ def test_gemini_discovery_ranks_text_models_and_pages(monkeypatch) -> None:
         seen.append((url, headers))
         return pages[len(seen) - 1]
     out = discover_gemini_models("proj", "europe-west1", get=get)
-    assert out == ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"]
+    assert out == ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"]
     assert "pageToken=a%2Bb%26c%3Dd%23e" in seen[1][0] and seen[0][1]["x-goog-user-project"] == "proj"
 
 

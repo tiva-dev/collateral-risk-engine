@@ -273,7 +273,11 @@ class FirstAvailable:
                 self.chosen = c
                 return r
             except urllib.error.HTTPError as e:
-                self.errors.append(f"{c.model}: HTTP {e.code}")
+                try:
+                    detail = json.loads(e.read() or b"{}").get("error", {}).get("message", "")[:160]
+                except (ValueError, AttributeError):
+                    detail = ""
+                self.errors.append(f"{c.model}@{getattr(c, 'region', '')}: HTTP {e.code} {detail}".strip())
                 if e.code not in (400, 404):
                     raise
         raise RuntimeError("no candidate model available: " + "; ".join(self.errors))
@@ -287,8 +291,9 @@ _NOT_TEXT = ("image", "embedding", "tts", "live", "audio", "vision", "veo", "ima
 
 
 def _rank_gemini(names: list[tuple[str, str]]) -> list[str]:
-    """Order discovered Gemini text models: GA before preview, Flash before Pro
-    (cost), newest version first."""
+    """Order discovered Gemini text models: newest generation first (Google
+    restricts older generations for projects without prior usage), then Flash
+    before Pro (cost), then GA before preview."""
     def version(m: str) -> tuple[float, ...]:
         import re as _re
         v = _re.search(r"gemini-(\d+(?:\.\d+)?)", m)
@@ -300,7 +305,7 @@ def _rank_gemini(names: list[tuple[str, str]]) -> list[str]:
             continue
         ga = 0 if stage in ("GA", "") else 1
         tier = 0 if "flash" in m and "lite" not in m else (1 if "lite" in m else 2)
-        rows.append(((ga, tier, tuple(-x for x in version(m))), m))
+        rows.append(((tuple(-x for x in version(m)), tier, ga), m))
     return [m for _, m in sorted(set(rows))]
 
 
@@ -340,7 +345,7 @@ def provider_from_env() -> LLMProvider:
             models = []
             for loc in (region, "global"):
                 try:
-                    models = discover_gemini_models(project, loc)[:6]
+                    models = discover_gemini_models(project, loc)[:10]
                 except Exception:  # noqa: BLE001 - discovery is best effort; fall back to known ids
                     models = []
                 if models:
