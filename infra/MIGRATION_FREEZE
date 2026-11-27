@@ -1,4 +1,0 @@
-Frozen for the Terraform state migration (hardening stages 1 and 2). Remove only after stage 2 completes and is verified.
-No terraform apply may run while this file exists on the branch it runs from. The retired shared
-backend (gs://tiva-cri-ops-cda9-tfstate) is additionally frozen at the storage layer by stage 1:
-temporary holds on its state and lock objects, and the shared identity reduced to read-only.
