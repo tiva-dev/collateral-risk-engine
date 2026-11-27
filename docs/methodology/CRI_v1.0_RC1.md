@@ -182,12 +182,22 @@ cluster bound on a quarter-cohort loss ≈ 10 % (US, 29–31 clusters) and ≈ 1
 (NGX, 24–25). The candidate makes ≈ 14× fewer margin calls than fixed ψ 1.15
 (US 0.04 vs 0.57 per loan) with more restricted time (40 % vs 31 %).
 
-6.2 **Synthetic joint stress (NGX).** Fixed ψ 1.15 loses less in the combined
-and correlated-drawdown scenarios (combined EL 0.42 % vs 0.66 % for RC
-mechanisms) at 3.5× the margin calls (1.65 vs 0.42 per loan) and 46 % recurring
-calls. Regime conditioning reduces combined-stress loss (EL 0.76 % → 0.66 %,
-worst 18.3 % → 16.5 %) and margin calls (0.77 → 0.42). The 5 % stress-grace
-rule never triggered. US results: report 13.
+6.2 **Synthetic joint stress.** *US* (RC1 at 0.925, 160 loans per scenario): no
+RC1 loss in any of the eight scenarios; fixed ψ 1.30 loses in the combined
+scenario; RC1 makes 2–6× fewer margin calls than fixed ψ 1.15. *NGX* (108
+loans per scenario): losses occur only in the combined scenario (3–4 loss
+events for every policy). At 0.925 × capacity: expected loss RC1 0.30 %
+[0.04, 0.62], v2026.11.6 0.17 % [0, 0.45], fixed ψ 1.15 0.14 % [0, 0.34];
+worst loss 10.5 %, 12.3 %, 9.6 %. The intervals overlap: **the policies are
+not distinguishable on loss in NGX joint stress**. The robust lever is
+utilisation: from 1.0 × to 0.925 × the combined-scenario expected loss falls
+from ≈ 0.7 % to 0.2–0.3 % and the worst loss from 17–18 % to 10–12 %. Regime
+conditioning lowers stress margin calls in NGX (combined 0.78 → 0.42 per loan,
+liquidity collapse 0.39 → 0.11) but raises them in the US combined scenario
+(0.46 → 1.04, with fewer liquidations, 0.57 → 0.35); its loss effect is
+inconclusive. The 5 % stress-grace rule never triggered. Delayed suspension
+valuation cuts suspension-scenario liquidations (US 0.28 → 0.03, NGX 0.11 →
+0.03) and borrower costs.
 
 6.3 **Recalibrated controls.** Adaptive headroom (recalibrated) still lowers
 NGX capacity by ≈ 30 % and raises restricted time without a loss benefit at
@@ -225,10 +235,14 @@ Commercial viability
 
 A policy is not described as dominant if it is worse on 6–8.
 
+Final acceptance thresholds are Tiva's decision; the values above are proposals.
+
 ## 8. Limitations
 
-* NGX joint-stress loss severity exceeds fixed ψ 1.15 (§6.2): RC1 does not
-  meet criterion 2 for NGX in the combined and correlated-drawdown scenarios.
+* NGX combined-stress losses (≈ 3.7 % of loans, worst ≈ 10 %) are not
+  distinguishable from fixed ψ 1.15 with the available sample; regime
+  conditioning's effect on loss is unproven and is the component that most
+  needs prospective and locked-period evidence.
 * NGX volume before August 2025 is an assumption; NGX settlement T+2 is
   unconfirmed; no executable USD/NGN source.
 * All historical data have been examined in development; only the locked
