@@ -38,6 +38,6 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
       - run: |
           extra=()
-          if [ -n "${{ inputs.args }}" ]; then extra=(--args "${{ inputs.args }}"); fi
+          if [ -n "${{ inputs.args }}" ]; then extra=("--args=${{ inputs.args }}")  # "=" form: args may start with "-"; fi
           gcloud run jobs execute ${{ inputs.job }} --project ${{ steps.cfg.outputs.project }} \
             --region europe-west1 --wait "${extra[@]}"
