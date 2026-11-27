@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Callable
@@ -53,8 +55,17 @@ class LLMProvider(Protocol):
 def _post(url: str, body: dict[str, Any], headers: dict[str, str], timeout: int = 90) -> dict[str, Any]:
     req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", **headers})
-    with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310 - fixed Vertex AI / metadata-server / configured endpoint
-        return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310 - fixed Vertex AI / metadata-server / configured endpoint
+            out: dict[str, Any] = json.loads(r.read())
+            return out
+    except urllib.error.HTTPError as e:
+        try:
+            raw = e.read().decode(errors="replace")
+            e.msg = json.loads(raw).get("error", {}).get("message", raw)[:300]
+        except (ValueError, AttributeError, OSError):
+            pass
+        raise
 
 
 def gcp_access_token() -> str:
@@ -262,25 +273,34 @@ class FirstAvailable:
 
     def complete(self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
         if self.chosen is not None:
-            return self.chosen.complete(system, messages, tools)
-        import urllib.error
+            return self._with_backoff(self.chosen, system, messages, tools)
         for c in self.candidates:
             label = f"{c.model}@{getattr(c, 'region', '')}"
             if label not in self.attempted:
                 self.attempted.append(label)
             try:
-                r = c.complete(system, messages, tools)
+                r = self._with_backoff(c, system, messages, tools)
                 self.chosen = c
                 return r
             except urllib.error.HTTPError as e:
-                try:
-                    detail = json.loads(e.read() or b"{}").get("error", {}).get("message", "")[:160]
-                except (ValueError, AttributeError):
-                    detail = ""
-                self.errors.append(f"{c.model}@{getattr(c, 'region', '')}: HTTP {e.code} {detail}".strip())
-                if e.code not in (400, 404):
+                self.errors.append(f"{c.model}@{getattr(c, 'region', '')}: HTTP {e.code} {str(e.msg)[:160]}".strip())
+                if e.code not in (400, 403, 404, 429):
                     raise
         raise RuntimeError("no candidate model available: " + "; ".join(self.errors))
+
+    backoff_s: tuple[float, ...] = (2.0, 6.0, 15.0)
+
+    def _with_backoff(self, c: Any, system: str, messages: list[dict[str, Any]],
+                      tools: list[dict[str, Any]]) -> LLMResponse:
+        import time
+        for wait in (*self.backoff_s, None):
+            try:
+                return c.complete(system, messages, tools)  # type: ignore[no-any-return]
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or wait is None:
+                    raise
+                time.sleep(wait)
+        raise RuntimeError("unreachable")
 
     def cost_usd(self, r: LLMResponse) -> float:
         return (self.chosen or self.candidates[0]).cost_usd(r)
@@ -291,9 +311,10 @@ _NOT_TEXT = ("image", "embedding", "tts", "live", "audio", "vision", "veo", "ima
 
 
 def _rank_gemini(names: list[tuple[str, str]]) -> list[str]:
-    """Order discovered Gemini text models: newest generation first (Google
-    restricts older generations for projects without prior usage), then Flash
-    before Pro (cost), then GA before preview."""
+    """Order discovered Gemini text models: generally available before preview
+    (preview models carry tight quotas), newest generation first within each
+    (Google retires older generations and blocks new access a month before),
+    then Flash before Pro (cost)."""
     def version(m: str) -> tuple[float, ...]:
         import re as _re
         v = _re.search(r"gemini-(\d+(?:\.\d+)?)", m)
@@ -307,13 +328,20 @@ def _rank_gemini(names: list[tuple[str, str]]) -> list[str]:
             continue
         ga = 0 if stage in ("GA", "") else 1
         tier = 0 if "flash" in m and "lite" not in m else (1 if "lite" in m else 2)
-        rows.append(((tuple(-x for x in version(m)), tier, ga), m))
+        rows.append(((ga, tuple(-x for x in version(m)), tier), m))
     return [m for _, m in sorted(set(rows))]
 
 
 def discover_gemini_models(project: str, region: str,
                            get: Callable[[str, dict[str, str]], dict[str, Any]] | None = None) -> list[str]:
-    """List Google publisher models available to the project (Model Garden)."""
+    """Ranked Gemini text model ids listed for the project at ``region``."""
+    return _rank_gemini(discover_gemini_catalogue(project, region, get))
+
+
+def discover_gemini_catalogue(project: str, region: str,
+                              get: Callable[[str, dict[str, str]], dict[str, Any]] | None = None
+                              ) -> list[tuple[str, str]]:
+    """(resource name, launch stage) of Google publisher models (Model Garden)."""
     def _get(url: str, headers: dict[str, str]) -> dict[str, Any]:
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=20) as r:  # nosec B310 - fixed Vertex AI endpoint
@@ -324,7 +352,6 @@ def discover_gemini_models(project: str, region: str,
     names: list[tuple[str, str]] = []
     token = ""
     for _ in range(10):
-        import urllib.parse
         q = {"pageSize": "200", **({"pageToken": token} if token else {})}
         url = f"https://{host}/v1beta1/publishers/google/models?" + urllib.parse.urlencode(q)
         d = fetch(url, {"Authorization": f"Bearer {gcp_access_token()}", "x-goog-user-project": project})
@@ -332,7 +359,7 @@ def discover_gemini_models(project: str, region: str,
         token = d.get("nextPageToken", "")
         if not token:
             break
-    return _rank_gemini(names)
+    return names
 
 
 def provider_from_env() -> LLMProvider:
@@ -343,18 +370,22 @@ def provider_from_env() -> LLMProvider:
         configured = os.environ.get("CRI_LLM_MODEL", "")
         locations = [region, "global"] if region != "global" else ["global"]
         listed: dict[str, list[str]] = {}          # model id -> locations whose catalogue lists it
+        stage: dict[str, str] = {}                 # model id -> launch stage (GA wins across locations)
         if not configured:
             for loc in locations:
                 try:
-                    for m in discover_gemini_models(project, loc):
+                    for name, st in discover_gemini_catalogue(project, loc):
+                        m = name.rsplit("/", 1)[-1]
                         listed.setdefault(m, []).append(loc)
+                        if stage.get(m) != "GA":
+                            stage[m] = st
                 except Exception as e:  # noqa: BLE001 - discovery is best effort; fall back to known ids
                     import logging
                     logging.getLogger(__name__).warning("Gemini model discovery failed at %s: %s", loc, e)
         if configured:
             pairs = [(m.strip(), loc) for m in configured.split(",") for loc in locations]
         elif listed:
-            ranked = _rank_gemini([(f"publishers/google/models/{m}", "") for m in listed])[:8]
+            ranked = _rank_gemini([(f"publishers/google/models/{m}", stage.get(m, "")) for m in listed])[:8]
             pairs = [(m, loc) for m in ranked for loc in listed[m]]
         else:
             fallback = ["gemini-3.1-flash-lite", "gemini-3-flash", "gemini-3-flash-preview"]
