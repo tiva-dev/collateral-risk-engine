@@ -1,1 +1,1 @@
-{"note": "US per-mechanism stress ablation (partitioned), candidate-2026.11.8, 400 paths like the NGX ablation", "source_run_id": "45873299276", "variant_set": "ablation", "shards": 8, "parts": ["sim-US"]}
+{"note": "RC1 acceptance measurements US, frozen 2000 paths, partitioned", "source_run_id": "45873299276", "variant_set": "rc1", "shards": 8, "paths": 2000, "parts": ["hist-US", "sim-US", "repay-US", "frontier-US"]}
