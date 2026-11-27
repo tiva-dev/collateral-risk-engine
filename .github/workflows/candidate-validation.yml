@@ -29,6 +29,9 @@ jobs:
         - repay-NGX
         - frontier-US
         - frontier-NGX
+        # Partitioned execution: a part runs as `shards` jobs (request field, default 1);
+        # matrix entries beyond the requested count exit immediately.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
     - uses: actions/checkout@v4
     - id: req
@@ -39,6 +42,10 @@ jobs:
         want=$(jq -r ''(.parts // null) | if . == null then "all" else join(",") end'' infra/requests/validation.json 2>/dev/null || echo all)
 
         run=true; [ "$want" != all ] && ! echo ",$want," | grep -q ",${{ matrix.part }}," && run=false
+
+        n=$(jq -r ''.shards // 1'' infra/requests/validation.json 2>/dev/null || echo 1); [ "${{ matrix.shard }}" -ge "$n" ] && run=false
+
+        echo "SHARD=${{ matrix.shard }}/$n" >> "$GITHUB_ENV"; echo "PATHS=$(jq -r ''.paths // 0'' infra/requests/validation.json)" >> "$GITHUB_ENV"
 
         echo "SOURCE_RUN=$src" >> "$GITHUB_ENV"; echo "run=$run" >> "$GITHUB_OUTPUT"
 
@@ -77,14 +84,14 @@ jobs:
 
         vset=$(jq -r ''.variant_set // "ablation"'' infra/requests/validation.json)
 
-        python -m research.methodology_lab.candidate_validation "$manifest" --part ${{ matrix.part }} --variant-set "$vset" --out out | tee out.log
+        python -m research.methodology_lab.candidate_validation "$manifest" --part ${{ matrix.part }} --variant-set "$vset" --shard "$SHARD" --paths "$PATHS" --out out | tee out.log
 
         '
       if: steps.req.outputs.run == 'true'
     - uses: actions/upload-artifact@v4
       if: always() && steps.req.outputs.run == 'true'
       with:
-        name: candidate-validation-${{ matrix.part }}
+        name: candidate-validation-${{ matrix.part }}-${{ matrix.shard }}
         path: 'out/**
 
           out.log

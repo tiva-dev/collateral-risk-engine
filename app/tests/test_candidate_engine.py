@@ -681,3 +681,38 @@ def test_rc1_financial_definition_is_frozen() -> None:
                     "app/historical_data/calendars.py"]
     for f in engine_files:
         assert hashlib.sha256((root / f).read_bytes()).hexdigest() == man["source"]["file_sha256"][f], f
+
+
+def test_measurements_do_not_change_outcomes_and_costs_add_up() -> None:
+    from app.candidate.lifecycle import metrics, paired_difference
+
+    hs, bars, dates = _cohort_inputs()
+    cohorts = [run_cohort(holdings=hs, bars=bars, origination=dates[i], term_sessions=30, seed=i, maturity=m,
+                          config=CandidateConfig(n_paths=200), workout_sessions=20)
+               for i, m in ((400, "default"), (410, "refinance"))]
+    for c in cohorts:
+        for v in c["variants"].values():
+            assert v["execution_costs_intervention"] + v["execution_costs_workout"] == pytest.approx(
+                v["execution_costs"], abs=1e-6)
+            for cal in v["calibration"]:
+                assert cal["censored"] == (cal["realized_level"] is None)
+    m = metrics([c["variants"]["adaptive"] | {"origination": c["origination"]} for c in cohorts])
+    assert "cost_intervention_share" in m and "cost_maturity_workout_share" in m
+    d = paired_difference(cohorts, "adaptive", "fixed_psi_1.15", "margin_calls")
+    assert d["pairs"] == 2 and len(d["ci95"]) == 2
+
+
+def test_rc1_matched_origination_uses_rc1_capacity() -> None:
+    from app.candidate.lifecycle import Variant
+    from app.candidate.rc import RC_OVERRIDES
+
+    hs, bars, dates = _cohort_inputs()
+    eng = tuple((k, v) for k, v in RC_OVERRIDES if k != "capacity_utilisation")
+    base = run_cohort(holdings=hs, bars=bars, origination=dates[300], term_sessions=5, seed=1, workout_sessions=1,
+                      config=CandidateConfig(n_paths=200), variants=(Variant("rc1", "adaptive", engine=eng),),
+                      origination_engine=eng, principal_scale=0.925)
+    pol = run_cohort(holdings=hs, bars=bars, origination=dates[300], term_sessions=5, seed=1, workout_sessions=1,
+                     config=CandidateConfig(n_paths=200, capacity_utilisation=0.925),
+                     variants=(Variant("rc1", "adaptive", engine=eng),), origination_mode="policy")
+    # Matched (scale 0.925 on RC1's engine) and policy-originated (RC1 utilisation) lend the same.
+    assert base["principal"] == pytest.approx(pol["variants"]["rc1"]["principal"], rel=1e-9)
