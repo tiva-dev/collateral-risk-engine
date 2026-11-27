@@ -34,3 +34,9 @@ def test_deploy_and_terraform_refuse_tag_refs() -> None:
     for name in ("gcp-deploy.yml", "gcp-terraform.yml"):
         body = (WORKFLOWS / name).read_text()
         assert 'case "${{ github.ref }}" in refs/tags/*)' in body, name
+
+
+def test_cloud_trust_excludes_tags() -> None:
+    body = (WORKFLOWS.parents[1] / "infra/bootstrap/bootstrap.sh").read_text()
+    assert "assertion.ref.startsWith('refs/heads/')" in body
+    assert body.count('--attribute-condition "${CONDITION}"') == 2   # create and keep-current paths

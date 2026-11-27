@@ -82,6 +82,12 @@ gcloud billing accounts add-iam-policy-binding "$BILLING_ACCOUNT" --member "serv
 gcloud billing accounts add-iam-policy-binding "$BILLING_ACCOUNT" --member "serviceAccount:${TF_SA}" --role roles/billing.viewer >/dev/null
 
 OPS_NUMBER="$(gcloud projects describe "$OPS" --format='value(projectNumber)')"
+# Trust only this repository's branch refs. Tags (including new tags on old
+# commits, whose workflow files predate the tag guards) and pull-request refs
+# never obtain cloud credentials. Applied live 27 Nov 2026 after the RC1
+# release-tag incident; a dispatch at refs/tags/cri-1.0.0-rc1 is rejected with
+# "The given credential is rejected by the attribute condition."
+CONDITION="assertion.repository == '${REPO}' && assertion.ref.startsWith('refs/heads/')"
 if ! gcloud iam workload-identity-pools describe github --project "$OPS" --location global >/dev/null 2>&1; then
   gcloud iam workload-identity-pools create github --project "$OPS" --location global --display-name "GitHub Actions"
 fi
@@ -91,11 +97,12 @@ if ! gcloud iam workload-identity-pools providers describe cri-repo --project "$
     --workload-identity-pool github --display-name "tiva-dev/collateral-risk-engine" \
     --issuer-uri "https://token.actions.githubusercontent.com" \
     --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref,attribute.environment=assertion.environment,attribute.actor=assertion.actor,attribute.env_ref=assertion.environment + '@' + assertion.ref" \
-    --attribute-condition "assertion.repository == '${REPO}'"
+    --attribute-condition "${CONDITION}"
 fi
 # Keep the mapping current on an existing provider (adds env_ref).
 gcloud iam workload-identity-pools providers update-oidc cri-repo --project "$OPS" --location global \
-  --workload-identity-pool github --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref,attribute.environment=assertion.environment,attribute.actor=assertion.actor,attribute.env_ref=assertion.environment + '@' + assertion.ref" >/dev/null
+  --workload-identity-pool github --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref,attribute.environment=assertion.environment,attribute.actor=assertion.actor,attribute.env_ref=assertion.environment + '@' + assertion.ref" \
+  --attribute-condition "${CONDITION}" >/dev/null
 POOL="projects/${OPS_NUMBER}/locations/global/workloadIdentityPools/github"
 # Production Terraform only from the main branch: the binding requires both
 # the GitHub environment and the ref, so a feature branch cannot use it.
