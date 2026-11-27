@@ -36,9 +36,13 @@ def test_isolation_steps_use_classified_probes_only() -> None:
 
 
 def test_terraform_apply_refuses_while_frozen() -> None:
+    # The freeze was lifted on 27 Nov 2026 after Stages 1 and 2 were verified; the
+    # guard must stay in place so a future migration can re-freeze by adding the file.
     body = (ROOT / ".github/workflows/gcp-terraform.yml").read_text()
-    assert "infra/MIGRATION_FREEZE" in body and (ROOT / "infra/MIGRATION_FREEZE").exists()
+    assert 'if [ -f infra/MIGRATION_FREEZE ] && [ "$act" = "apply" ]' in body
+    assert "Terraform apply is frozen" in body
     assert 'env="${{ inputs.environment }}"' in body
+    assert '"$env" = "production" ] && [ "$act" = "apply" ] && [ "${{ github.ref }}" != "refs/heads/main" ]' in body
 
 
 def test_committed_backends_never_target_the_retired_bucket() -> None:
