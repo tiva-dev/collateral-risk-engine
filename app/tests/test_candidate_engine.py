@@ -648,3 +648,16 @@ def test_capacity_utilisation_scales_credit_not_states() -> None:
     with pytest.raises(ValueError):
         rc(holdings=hs, bars=bars, origination=dates[300], term_sessions=5, seed=1,
            config=CandidateConfig(n_paths=200, capacity_utilisation=1.2), workout_sessions=1)
+
+
+def test_rc1_frozen_configuration_matches_published_spec() -> None:
+    import json
+    from pathlib import Path
+
+    from app.candidate.rc import RC_ID, rc_config, rc_fingerprint
+
+    spec = json.loads((Path(__file__).resolve().parents[2] / "docs/methodology/CRI_v1.0_RC1_config.json").read_text())
+    assert spec["rc"] == RC_ID and spec["fingerprint_sha256"] == rc_fingerprint()
+    cfg = rc_config()
+    assert cfg.suspension_value == "delayed" and cfg.regime_conditioning and cfg.capacity_utilisation == 0.925
+    assert not cfg.stress_protection and cfg.headroom_mode == "fixed" and not cfg.concentration_control
