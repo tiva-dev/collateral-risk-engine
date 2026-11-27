@@ -221,3 +221,23 @@ def test_stress_deduplicates_account_selection(book) -> None:
     assert g.call("stress_test", {"scenario": STRESS, "account_refs": ["ACC-002", "ACC-002"]})["type"] == "cri_tool_error"
     one = Toolset(book, n_paths=300).stress_test(STRESS, ["ACC-002", "ACC-002"])
     assert len(one["accounts"]) == 1
+
+
+def test_gemini_discovery_ranks_text_models_and_pages(monkeypatch) -> None:
+    from app.analyst.llm import discover_gemini_models
+    monkeypatch.setenv("CRI_GCP_ACCESS_TOKEN", "tok")
+    pages = [{"publisherModels": [{"name": "publishers/google/models/gemini-2.5-pro", "launchStage": "GA"},
+                                  {"name": "publishers/google/models/gemini-embedding-001", "launchStage": "GA"},
+                                  {"name": "publishers/google/models/gemini-3-flash-preview", "launchStage": "PUBLIC_PREVIEW"}],
+              "nextPageToken": "p2"},
+             {"publisherModels": [{"name": "publishers/google/models/gemini-2.5-flash", "launchStage": "GA"},
+                                  {"name": "publishers/google/models/gemini-2.5-flash-image", "launchStage": "GA"},
+                                  {"name": "publishers/google/models/imagen-4", "launchStage": "GA"}]}]
+    seen = []
+
+    def get(url, headers):
+        seen.append((url, headers))
+        return pages[len(seen) - 1]
+    out = discover_gemini_models("proj", "europe-west1", get=get)
+    assert out == ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"]
+    assert "pageToken=p2" in seen[1][0] and seen[0][1]["x-goog-user-project"] == "proj"
