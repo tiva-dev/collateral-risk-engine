@@ -348,8 +348,9 @@ def provider_from_env() -> LLMProvider:
                 try:
                     for m in discover_gemini_models(project, loc):
                         listed.setdefault(m, []).append(loc)
-                except Exception:  # noqa: BLE001 - discovery is best effort; fall back to known ids
-                    continue
+                except Exception as e:  # noqa: BLE001 - discovery is best effort; fall back to known ids
+                    import logging
+                    logging.getLogger(__name__).warning("Gemini model discovery failed at %s: %s", loc, e)
         if configured:
             pairs = [(m.strip(), loc) for m in configured.split(",") for loc in locations]
         elif listed:
