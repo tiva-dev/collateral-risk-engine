@@ -6,6 +6,8 @@ on:
         required: true
         default: '45681534542'
   push:
+    # Branch pushes only: a release-tag push must never deploy, apply or verify.
+    branches: ['**']
     paths:
     - infra/requests/validation.json
 permissions:

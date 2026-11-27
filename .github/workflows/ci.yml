@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    # Branch pushes only: a release-tag push must never deploy, apply or verify.
+    branches: ['**']
   pull_request:
 
 jobs:

@@ -5,6 +5,8 @@ on:
   # so a committed request file triggers them instead. Each run is therefore
   # tied to a reviewed commit that states exactly what was requested.
   push:
+    # Branch pushes only: a release-tag push must never deploy, apply or verify.
+    branches: ['**']
     branches-ignore: [main]
     paths: ["infra/requests/terraform.json"]
   workflow_dispatch:
@@ -38,6 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - id: r
         run: |
+          case "${{ github.ref }}" in refs/tags/*) echo "::error::refusing to run from a tag ref (${{ github.ref }})"; exit 1;; esac
           if [ "${{ github.event_name }}" = "push" ]; then
             env=$(jq -r .environment infra/requests/terraform.json); act=$(jq -r .action infra/requests/terraform.json)
           else
