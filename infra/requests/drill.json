@@ -1,0 +1,1 @@
+{"environment": "staging", "drills": ["rollback", "load", "security", "dr"], "tf_sa": "terraform", "note": "full drill set with evidence recorded in the platform"}

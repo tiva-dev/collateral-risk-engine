@@ -1,0 +1,76 @@
+name: Platform CI
+
+on:
+  push:
+    paths: ["app/**", "infra/**", "Dockerfile", "requirements*.txt", ".github/workflows/platform-ci.yml"]
+  pull_request:
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: owner
+          POSTGRES_USER: cri_owner
+          POSTGRES_DB: cri
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cri_owner" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CRI_TEST_DATABASE_URL: postgresql://cri_owner:owner@localhost:5432/cri
+      CRI_TEST_APP_DATABASE_URL: postgresql://cri_app:app@localhost:5432/cri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Create non-owner application role (as in Cloud SQL)
+        run: PGPASSWORD=owner psql -h localhost -U cri_owner -d cri -c "CREATE ROLE cri_app LOGIN PASSWORD 'app'"
+      - name: Platform tests on Postgres (persistence, RLS, idempotency, audit, webhooks, API)
+        run: python -m pytest -q -rs app/tests/test_platform.py
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build service and research images
+        run: |
+          docker build --target base -t cri-service:ci .
+          docker build --target research -t cri-research:ci .
+      - name: Boot the service image against SQLite and probe it
+        run: |
+          docker run -d --name cri -p 8080:8080 -e CRI_ENV=local -e CRI_API_KEY_PEPPER=ci \
+            -e CRI_DATABASE_URL=sqlite:////tmp/cri.sqlite3 -e CRI_AUTO_MIGRATE=true cri-service:ci
+          for i in $(seq 1 30); do curl -fsS localhost:8080/health && break; sleep 1; done || true
+          docker logs cri 2>&1 | tail -40
+          curl -fsS localhost:8080/ready
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/monitoring/accounts)" = "401"
+          docker logs cri | tail -20
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - run: terraform fmt -check -recursive -diff infra/terraform
+      - name: Validate every environment
+        run: |
+          for e in dev staging production; do
+            (cd infra/terraform/envs/$e && terraform init -backend=false -input=false >/dev/null && terraform validate)
+          done
+
+  console-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install playwright==1.48.0
+      - name: Control Centre session flow (headless Chrome, desktop and mobile)
+        run: python infra/scripts/console_browser_check.py

@@ -1,0 +1,9 @@
+.git
+**/__pycache__
+**/*.pyc
+.venv
+simulation_outputs
+data/historical_cache
+data/audit
+*.sqlite3
+infra

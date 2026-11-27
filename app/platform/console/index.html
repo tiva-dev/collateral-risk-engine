@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CRI Control Centre</title>
+<link rel="stylesheet" href="/console/styles.css">
+<script src="/console/app.js" defer></script>
+</head>
+<body>
+<div id="login" class="login">
+  <form id="login-form">
+    <h1>CRI Control Centre</h1>
+    <p class="muted">Sign in with a CRI API key. Keys are kept only in this browser tab's session storage.</p>
+    <input id="login-key" type="password" autocomplete="off" placeholder="cri_..." required>
+    <button type="submit">Sign in</button>
+    <p id="login-error" class="error"></p>
+  </form>
+</div>
+<div id="shell" class="shell" hidden>
+  <header class="top">
+    <div class="brand">CRI <span>Control Centre</span></div>
+    <div id="env" class="env"></div>
+    <div class="banner" id="safety"></div>
+    <div class="who"><span id="who"></span>
+      <select id="tenant-select" title="Tenant to view (operators)" hidden></select>
+      <button id="logout" class="ghost">Sign out</button></div>
+  </header>
+  <nav id="nav"></nav>
+  <main id="main"></main>
+</div>
+</body>
+</html>

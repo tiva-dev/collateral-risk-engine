@@ -22,6 +22,9 @@ exclude = ["app.tests*"]
 pythonpath = ["."]
 testpaths = ["app/tests"]
 
+[tool.ruff]
+extend-exclude = ["shadow_engines"]
+
 [tool.ruff.lint]
 # The inherited codebase intentionally uses compact one-line statements. Keep
 # lint enforcement focused on correctness until those modules are reformatted.
@@ -52,4 +55,12 @@ module = [
   "app.monitoring.events",
   "app.api.routes",
 ]
+ignore_errors = true
+
+# Frozen engine snapshots (shadow mode) and research code are imported lazily
+# by the platform; they are checked in their own branches, not re-typed here.
+[[tool.mypy.overrides]]
+module = ["shadow_engines.*", "research.*", "scipy.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
 ignore_errors = true

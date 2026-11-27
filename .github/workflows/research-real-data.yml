@@ -1,0 +1,100 @@
+name: Research Real-Data Experiments
+
+# RESEARCH ONLY: preliminary method comparison on provider-backed history.
+# Reads the dataset and checksummed snapshot produced by an Official Provider
+# Validation Run, verifies every input against the snapshot, and makes no
+# provider calls. Results are not validation evidence (ADR-002, ADR-006).
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Official Provider Validation Run whose artifacts to use"
+        required: true
+        default: "45681534542"
+  push:
+    branches: ["research/**"]
+    paths:
+      - "research/methodology_lab/**"
+      - ".github/workflows/research-real-data.yml"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  real-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        market: [NGX, US]
+    env:
+      SOURCE_RUN: ${{ inputs.source_run_id || '45681534542' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out v0.6.2 engine (main)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: engines/v062
+      - name: Check out v0.7.0 engine (PR #21, frozen)
+        uses: actions/checkout@v4
+        with:
+          ref: agent/cri-v070-recoverability
+          path: engines/v070
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt numpy scipy
+      - name: Download dataset artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: official-provider-validation-evidence
+          run-id: ${{ env.SOURCE_RUN }}
+          github-token: ${{ github.token }}
+          path: data
+      - name: Download snapshot artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: historical-data-snapshot
+          run-id: ${{ env.SOURCE_RUN }}
+          github-token: ${{ github.token }}
+          path: snapshots
+      - name: Verify inputs against snapshot
+        run: |
+          snap=$(dirname "$(find snapshots -name SNAPSHOT.json | head -n 1)")
+          python -m app.historical_data.snapshot verify "$snap"
+          python - "$snap" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          snap = json.loads((Path(sys.argv[1]) / "SNAPSHOT.json").read_text())
+          manifest = next(Path("data/simulation_results").glob("*.manifest.json"))
+          m = json.loads(manifest.read_text())
+          want = {e["original_path"]: e["sha256"] for e in snap["entries"] if not e.get("missing")}
+          bad = []
+          for p in m["cache_paths"] + m.get("alternate_fx_cache_paths", []):
+              got = hashlib.sha256(Path(p).read_bytes()).hexdigest()
+              if want.get(p) != got:
+                  bad.append(p)
+          print(f"snapshot {snap['snapshot_id']}: {len(m['cache_paths'])} replay inputs checked, {len(bad)} mismatches")
+          sys.exit(1 if bad else 0)
+          PY
+      - name: Run real-data comparison
+        run: |
+          manifest=$(find data/simulation_results -name '*.manifest.json' | head -n 1)
+          python -m research.methodology_lab.real_data "$manifest" --market ${{ matrix.market }} \
+            --v062 "$PWD/engines/v062" --v070 "$PWD/engines/v070" --out research_out \
+            | tee research_out.log
+      - name: Upload results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-real-data-results-${{ matrix.market }}
+          path: |
+            research_out/**
+            research_out.log
+          retention-days: 90

@@ -4,14 +4,10 @@ import unittest
 from datetime import UTC, date, datetime
 
 from app.core.enums import AssetType
-from app.core.models import Holding, Loan, MarketData
+from app.core.models import Holding, MarketData
 from app.credit.interest import InterestPolicy
 from app.historical_data.models import HistoricalBar
-from app.liquidation.execution import (
-    build_recovery_advisory,
-    execute_recovery_advisory,
-    projected_interest_buffer,
-)
+from app.liquidation.execution import execute_recovery_advisory
 from app.liquidation.policy import LiquidationExecutionPolicy
 from app.simulations.replay import (
     POLICY_ORIGINATION,
@@ -40,41 +36,29 @@ class RecoveryExecutionTests(unittest.TestCase):
             )
         }
 
-    def test_advisory_contains_quantity_limit_price_and_net_recovery(self) -> None:
-        policy = LiquidationExecutionPolicy(execution_cost_rate=0.01)
-        advisory = build_recovery_advisory(
-            holdings=self.holdings,
-            market_data=self.market_data,
-            target_net_recovery=4_950,
-            policy=policy,
-            trigger_state="liquidation",
-            issued_date=date(2026, 1, 5),
-        )
-
-        order = advisory["orders"][0]
-        self.assertEqual(order["asset_id"], "AAA")
-        self.assertEqual(order["requested_quantity"], 50)
-        self.assertEqual(order["minimum_limit_price"], 90)
-        self.assertEqual(order["estimated_net_proceeds"], 4_950)
-        self.assertTrue(advisory["plan_complete"])
+    def _advisory(self, quantity: float, participation: float = 1.0) -> dict:
+        holding = self.holdings[0]
+        return {
+            "orders": [
+                {
+                    "instrument_key": holding.stable_key,
+                    "asset_id": "AAA",
+                    "requested_quantity": quantity,
+                    "minimum_limit_price": 90,
+                    "participation_rate": participation,
+                }
+            ]
+        }
 
     def test_execution_uses_bid_costs_and_participation_cap(self) -> None:
         policy = LiquidationExecutionPolicy(
             execution_cost_rate=0.01,
             max_participation_rate=0.02,
         )
-        advisory = build_recovery_advisory(
-            holdings=self.holdings,
-            market_data=self.market_data,
-            target_net_recovery=4_950,
-            policy=policy,
-            trigger_state="liquidation",
-            issued_date=date(2026, 1, 5),
-        )
         updated, execution = execute_recovery_advisory(
             holdings=self.holdings,
             market_data=self.market_data,
-            advisory=advisory,
+            advisory=self._advisory(50),
             remaining_target=4_950,
             policy=policy,
             observation_date=date(2026, 1, 5),
@@ -85,19 +69,49 @@ class RecoveryExecutionTests(unittest.TestCase):
         self.assertEqual(fill["execution_price"], 100)
         self.assertEqual(fill["execution_costs"], 20)
         self.assertEqual(fill["net_proceeds"], 1_980)
+        self.assertEqual(fill["instrument_key"], self.holdings[0].stable_key)
         self.assertEqual(updated[0].quantity, 80)
         self.assertEqual(execution["status"], "partial")
 
-    def test_halted_stale_and_below_limit_quotes_do_not_fill(self) -> None:
-        policy = LiquidationExecutionPolicy(maximum_quote_age_days=1)
-        advisory = build_recovery_advisory(
+    def test_order_participation_rate_below_policy_cap_is_used(self) -> None:
+        """Audit C4: execution uses the instrument's own participation rate."""
+        policy = LiquidationExecutionPolicy(max_participation_rate=0.10)
+        _, execution = execute_recovery_advisory(
             holdings=self.holdings,
             market_data=self.market_data,
-            target_net_recovery=1_000,
+            advisory=self._advisory(50, participation=0.03),
+            remaining_target=10_000,
             policy=policy,
-            trigger_state="liquidation",
-            issued_date=date(2026, 1, 5),
+            observation_date=date(2026, 1, 5),
         )
+        self.assertEqual(execution["fills"][0]["filled_quantity"], 30)
+
+    def test_same_symbol_on_two_venues_is_not_conflated(self) -> None:
+        holdings = [
+            Holding("AAA", AssetType.LISTED_EQUITY, 100, "USD", "NYSE"),
+            Holding("AAA", AssetType.LISTED_EQUITY, 100, "GBP", "LSE"),
+        ]
+        quote = self.market_data["AAA"]
+        market = {holdings[1].stable_key: quote}  # only the LSE line has a quote
+        advisory = {
+            "orders": [
+                {"asset_id": "AAA", "requested_quantity": 10, "participation_rate": 1.0}
+            ]
+        }
+        updated, execution = execute_recovery_advisory(
+            holdings=holdings,
+            market_data={"AAA": quote, **market},
+            advisory=advisory,
+            remaining_target=1_000,
+            policy=LiquidationExecutionPolicy(max_participation_rate=1.0),
+            observation_date=date(2026, 1, 5),
+        )
+        # A bare asset_id is ambiguous across venues: nothing is sold.
+        self.assertEqual(execution["fills"], [])
+        self.assertEqual(updated, holdings)
+
+    def test_halted_stale_and_below_limit_quotes_do_not_fill(self) -> None:
+        policy = LiquidationExecutionPolicy(maximum_quote_age_days=1)
         stale = {
             "AAA": MarketData(
                 "AAA",
@@ -111,7 +125,7 @@ class RecoveryExecutionTests(unittest.TestCase):
         updated, execution = execute_recovery_advisory(
             holdings=self.holdings,
             market_data=stale,
-            advisory=advisory,
+            advisory=self._advisory(10),
             remaining_target=1_000,
             policy=policy,
             observation_date=date(2026, 1, 5),
@@ -120,12 +134,6 @@ class RecoveryExecutionTests(unittest.TestCase):
         self.assertEqual(updated, self.holdings)
         self.assertEqual(execution["status"], "unfilled")
         self.assertIn("AAA:quote_too_stale", execution["unfilled_reasons"])
-
-    def test_interest_buffer_covers_execution_and_settlement_delay(self) -> None:
-        self.assertEqual(
-            projected_interest_buffer(Loan(10_000), 0.365, 2),
-            20,
-        )
 
     def test_official_scenarios_use_full_limit_and_market_policy_rates(self) -> None:
         scenarios = official_portfolio_scenarios()

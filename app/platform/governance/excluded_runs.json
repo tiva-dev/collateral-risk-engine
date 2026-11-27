@@ -1,0 +1,32 @@
+{
+  "note": "Model runs excluded from performance summaries. Rows stay in the evaluation history and audit log. Each entry needs a reason and the commit that fixed the defect.",
+  "entries": [
+    {
+      "kind": "shadow",
+      "run_id": "shr_782f8d18f676413d",
+      "model_id": "candidate",
+      "reason": "candidate-2026.11.1 defect: daily-bar quotes carry no bid, so every instrument was treated as unsellable (zero capacity, margin call on all accounts). Fixed in 34b8cb5.",
+      "fixed_in": "34b8cb5"
+    },
+    {
+      "kind": "backtest",
+      "selector": {
+        "requested_by": "cli:lifecycle-all",
+        "created_before": "2026-11-26T14:00:00+00:00"
+      },
+      "model_id": "*",
+      "reason": "first lifecycle validation batch ran with the candidate-2026.11.1 bid defect; superseded by the 14:12 UTC batch.",
+      "fixed_in": "34b8cb5"
+    },
+    {
+      "kind": "backtest",
+      "selector": {
+        "requested_by": "cli:lifecycle-all",
+        "engine_version_not": "candidate-2026.11.8"
+      },
+      "model_id": "*",
+      "reason": "lifecycle batches produced by candidate versions before 2026.11.5 (same-session execution, shared market state between passes, unsold collateral marked as recovered, and the earlier defects); superseded by 2026.11.6 (also: origination capacity under data deterioration).",
+      "fixed_in": "candidate-2026.11.6"
+    }
+  ]
+}

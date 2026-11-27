@@ -15,7 +15,8 @@ venv/
 env/
 
 # Local runtime data
-data/
+data/*
+!data/ledger/
 *.log
 
 # Build artifacts

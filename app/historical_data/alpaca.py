@@ -11,7 +11,16 @@ from app.market_data.identity import InstrumentIdentity
 
 from .cache import HistoricalDataCache
 from .config import load_config
-from .models import HistoricalBar, HistoricalSeries, canonical_series_payload
+from .models import (
+    PROVENANCE_REPORTED,
+    TRADE_STATUS_NO_TRADE,
+    TRADE_STATUS_TRADED,
+    TRADE_STATUS_UNKNOWN,
+    HistoricalBar,
+    HistoricalSeries,
+    canonical_series_payload,
+    ohlc_with_provenance,
+)
 from .providers import HistoricalDataProvider, ProviderError, validate_provider_url
 
 
@@ -111,19 +120,42 @@ class AlpacaTradingHistoricalProvider(HistoricalDataProvider):
         for b in raw_bars:
             try:
                 ts = datetime.fromisoformat(str(b.get("t")))
+                parsed = ohlc_with_provenance(
+                    b, {"open": "o", "high": "h", "low": "l", "close": "c"}
+                )
+                if parsed is None:
+                    warnings.append(
+                        f"Alpaca bar skipped for {instrument} at {ts}: missing close"
+                    )
+                    continue
+                values, provenance = parsed
+                volume = b.get("v")
+                # Volume is per feed: with the IEX feed it covers the IEX venue
+                # only (a few percent of consolidated volume).
+                provenance["volume"] = (
+                    PROVENANCE_REPORTED if volume not in (None, "") else "missing"
+                )
                 bars.append(
                     HistoricalBar(
                         instrument=instrument,
                         timestamp=ts,
-                        open=float(b.get("o", 0)),
-                        high=float(b.get("h", 0)),
-                        low=float(b.get("l", 0)),
-                        close=float(b.get("c", 0)),
-                        volume=float(b.get("v", 0)),
+                        open=values["open"],
+                        high=values["high"],
+                        low=values["low"],
+                        close=values["close"],
+                        volume=float(volume or 0),
                         currency="USD",
                         provider_name=self.provider_name,
                         instrument_identity=identity,
                         raw_metadata=b,
+                        field_provenance=provenance,
+                        trade_status=(
+                            TRADE_STATUS_UNKNOWN
+                            if volume is None
+                            else TRADE_STATUS_TRADED
+                            if float(volume) > 0
+                            else TRADE_STATUS_NO_TRADE
+                        ),
                     )
                 )
             except (KeyError, TypeError, ValueError, OverflowError) as exc:

@@ -13,6 +13,11 @@ from app.market_data.identity import InstrumentIdentity
 from .cache import HistoricalDataCache
 from .config import load_config
 from .models import (
+    PROVENANCE_IMPUTED_FROM_CLOSE,
+    PROVENANCE_REPORTED,
+    TRADE_STATUS_NO_TRADE,
+    TRADE_STATUS_TRADED,
+    TRADE_STATUS_UNKNOWN,
     HistoricalBar,
     HistoricalFXRate,
     HistoricalFXSeries,
@@ -20,6 +25,22 @@ from .models import (
     canonical_series_payload,
 )
 from .providers import HistoricalDataProvider, ProviderError, validate_provider_url
+
+# Currencies NGNMarket quotes against the naira (forex/current and
+# forex/history). Non-naira crosses such as EUR/USD return an empty series, so
+# they are rejected before spending a call.
+NGNMARKET_FX_CURRENCIES = frozenset(
+    {"USD", "EUR", "GBP", "CAD", "AUD", "GHS", "ZAR", "CNY", "JPY", "SAR"}
+)
+# Upper bound on pages fetched for one series, as a guard against a provider
+# that never reports has_next=false.
+MAX_PAGES = 60
+FX_PAGE_LIMIT = 1000
+
+
+def ngnmarket_supports_fx_pair(from_currency: str, to_currency: str) -> bool:
+    pair = {from_currency.upper(), to_currency.upper()}
+    return "NGN" in pair and bool(pair - {"NGN"} <= NGNMARKET_FX_CURRENCIES) and len(pair) == 2
 
 
 class NGNMarketHistoricalProvider(HistoricalDataProvider):
@@ -177,17 +198,26 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
         )
 
     def _rows(self, data):
+        """Return the list of observation rows from an unwrapped payload.
+
+        NGNMarket nests rows one level below the envelope: after
+        parse_envelope strips ``{"success", "data", "meta"}`` the remaining
+        object is ``{"data": [...], "pagination": {...}, ...}``.
+        """
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
-            return (
-                data.get("data")
-                or data.get("prices")
-                or data.get("chart")
-                or data.get("history")
-                or []
-            )
+            for key in ("data", "rates", "prices", "chart", "history"):
+                rows = data.get(key)
+                if isinstance(rows, list):
+                    return rows
         return []
+
+    @staticmethod
+    def _pagination(data):
+        if isinstance(data, dict) and isinstance(data.get("pagination"), dict):
+            return data["pagination"]
+        return {}
 
     def parse_company_chart(
         self, symbol, payload, start_date, end_date, asset_type=AssetType.LISTED_EQUITY
@@ -224,28 +254,69 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                 dt = date.fromisoformat(str(d)[:10])
                 if start_date <= dt <= end_date:
                     c = float(close)
-                    open_value = b.get("open", b.get("o"))
-                    high_value = b.get("high", b.get("h"))
-                    low_value = b.get("low", b.get("l"))
+                    reported = {
+                        "open": b.get("open", b.get("o")),
+                        "high": b.get("high", b.get("h")),
+                        "low": b.get("low", b.get("l")),
+                        "close": b.get("close", b.get("c")),
+                    }
+                    provenance = {
+                        name: (
+                            PROVENANCE_REPORTED
+                            if value not in (None, "")
+                            else PROVENANCE_IMPUTED_FROM_CLOSE
+                        )
+                        for name, value in reported.items()
+                    }
+                    if reported["close"] in (None, ""):
+                        # Close came from the "price" field.
+                        provenance["close"] = "reported_as_price"
                     null_ohlc_fallbacks += sum(
-                        value in (None, "")
-                        for value in (open_value, high_value, low_value)
+                        provenance[f] == PROVENANCE_IMPUTED_FROM_CLOSE
+                        for f in ("open", "high", "low")
                     )
+                    trade_count = b.get("trade_count")
+                    volume = b.get("volume", b.get("v"))
+                    # Older NGNMarket rows carry volume/value_traded/trade_count
+                    # keys with null values. Record that instead of letting
+                    # the bar's volume default to 0.0.
+                    provenance["volume"] = (
+                        PROVENANCE_REPORTED if volume not in (None, "") else "missing"
+                    )
+                    provenance["value_traded"] = (
+                        PROVENANCE_REPORTED
+                        if b.get("value_traded") not in (None, "")
+                        else "missing"
+                    )
+                    if trade_count is not None or volume is not None:
+                        traded = bool(trade_count) or bool(volume)
+                        trade_status = (
+                            TRADE_STATUS_TRADED if traded else TRADE_STATUS_NO_TRADE
+                        )
+                    else:
+                        trade_status = TRADE_STATUS_UNKNOWN
+
+                    def _v(name, c=c, reported=reported):
+                        value = reported[name]
+                        return c if value in (None, "") else float(value)
+
                     bars.append(
                         HistoricalBar(
                             symbol,
                             dt,
-                            float(c if open_value in (None, "") else open_value),
-                            float(c if high_value in (None, "") else high_value),
-                            float(c if low_value in (None, "") else low_value),
+                            _v("open"),
+                            _v("high"),
+                            _v("low"),
                             c,
                             b.get("adjusted_close"),
-                            float(b.get("volume", b.get("v", 0)) or 0),
+                            float(volume or 0),
                             b.get("value_traded"),
                             "NGN",
                             provider_name=self.provider_name,
                             instrument_identity=identity,
                             raw_metadata=b,
+                            field_provenance=provenance,
+                            trade_status=trade_status,
                         )
                     )
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
@@ -271,14 +342,18 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
         )
 
     def parse_fx_history(self, fc, tc, payload, start_date, end_date):
-        data = self.parse_envelope(payload)
-        rows = (
-            data.get("rates", data if isinstance(data, list) else [])
-            if isinstance(data, (dict, list))
-            else []
-        )
+        """Parse one or more /forex/history pages into an ascending series.
+
+        ``payload`` may be a single response envelope or a list of page
+        envelopes. Rows carry ``rate_date``, ``rate`` and
+        ``source_currency``/``target_currency``; they arrive newest first.
+        """
+        pages = payload if isinstance(payload, list) else [payload]
+        rows = []
+        for page in pages:
+            rows.extend(self._rows(self.parse_envelope(page)))
         warnings = list(self.warnings)
-        rates = []
+        by_date: dict[date, HistoricalFXRate] = {}
         if not rows:
             warnings.append(f"No NGNMarket FX data for {fc}/{tc}")
         for r in rows:
@@ -288,9 +363,11 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                 )
                 continue
             returned_source = str(
-                r.get("source") or r.get("from_currency") or fc
+                r.get("source_currency") or r.get("source") or r.get("from_currency") or fc
             ).upper()
-            returned_target = str(r.get("target") or r.get("to_currency") or tc).upper()
+            returned_target = str(
+                r.get("target_currency") or r.get("target") or r.get("to_currency") or tc
+            ).upper()
             if (returned_source, returned_target) != (fc.upper(), tc.upper()):
                 raise ProviderError(
                     f"NGNMarket FX orientation mismatch: requested {fc}/{tc}, "
@@ -298,7 +375,7 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                     provider=self.provider_name,
                     code="fx_orientation_mismatch",
                 )
-            d = r.get("date") or r.get("timestamp")
+            d = r.get("rate_date") or r.get("date") or r.get("timestamp")
             val = r.get("rate", r.get("close"))
             if not d or val in (None, ""):
                 warnings.append(
@@ -307,21 +384,36 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                 continue
             try:
                 dt = date.fromisoformat(str(d)[:10])
-                if start_date <= dt <= end_date:
-                    rates.append(
-                        HistoricalFXRate(
-                            fc,
-                            tc,
-                            float(val),
-                            dt,
-                            provider_name=self.provider_name,
-                            raw_metadata=r,
-                        )
-                    )
-            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                rate = float(val)
+            except (TypeError, ValueError, OverflowError) as exc:
                 warnings.append(
                     f"Malformed NGNMarket FX row skipped for {fc}/{tc}: {exc}"
                 )
+                continue
+            if not (start_date <= dt <= end_date):
+                continue
+            if rate <= 0:
+                warnings.append(
+                    f"NGNMarket FX row skipped for {fc}/{tc} on {dt}: non-positive rate"
+                )
+                continue
+            if dt in by_date and by_date[dt].rate != rate:
+                warnings.append(
+                    f"NGNMarket FX duplicate date {dt} for {fc}/{tc} with conflicting "
+                    f"rates {by_date[dt].rate} and {rate}; kept the later publication"
+                )
+                prior = str(by_date[dt].raw_metadata.get("created_at") or "")
+                if str(r.get("created_at") or "") < prior:
+                    continue
+            by_date[dt] = HistoricalFXRate(
+                fc,
+                tc,
+                rate,
+                dt,
+                provider_name=self.provider_name,
+                raw_metadata=r,
+            )
+        rates = [by_date[d] for d in sorted(by_date)]
         return HistoricalFXSeries(
             fc,
             tc,
@@ -331,18 +423,77 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
             start_date,
             end_date,
             warnings,
-            {"rate_count": len(rates), "quota_metadata": self.quota_metadata},
+            {
+                "rate_count": len(rates),
+                "page_count": len(pages),
+                "quota_metadata": self.quota_metadata,
+            },
         )
 
+    def _request_pages(self, path, params, page_limit=None):
+        """Fetch every page of a paginated endpoint; return the raw envelopes."""
+        pages = []
+        page = 1
+        while True:
+            query = dict(params or {})
+            if page > 1 or page_limit:
+                query["page"] = page
+            if page_limit:
+                query["limit"] = page_limit
+            payload = self._request_json(path, query)
+            pages.append(payload)
+            data = payload.get("data") if isinstance(payload, dict) else None
+            pagination = self._pagination(data)
+            if not pagination.get("has_next"):
+                break
+            page += 1
+            if page > MAX_PAGES:
+                raise ProviderError(
+                    f"NGNMarket pagination for {path} exceeded {MAX_PAGES} pages",
+                    provider=self.provider_name,
+                    code="pagination_limit",
+                )
+        return pages
+
     def fetch_company_list(self, exchange="NGX", force_refresh=False):
-        key = {"provider": self.provider_name, "exchange": exchange}
+        """Return every listed company across all pages.
+
+        The endpoint returns 50 companies per page (151 over 4 pages on
+        25 Nov 2026); reading only the first page made the symbol-mapping
+        check incomplete.
+        """
+        key = {"provider": self.provider_name, "exchange": exchange, "paged": True}
         if not force_refresh and (c := self.cache.read("raw", **key)):
             self.raw_response_paths.append(str(self.cache.read_path("raw", **key)))
-            return self.parse_envelope(c["data"])
-        p = self._request_json("/companies")
-        self.raw_response_paths.append(str(self.cache.write("raw", p, **key)))
-        data = self.parse_envelope(p)
-        return data.get("data", data) if isinstance(data, dict) else data
+            pages = c["data"]
+        else:
+            pages = self._request_pages("/companies", {})
+            self.raw_response_paths.append(str(self.cache.write("raw", pages, **key)))
+        companies = []
+        for page in pages:
+            companies.extend(self._rows(self.parse_envelope(page)))
+        return companies
+
+    def fetch_disclosures(self, symbol: str, force_refresh: bool = False) -> list[dict]:
+        """Every corporate disclosure for a company (free on all plans).
+
+        Used to screen extreme price moves for corporate actions; titles and
+        dates only, no document contents.
+        """
+        key = {"provider": self.provider_name, "symbol": symbol, "disclosures": True}
+        if not force_refresh and (c := self.cache.read("raw", **key)):
+            pages = c["data"]
+        else:
+            pages = self._request_pages(f"/companies/{symbol}/disclosures", {}, page_limit=100)
+            self.raw_response_paths.append(str(self.cache.write("raw", pages, **key)))
+        rows: list[dict] = []
+        for page in pages:
+            rows.extend(self._rows(self.parse_envelope(page)))
+        return [
+            {k: r.get(k) for k in ("title", "disclosed_at", "submission_type", "category", "document_url")}
+            for r in rows
+            if isinstance(r, dict)
+        ]
 
     def fetch_equity_history(
         self, instrument, start_date, end_date, interval="1d", force_refresh=False
@@ -367,7 +518,7 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                     instrument, c["data"], start_date, end_date
                 )
             )
-        p = self._request_json(
+        pages = self._request_pages(
             f"/companies/{instrument}/chart",
             {
                 "from": start_date.isoformat(),
@@ -375,7 +526,8 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                 "format": "detailed",
             },
         )
-        self.raw_response_paths.append(str(self.cache.write("raw", p, **key)))
+        p = pages[0] if len(pages) == 1 else _merge_chart_pages(pages)
+        self.raw_response_paths.append(str(self.cache.write("raw", pages, **key)))
         series = self.parse_company_chart(instrument, p, start_date, end_date)
         if not series.bars:
             raise ProviderError(
@@ -390,7 +542,8 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
             "requested": 1,
             "cached": 0,
             "fetched": 1,
-            "api_call_count": 1,
+            "api_call_count": len(pages),
+            "page_count": len(pages),
             "actual_start": str(series.bars[0].timestamp),
             "actual_end": str(series.bars[-1].timestamp),
         }
@@ -418,7 +571,14 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                     from_currency, to_currency, c["data"], start_date, end_date
                 )
             )
-        p = self._request_json(
+        if not ngnmarket_supports_fx_pair(from_currency, to_currency):
+            raise ProviderError(
+                f"NGNMarket does not quote {from_currency}/{to_currency}; it covers "
+                "naira pairs only",
+                provider=self.provider_name,
+                code="unsupported_pair",
+            )
+        pages = self._request_pages(
             "/forex/history",
             {
                 "source": from_currency,
@@ -426,11 +586,13 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
                 "from": start_date.isoformat(),
                 "to": end_date.isoformat(),
             },
+            page_limit=FX_PAGE_LIMIT,
         )
-        self.raw_response_paths.append(str(self.cache.write("raw", p, **key)))
+        self.raw_response_paths.append(str(self.cache.write("raw", pages, **key)))
         series = self.parse_fx_history(
-            from_currency, to_currency, p, start_date, end_date
+            from_currency, to_currency, pages, start_date, end_date
         )
+        api_calls = len(pages)
         if not series.rates:
             raise ProviderError(
                 f"NGNMarket returned no covered FX rows for {from_currency}/{to_currency}",
@@ -444,7 +606,8 @@ class NGNMarketHistoricalProvider(HistoricalDataProvider):
             "requested": 1,
             "cached": 0,
             "fetched": 1,
-            "api_call_count": 1,
+            "api_call_count": api_calls,
+            "page_count": api_calls,
             "actual_start": str(series.rates[0].timestamp),
             "actual_end": str(series.rates[-1].timestamp),
         }
@@ -517,3 +680,18 @@ def _fx_from_cache(d):
         d.get("warnings", []),
         d.get("data_quality_summary", {}),
     )
+
+
+def _merge_chart_pages(pages):
+    """Concatenate the row lists of several chart pages into one envelope."""
+    rows = []
+    for page in pages:
+        data = page.get("data") if isinstance(page, dict) else None
+        if isinstance(data, dict) and isinstance(data.get("data"), list):
+            rows.extend(data["data"])
+    first = dict(pages[0])
+    first_data = dict(first.get("data") or {})
+    first_data["data"] = rows
+    first["data"] = first_data
+    return first
+

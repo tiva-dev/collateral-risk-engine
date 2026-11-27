@@ -1,0 +1,199 @@
+name: GCP Operational Drills
+
+# Executes and records operational checks against a non-production environment:
+#   rollback   route traffic to the previous revision, verify, roll forward
+#   load       API load test (dedicated, afterwards-suspended sandbox tenant)
+#   dr         point-in-time clone of Cloud SQL, data comparison, on-demand export, clone deleted
+#   security   identity isolation (staging cannot become production), secret,
+#              state-bucket and audit-log configuration
+on:
+  push:
+    branches-ignore: [main]
+    paths: ["infra/requests/drill.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: drills
+  cancel-in-progress: false
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.r.outputs.environment }}
+      project: ${{ steps.r.outputs.project }}
+      drills: ${{ steps.r.outputs.drills }}
+      tf_sa: ${{ steps.r.outputs.tf_sa }}
+      ops_number: ${{ steps.r.outputs.ops_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        run: |
+          env=$(jq -r .environment infra/requests/drill.json)
+          case "$env" in dev) p=tiva-cri-dev-cda9;; staging) p=tiva-cri-stg-cda9;; *) echo "drills run on dev or staging only"; exit 1;; esac
+          echo "environment=$env" >> "$GITHUB_OUTPUT"; echo "project=$p" >> "$GITHUB_OUTPUT"
+          echo "drills=$(jq -c '.drills' infra/requests/drill.json)" >> "$GITHUB_OUTPUT"
+          echo "tf_sa=$(jq -r ".tf_sa // \"terraform-$env\"" infra/requests/drill.json)" >> "$GITHUB_OUTPUT"
+          echo "ops_number=$(cat infra/terraform/OPS_PROJECT_NUMBER)" >> "$GITHUB_OUTPUT"
+
+  deployer-drills:
+    needs: request
+    runs-on: ubuntu-latest
+    environment: ${{ needs.request.outputs.environment }}
+    env:
+      P: ${{ needs.request.outputs.project }}
+      REGION: europe-west1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ needs.request.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: cri-deployer@${{ needs.request.outputs.project }}.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Rollback drill
+        if: contains(fromJSON(needs.request.outputs.drills), 'rollback')
+        run: |
+          set -euo pipefail
+          URL=$(gcloud run services describe cri-api --project $P --region $REGION --format='value(status.url)')
+          serving=$(gcloud run services describe cri-api --project $P --region $REGION --format=json | jq -r '[.status.traffic[]|select(.percent==100)][0].revisionName')
+          prev=$(gcloud run revisions list --service cri-api --project $P --region $REGION --sort-by=~metadata.creationTimestamp \
+                 --format='value(metadata.name)' | grep -A1 -x "$serving" | tail -1)
+          echo "cri-api serving=$serving previous=$prev"
+          before=$(curl -fsS $URL/health | jq -r .git_sha)
+          t0=$(date +%s)
+          gcloud run services update-traffic cri-api --project $P --region $REGION --to-revisions "$prev=100" --quiet
+          t1=$(date +%s)
+          rb="$before"
+          for i in $(seq 1 30); do rb=$(curl -fsS $URL/health | jq -r .git_sha); [ "$rb" != "$before" ] && break; sleep 2; done
+          t1b=$(date +%s)
+          ready=$(curl -fsS $URL/ready | jq -r .status)
+          t2=$(date +%s)
+          gcloud run services update-traffic cri-api --project $P --region $REGION --to-revisions "$serving=100" --quiet
+          after=""
+          for i in $(seq 1 30); do after=$(curl -fsS $URL/health | jq -r .git_sha); [ "$after" = "$before" ] && break; sleep 2; done
+          t3=$(date +%s)
+          echo "ROLLBACK_RESULT {\"revision_before\":\"$serving\",\"rolled_back_to\":\"$prev\",\"sha_before\":\"$before\",\"sha_after_rollback\":\"$rb\",\"ready_after_rollback\":\"$ready\",\"rollback_command_s\":$((t1-t0)),\"rollback_observed_s\":$((t1b-t0)),\"roll_forward_s\":$((t3-t2)),\"sha_after_roll_forward\":\"$after\"}"
+          ok=false; [ "$rb" != "$before" ] && [ "$ready" = "ready" ] && [ "$after" = "$before" ] && ok=true
+          ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project $P)
+          curl -fsS -X POST "$URL/admin/drills" -H "Authorization: Bearer $ADMIN" -H "Idempotency-Key: drill-rb-${{ github.run_id }}" \
+            -H "Content-Type: application/json" -d "{\"kind\":\"rollback\",\"source\":\"gcp-ops-drills run ${{ github.run_id }}\",\"passed\":$ok,\"result\":{\"revision_before\":\"$serving\",\"rolled_back_to\":\"$prev\",\"sha_before\":\"$before\",\"sha_after_rollback\":\"$rb\",\"ready_after_rollback\":\"$ready\",\"rollback_observed_s\":$((t1b-t0)),\"roll_forward_s\":$((t3-t2))}}"
+          $ok
+      - name: Load test
+        if: contains(fromJSON(needs.request.outputs.drills), 'load')
+        run: |
+          pip install -q httpx
+          URL=$(gcloud run services describe cri-api --project $P --region $REGION --format='value(status.url)')
+          ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project $P)
+          python infra/scripts/load_test.py --url "$URL" --admin-key "$ADMIN" --accounts 100 --seconds 45 --hold-seconds 330 | tee load.json
+          jq -c --arg src "gcp-ops-drills run ${{ github.run_id }}" '{kind:"load_test",source:$src,passed:([.mixed_read_and_explain[].errors_5xx_or_network]|add==0),result:.}' load.json | \
+            curl -fsS -X POST "$URL/admin/drills" -H "Authorization: Bearer $ADMIN" -H "Idempotency-Key: drill-load-${{ github.run_id }}" -H "Content-Type: application/json" -d @-
+          echo "Cloud Run 95th percentile request latency during the window (from logs):"
+          gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="cri-api" AND httpRequest.latency:*' \
+            --project $P --freshness=15m --limit=2000 --format='value(httpRequest.latency)' | sed 's/s$//' | sort -n | \
+            awk '{a[NR]=$1} END {if (NR) print "n=" NR " p50=" a[int(NR*0.5)] "s p95=" a[int(NR*0.95)] "s p99=" a[int(NR*0.99)] "s"}'
+          echo "Worker monitoring tick latency (last 2h):"
+          gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="cri-worker" AND httpRequest.requestUrl:"tick-all"' \
+            --project $P --freshness=30m --limit=20 --format='value(timestamp,httpRequest.latency,httpRequest.status)'
+      - name: Wrong-environment identity probe (must fail)
+        if: contains(fromJSON(needs.request.outputs.drills), 'security')
+        id: probe
+        continue-on-error: true
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ needs.request.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: cri-deployer@tiva-cri-dev-cda9.iam.gserviceaccount.com
+          token_format: access_token
+      - name: Wrong-environment identity probe 2 (must fail)
+        if: contains(fromJSON(needs.request.outputs.drills), 'security')
+        id: probe2
+        continue-on-error: true
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ needs.request.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: terraform-prod@tiva-cri-ops-cda9.iam.gserviceaccount.com
+          token_format: access_token
+      - name: Record probe outcomes
+        if: contains(fromJSON(needs.request.outputs.drills), 'security')
+        run: |
+          echo "PROBE_RESULT {\"staging_job_as_dev_deployer\":\"${{ steps.probe.outcome }}\",\"staging_job_as_terraform_prod\":\"${{ steps.probe2.outcome }}\"}"
+          test "${{ steps.probe.outcome }}" = "failure"
+          test "${{ steps.probe2.outcome }}" = "failure"
+
+  admin-drills:
+    needs: [request, deployer-drills]
+    if: always() && needs.request.result == 'success'
+    runs-on: ubuntu-latest
+    environment: terraform-${{ needs.request.outputs.environment }}
+    env:
+      P: ${{ needs.request.outputs.project }}
+      REGION: europe-west1
+      INSTANCE: cri-${{ needs.request.outputs.environment }}-pg
+      CLOUDSDK_BILLING_QUOTA_PROJECT: ${{ needs.request.outputs.project }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ needs.request.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: ${{ needs.request.outputs.tf_sa }}@tiva-cri-ops-cda9.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Remove leftover drill clones
+        if: contains(fromJSON(needs.request.outputs.drills), 'dr')
+        run: |
+          for c in $(gcloud sql instances list --project $P --format='value(name)' | grep -- '-drill-' || true); do
+            echo "deleting leftover clone $c"; gcloud sql instances delete $c --project $P --quiet
+          done
+      - name: Disaster-recovery drill (point-in-time clone)
+        if: contains(fromJSON(needs.request.outputs.drills), 'dr')
+        run: |
+          set -uo pipefail
+          CLONE="${INSTANCE}-drill-$(date -u +%m%d%H%M)"
+          echo "CLONE=$CLONE" >> $GITHUB_ENV
+          PIT=$(date -u -d '-5 minutes' +%Y-%m-%dT%H:%M:%SZ)
+          t0=$(date +%s)
+          gcloud sql instances clone $INSTANCE $CLONE --project $P --point-in-time "$PIT" || exit 1
+          t1=$(date +%s)
+          IP=$(gcloud sql instances describe $CLONE --project $P --format='value(ipAddresses[0].ipAddress)')
+          echo "clone $CLONE ready in $((t1-t0))s at $IP (point in time $PIT)"
+          echo "DR_TIMING {\"clone_seconds\":$((t1-t0)),\"point_in_time\":\"$PIT\",\"clone\":\"$CLONE\"}"
+          gcloud run jobs execute cri-migrate --project $P --region $REGION --wait --args="-m,app.platform.cli,dr-verify,$IP"
+          rc=$?
+          EXEC=$(gcloud run jobs executions list --job cri-migrate --project $P --region $REGION --limit 1 --format='value(metadata.name)')
+          sleep 30
+          gcloud logging read "resource.type=\"cloud_run_job\" AND labels.\"run.googleapis.com/execution_name\"=\"$EXEC\"" \
+            --project $P --limit 100 --format='value(textPayload)' | tee job.log | tail -40
+          grep '"tables"' job.log | head -1 | sed 's/^/DR_RESULT /' || true
+          exit $rc
+      - name: Delete drill clone
+        if: always() && contains(fromJSON(needs.request.outputs.drills), 'dr') && env.CLONE != ''
+        run: |
+          gcloud sql instances delete $CLONE --project $P --quiet && echo "clone $CLONE deleted"
+      - name: On-demand logical export to the second-region bucket
+        if: always() && contains(fromJSON(needs.request.outputs.drills), 'dr')
+        run: |
+          B=$(gcloud storage buckets list --project $P --format='value(name)' | grep db-exports)
+          OBJ="gs://$B/cri-drill-$(date -u +%Y%m%d%H%M).sql.gz"
+          gcloud sql export sql $INSTANCE "$OBJ" --project $P --database cri
+          gcloud storage ls -l "$OBJ" | sed 's/^/EXPORT_RESULT /'
+          gcloud storage buckets describe gs://$B --format='value(location,versioning_enabled)' | sed 's/^/EXPORT_BUCKET /'
+      - name: Security configuration verification
+        if: always() && contains(fromJSON(needs.request.outputs.drills), 'security')
+        run: |
+          echo "--- secrets: accessors per secret"
+          for s in $(gcloud secrets list --project $P --format='value(name)'); do
+            n=$(gcloud secrets versions list $s --project $P --filter='state=ENABLED' --format='value(name)' | wc -l)
+            who=$(gcloud secrets get-iam-policy $s --project $P --format=json | jq -r '[.bindings[]?|.role+"="+(.members|join(","))]|join(" ")')
+            echo "SECRET $s enabled_versions=$n $who"
+          done
+          echo "--- data-access audit configuration"
+          gcloud projects get-iam-policy $P --format=json | jq -c '.auditConfigs'
+          echo "--- recent Secret Manager data-access log entries (24h)"
+          gcloud logging read 'logName:"cloudaudit.googleapis.com%2Fdata_access" AND protoPayload.serviceName="secretmanager.googleapis.com"' \
+            --project $P --freshness=24h --limit=500 --format='value(protoPayload.authenticationInfo.principalEmail)' | sort | uniq -c
+          echo "--- project owners and editors"
+          gcloud projects get-iam-policy $P --flatten='bindings[].members' --filter='bindings.role:(roles/owner OR roles/editor)' --format='value(bindings.role,bindings.members)'
+          echo "--- firewall"
+          gcloud compute firewall-rules list --project $P --format='table(name,direction,priority,targetTags.list(),destinationRanges.list(),denied[].IPProtocol.list(),allowed[].ports.list())'

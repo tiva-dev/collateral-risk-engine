@@ -1,0 +1,229 @@
+name: GCP Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        options: [dev, staging, production]
+      seed_sandbox:
+        description: register or refresh the sandbox test portfolios after deploying (staging)
+        type: boolean
+        default: false
+  push:
+    paths: ["infra/requests/deploy.json"]
+
+permissions:
+  contents: read
+  id-token: write
+  checks: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.r.outputs.environment }}
+      seed: ${{ steps.r.outputs.seed }}
+      report_only: ${{ steps.r.outputs.report_only }}
+      sync: ${{ steps.r.outputs.sync }}
+      jobs: ${{ steps.r.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            env=$(jq -r .environment infra/requests/deploy.json); seed=$(jq -r '.seed_sandbox // false' infra/requests/deploy.json)
+            sync=$(jq -r '.sync_provider_secrets // false' infra/requests/deploy.json)
+            echo "report_only=$(jq -r '.report_only // false' infra/requests/deploy.json)" >> "$GITHUB_OUTPUT"
+            echo "jobs=$(jq -c '.run_jobs // []' infra/requests/deploy.json)" >> "$GITHUB_OUTPUT"
+          else
+            env="${{ inputs.environment }}"; seed="${{ inputs.seed_sandbox }}"; sync=false
+          fi
+          echo "sync=$sync" >> "$GITHUB_OUTPUT"
+          case "$env" in dev|staging|production) ;; *) echo "bad environment"; exit 1;; esac
+          if [ "$env" = "production" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::production deploys run only from main"; exit 1
+          fi
+          echo "environment=$env" >> "$GITHUB_OUTPUT"; echo "seed=$seed" >> "$GITHUB_OUTPUT"
+
+  # Deploy only a commit whose applicable test suites succeeded. Both suites run
+  # on every push of a deploy request (CI on all pushes; Platform CI on infra/**).
+  tests-passed:
+    needs: request
+    if: needs.request.outputs.report_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          required="quality-gates postgres"
+          for i in $(seq 1 80); do
+            gh api "repos/${{ github.repository }}/commits/$SHA/check-runs?per_page=100" > runs.json
+            pending=0; failed=0
+            for name in $required; do
+              c=$(jq -r --arg n "$name" '[.check_runs[] | select(.name==$n)] | sort_by(.started_at) | last | .conclusion // "pending"' runs.json)
+              s=$(jq -r --arg n "$name" '[.check_runs[] | select(.name==$n)] | sort_by(.started_at) | last | .status // "missing"' runs.json)
+              echo "$name: status=$s conclusion=$c"
+              if [ "$s" != "completed" ]; then pending=1; elif [ "$c" != "success" ]; then failed=1; fi
+            done
+            if [ $failed = 1 ]; then echo "::error::required checks failed for $SHA; not deploying"; exit 1; fi
+            if [ $pending = 0 ]; then
+              jq -c --arg r "$required" '[.check_runs[] | select(.name as $n | ($r | split(" ")) | index($n)) | {name, conclusion, html_url, head_sha}]' runs.json | tee checks.json
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::required checks did not complete in time for $SHA"; exit 1
+
+  deploy:
+    needs: [request, tests-passed]
+    if: always() && needs.request.result == 'success' && (needs.tests-passed.result == 'success' || needs.request.outputs.report_only == 'true')
+    runs-on: ubuntu-latest
+    environment: ${{ needs.request.outputs.environment }}
+    env:
+      ENVIRONMENT: ${{ needs.request.outputs.environment }}
+      REGION: europe-west1
+      # Production images live in their own repository (written only by the
+      # production deployer); dev and staging share cri.
+      REPO: europe-west1-docker.pkg.dev/tiva-cri-ops-cda9/${{ needs.request.outputs.environment == 'production' && 'cri-prod' || 'cri' }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          case "$ENVIRONMENT" in
+            dev) p=tiva-cri-dev-cda9;; staging) p=tiva-cri-stg-cda9;; production) p=tiva-cri-prd-cda9;;
+          esac
+          echo "project=$p" >> "$GITHUB_OUTPUT"
+          echo "ops_number=$(cat infra/terraform/OPS_PROJECT_NUMBER)" >> "$GITHUB_OUTPUT"
+          echo "tag=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ steps.cfg.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: cri-deployer@${{ steps.cfg.outputs.project }}.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Sync provider secrets from GitHub secrets (values never printed)
+        if: needs.request.outputs.report_only != 'true' && needs.request.outputs.sync == 'true'
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          NGNMARKET_API_KEY: ${{ secrets.NGNMARKET_API_KEY }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+        run: |
+          for pair in alpaca-api-key:ALPACA_API_KEY alpaca-secret-key:ALPACA_SECRET_KEY \
+                      ngnmarket-api-key:NGNMARKET_API_KEY alpha-vantage-api-key:ALPHA_VANTAGE_API_KEY; do
+            name=${pair%%:*}; var=${pair##*:}
+            if [ -z "${!var}" ]; then echo "::warning::$var is empty; skipped"; continue; fi
+            printf '%s' "${!var}" | gcloud secrets versions add "$name" --project "${{ steps.cfg.outputs.project }}" --data-file=- >/dev/null
+            echo "$name: new version added"
+          done
+      - name: Build and push images
+        if: needs.request.outputs.report_only != 'true'
+        run: |
+          gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+          T=${{ steps.cfg.outputs.tag }}
+          L="--label org.opencontainers.image.revision=${{ github.sha }} --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
+          docker build --target base --build-arg GIT_SHA=$T $L -t $REPO/cri-service:$T .
+          docker build --target research --build-arg GIT_SHA=$T $L -t $REPO/cri-research:$T .
+          docker push $REPO/cri-service:$T
+          docker push $REPO/cri-research:$T
+          echo "SERVICE_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' $REPO/cri-service:$T)" >> "$GITHUB_ENV"
+          echo "RESEARCH_IMAGE=$(docker inspect --format='{{index .RepoDigests 0}}' $REPO/cri-research:$T)" >> "$GITHUB_ENV"
+      - name: Migrate database (owner role, Cloud Run job)
+        if: needs.request.outputs.report_only != 'true'
+        run: |
+          P=${{ steps.cfg.outputs.project }}
+          gcloud run jobs update cri-migrate --project $P --region $REGION --image "$SERVICE_IMAGE" --quiet
+          gcloud run jobs execute cri-migrate --project $P --region $REGION --wait
+          for j in cri-research cri-backtest; do
+            gcloud run jobs update $j --project $P --region $REGION --image "$RESEARCH_IMAGE" --quiet
+          done
+      - name: Deploy new revisions without traffic
+        if: needs.request.outputs.report_only != 'true'
+        run: |
+          P=${{ steps.cfg.outputs.project }}; T=r-${{ steps.cfg.outputs.tag }}
+          for s in cri-worker cri-api; do
+            gcloud run deploy $s --project $P --region $REGION --image "$SERVICE_IMAGE" \
+              --no-traffic --tag $T --update-env-vars CRI_GIT_SHA=${{ steps.cfg.outputs.tag }} \
+              --update-labels commit-sha=${{ github.sha }},ci-verified=true --quiet
+          done
+          echo "CANDIDATE_URL=$(gcloud run services describe cri-api --project $P --region $REGION \
+            --format=json | jq -r --arg t "$T" '.status.traffic[] | select(.tag==$t) | .url')" >> "$GITHUB_ENV"
+      - name: Smoke test candidate
+        if: needs.request.outputs.report_only != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsS "$CANDIDATE_URL/health" | tee /dev/stderr | jq -e '.status=="ok"'
+          curl -fsS "$CANDIDATE_URL/ready" | tee /dev/stderr | jq -e '.status=="ready"'
+          KEY=$(gcloud secrets versions access latest --secret cri-sandbox-api-key --project ${{ steps.cfg.outputs.project }})
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$CANDIDATE_URL/monitoring/accounts")
+          test "$code" = "401"
+          curl -fsS -H "Authorization: Bearer $KEY" "$CANDIDATE_URL/platform/whoami" | jq -e '.tenant_id=="tiva-sandbox"'
+          curl -fsS -H "Authorization: Bearer $KEY" "$CANDIDATE_URL/platform/controls" | tee /dev/stderr \
+            | jq -e '.controls.lending_enabled==false and .controls.liquidation_execution_enabled==false'
+      - name: Verify provenance before shifting traffic
+        if: needs.request.outputs.report_only != 'true'
+        run: |
+          set -euo pipefail
+          P=${{ steps.cfg.outputs.project }}; T=r-${{ steps.cfg.outputs.tag }}
+          # The tagged revision must run the digest built from this commit.
+          for s in cri-worker cri-api; do
+            rev=$(gcloud run services describe $s --project $P --region $REGION --format=json \
+              | jq -r --arg t "$T" '.status.traffic[] | select(.tag==$t) | .revisionName')
+            img=$(gcloud run revisions describe "$rev" --project $P --region $REGION --format='value(spec.containers[0].image)')
+            sha=$(gcloud run revisions describe "$rev" --project $P --region $REGION --format='value(metadata.labels.commit-sha)')
+            echo "$s $rev $img $sha"
+            test "$img" = "$SERVICE_IMAGE" && test "$sha" = "${{ github.sha }}"
+          done
+          rev_label=$(gcloud artifacts docker images describe "$SERVICE_IMAGE" --format=json \
+            | jq -r '.image_summary.digest // empty' || true)
+          echo "service digest ${rev_label:-unverified}"
+      - name: Shift traffic to candidate
+        if: needs.request.outputs.report_only != 'true'
+        run: |
+          P=${{ steps.cfg.outputs.project }}; T=r-${{ steps.cfg.outputs.tag }}
+          for s in cri-worker cri-api; do
+            gcloud run services update-traffic $s --project $P --region $REGION --to-tags $T=100 --quiet
+          done
+          gcloud run services describe cri-api --project $P --region $REGION --format='value(status.url)'
+      - name: Seed sandbox portfolios
+        if: needs.request.outputs.seed == 'true'
+        run: |
+          pip install -q httpx
+          URL=$(gcloud run services describe cri-api --project ${{ steps.cfg.outputs.project }} --region $REGION --format='value(status.url)')
+          KEY=$(gcloud secrets versions access latest --secret cri-sandbox-api-key --project ${{ steps.cfg.outputs.project }})
+          ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project ${{ steps.cfg.outputs.project }})
+          python infra/scripts/seed_sandbox.py --url "$URL" --key "$KEY" --admin-key "$ADMIN"
+      - name: Run platform jobs (shadow models, pending backtests) on the migrate job image
+        if: needs.request.outputs.jobs != '[]' && needs.request.outputs.jobs != ''
+        run: |
+          P=${{ steps.cfg.outputs.project }}
+          for cmd in $(echo '${{ needs.request.outputs.jobs }}' | jq -r '.[]'); do
+            echo "== $cmd"
+            gcloud run jobs execute cri-migrate --project $P --region $REGION --wait --task-timeout=3600s \
+              --args="-m,app.platform.cli,$cmd"
+          done
+      - name: Operational report
+        run: |
+          pip install -q httpx
+          URL=$(gcloud run services describe cri-api --project ${{ steps.cfg.outputs.project }} --region $REGION --format='value(status.url)')
+          KEY=$(gcloud secrets versions access latest --secret cri-sandbox-api-key --project ${{ steps.cfg.outputs.project }})
+          ADMIN=$(gcloud secrets versions access latest --secret cri-admin-api-key --project ${{ steps.cfg.outputs.project }})
+          python infra/scripts/staging_report.py --url "$URL" --key "$KEY" --admin-key "$ADMIN" \
+            --request-backtest "$(jq -r '.request_backtest // ""' infra/requests/deploy.json)"
+      - name: Recent worker and scheduler logs
+        if: always()
+        run: |
+          P=${{ steps.cfg.outputs.project }}
+          gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="cri-worker" AND (httpRequest.requestUrl:"/internal" OR severity>=WARNING)' \
+            --project $P --freshness=3h --limit=40 \
+            --format='table(timestamp, httpRequest.requestMethod, httpRequest.status, httpRequest.requestUrl, severity, textPayload.slice(0:160))' || true
+          gcloud logging read 'resource.type="cloud_scheduler_job"' --project $P --freshness=3h --limit=20 \
+            --format='table(timestamp, resource.labels.job_id, severity, jsonPayload.status, jsonPayload.debugInfo.slice(0:120))' || true

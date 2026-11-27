@@ -11,11 +11,15 @@ from datetime import UTC, date, datetime
 from .cache import HistoricalDataCache
 from .config import load_config
 from .models import (
+    TRADE_STATUS_NO_TRADE,
+    TRADE_STATUS_TRADED,
+    TRADE_STATUS_UNKNOWN,
     HistoricalBar,
     HistoricalFXRate,
     HistoricalFXSeries,
     HistoricalSeries,
     canonical_series_payload,
+    ohlc_with_provenance,
 )
 from .providers import HistoricalDataProvider, ProviderError, validate_provider_url
 
@@ -98,18 +102,54 @@ class AlphaVantageHistoricalProvider(HistoricalDataProvider):
             try:
                 dt = date.fromisoformat(d)
                 if start_date <= dt <= end_date:
+                    parsed = ohlc_with_provenance(
+                        b,
+                        {
+                            "open": "1. open",
+                            "high": "2. high",
+                            "low": "3. low",
+                            "close": "4. close",
+                        },
+                    )
+                    if parsed is None:
+                        warnings.append(
+                            f"Alpha Vantage bar skipped for {instrument} on {dt}: "
+                            "missing close"
+                        )
+                        continue
+                    values, provenance = parsed
+                    adjusted = b.get("5. adjusted close")
+                    volume = b.get("6. volume")
                     bars.append(
                         HistoricalBar(
                             instrument,
                             dt,
-                            float(b.get("1. open", 0)),
-                            float(b.get("2. high", 0)),
-                            float(b.get("3. low", 0)),
-                            float(b.get("4. close", 0)),
-                            float(b.get("5. adjusted close", b.get("4. close", 0))),
-                            float(b.get("6. volume", 0)),
+                            values["open"],
+                            values["high"],
+                            values["low"],
+                            values["close"],
+                            float(adjusted) if adjusted not in (None, "") else None,
+                            float(volume or 0),
                             provider_name=self.provider_name,
                             raw_metadata=b,
+                            field_provenance={
+                                **provenance,
+                                "adjusted_close": (
+                                    "reported"
+                                    if adjusted not in (None, "")
+                                    else "missing"
+                                ),
+                                "volume": (
+                                    "reported" if volume not in (None, "") else "missing"
+                                ),
+                            },
+                            trade_status=(
+                                TRADE_STATUS_UNKNOWN
+                                if volume in (None, "")
+                                else TRADE_STATUS_TRADED
+                                if float(volume) > 0
+                                else TRADE_STATUS_NO_TRADE
+                            ),
                         )
                     )
             except (KeyError, TypeError, ValueError, OverflowError) as exc:

@@ -1,0 +1,54 @@
+name: GCP Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        type: choice
+        options: [dev, staging, production]
+      revision:
+        description: revision name to restore (blank = the revision before the one now serving)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      REGION: europe-west1
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          case "${{ inputs.environment }}" in
+            dev) p=tiva-cri-dev-cda9;; staging) p=tiva-cri-stg-cda9;; production) p=tiva-cri-prd-cda9;;
+          esac
+          echo "project=$p" >> "$GITHUB_OUTPUT"
+          echo "ops_number=$(cat infra/terraform/OPS_PROJECT_NUMBER)" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ steps.cfg.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: cri-deployer@${{ steps.cfg.outputs.project }}.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Shift traffic back
+        run: |
+          P=${{ steps.cfg.outputs.project }}
+          for s in cri-api cri-worker; do
+            target="${{ inputs.revision }}"
+            if [ -z "$target" ] || [ "$s" = "cri-worker" ]; then
+              serving=$(gcloud run services describe $s --project $P --region $REGION --format=json \
+                | jq -r '[.status.traffic[] | select(.percent==100)][0].revisionName')
+              target=$(gcloud run revisions list --service $s --project $P --region $REGION \
+                --sort-by=~metadata.creationTimestamp --format='value(metadata.name)' \
+                | grep -A1 -x "$serving" | tail -1)
+            fi
+            echo "$s: routing 100% to $target"
+            gcloud run services update-traffic $s --project $P --region $REGION --to-revisions "$target=100" --quiet
+          done
+          # Schema migrations are forward-only and additive, so older revisions keep working.

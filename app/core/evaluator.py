@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from typing import Any
 
 from app.audit.logger import AuditLogger
 from app.core.enums import (
@@ -24,10 +25,11 @@ from app.core.models import (
     TriggerLevels,
 )
 from app.liquidation.plan import (
-    build_liquidation_plan,
     collateral_injection_only_cure,
     repayment_only_cure,
 )
+from app.liquidation.planning import liquidation_plan_from_recovery, plan_recovery
+from app.liquidation.policy import LiquidationExecutionPolicy
 from app.liquidation.recovery import estimate_stressed_recovery
 from app.risk.adjustments import all_adjustments, risk_drivers_from_breakdown
 from app.risk.math_utils import clamp, round_money
@@ -53,6 +55,11 @@ class CollateralRiskEngine:
         policy: Policy,
         market_data: Mapping[str, MarketData],
         requested_draw_amount: float = 0.0,
+        *,
+        execution_policy: LiquidationExecutionPolicy | None = None,
+        interest_policy: Any = None,
+        as_of: datetime | None = None,
+        _size_plan: bool = True,
     ) -> PortfolioEvaluation:
         if not account_ref:
             raise RiskEvaluationError("account_ref is required")
@@ -62,6 +69,14 @@ class CollateralRiskEngine:
             raise RiskEvaluationError("requested_draw_amount cannot be negative")
 
         holdings = self._aggregate_holdings(holdings)
+        if execution_policy is not None and (
+            execution_policy.max_participation_rate < policy.max_participation_rate
+        ):
+            # Participation consistency: the liquidity horizon the risk model
+            # assumes must use the rate execution will actually be allowed to
+            # trade at, otherwise the model assumes faster exits than the
+            # executor can perform.
+            policy = replace(policy, max_participation_rate=execution_policy.max_participation_rate)
         market_by_holding = self._resolve_market_data(holdings, market_data)
         outstanding_balance = loan.balance
         requested_draw_amount = max(0.0, requested_draw_amount)
@@ -131,16 +146,46 @@ class CollateralRiskEngine:
             recovery_coverage_ratio=recovery_coverage_ratio,
             triggers=trigger_levels,
         )
-        target_cash = max(
-            trigger_levels.required_cure_amount,
-            max(0.0, projected_loan_balance - approved_credit_limit),
+        # Audit C3: missing, halted or low-quality data makes an asset's
+        # stressed value zero, which on its own drove a funded loan into
+        # LIQUIDATION and an automated forced-sale plan. Unavailable data is
+        # not evidence of insolvency. New lending stays fail-closed (the
+        # approved limit is unchanged), but no automated sale is planned and
+        # the account is flagged for manual review.
+        data_unavailable_assets = sorted(
+            {a.asset_id for a in asset_results if a.data_unavailable_reason}
         )
-        liquidation_plan = build_liquidation_plan(
-            account_ref=account_ref,
-            asset_results=asset_results,
-            margin_state=margin_state,
-            target_cash_recovery=target_cash,
+        data_review_required = (
+            bool(data_unavailable_assets)
+            and projected_loan_balance > 0
+            and margin_state in {MarginState.MARGIN_CALL, MarginState.LIQUIDATION}
         )
+        if data_review_required:
+            margin_state = MarginState.RESTRICT_NEW_BORROWING
+        recovery_plan = None
+        liquidation_plan = None
+        if _size_plan and margin_state in {
+            MarginState.MARGIN_CALL,
+            MarginState.LIQUIDATION,
+        }:
+            # One planner for evaluator, monitoring and replay. It sizes the
+            # sale on the post-sale, post-settlement account, so selling also
+            # removes stressed and lendable value (collateral-funded cure).
+            recovery_plan = plan_recovery(
+                engine=CollateralRiskEngine(audit_logger=None),
+                account_ref=account_ref,
+                holdings=holdings,
+                loan=loan,
+                balance=projected_loan_balance,
+                policy=policy,
+                market_data=market_data,
+                asset_results=asset_results,
+                state=margin_state,
+                execution_policy=execution_policy,
+                interest_policy=interest_policy,
+                as_of=as_of,
+            )
+            liquidation_plan = liquidation_plan_from_recovery(recovery_plan)
 
         audit_payload = {
             "account_ref": account_ref,
@@ -167,9 +212,12 @@ class CollateralRiskEngine:
             ),
             "portfolio_risk_score": portfolio_risk_score,
             "margin_state": margin_state.value,
+            "data_review_required": data_review_required,
+            "data_unavailable_assets": data_unavailable_assets,
             "trigger_levels": asdict(trigger_levels),
             "asset_results": [self._asset_result_audit(a) for a in asset_results],
             "liquidation_plan": asdict(liquidation_plan) if liquidation_plan else None,
+            "recovery_plan": recovery_plan.to_dict() if recovery_plan else None,
             "policy": {
                 "risk_appetite": policy.risk_appetite.value,
                 "base_ltv": {k.value: v for k, v in policy.base_ltv.items()},
@@ -213,6 +261,9 @@ class CollateralRiskEngine:
             trigger_levels=trigger_levels,
             asset_results=asset_results,
             liquidation_plan=liquidation_plan,
+            data_review_required=data_review_required,
+            data_unavailable_assets=data_unavailable_assets,
+            recovery_plan=recovery_plan.to_dict() if recovery_plan else None,
             audit_id=audit_id,
             model_version=MODEL_VERSION,
             created_at=datetime.now(UTC),
@@ -609,8 +660,14 @@ class CollateralRiskEngine:
             )
         drivers = risk_drivers_from_breakdown(breakdown)
         notes: list[str] = []
+        data_unavailable_reason = None
         if not eligible:
             notes.append("asset_ineligible_due_to_halt_or_data_quality")
+            data_unavailable_reason = (
+                "halted"
+                if market.halted and not policy.allow_lending_on_stale_or_halted_assets
+                else "low_data_quality"
+            )
         if recovery.method.startswith("order_book"):
             notes.append("order_book_used_for_recovery_estimate")
         else:
@@ -634,6 +691,9 @@ class CollateralRiskEngine:
             eligible=eligible,
             adjustments=breakdown,
             notes=notes,
+            data_unavailable_reason=data_unavailable_reason,
+            instrument_key=holding.stable_key,
+            participation_rate=clamp(policy.max_participation_rate, 0.01, 0.25),
         )
 
     def _missing_market_result(self, holding: Holding) -> AssetRiskResult:
@@ -653,6 +713,8 @@ class CollateralRiskEngine:
             eligible=False,
             adjustments=self._zero_adjustments(),
             notes=["missing_market_data_zero_lendable_value"],
+            data_unavailable_reason="missing_market_data",
+            instrument_key=holding.stable_key,
         )
 
     def _zero_adjustments(self):
