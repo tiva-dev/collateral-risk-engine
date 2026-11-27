@@ -6,7 +6,13 @@
   "frozen_commit": "db5ee78ffe7eb6c2de705cce6d141d19da8cc734",
   "tag": {
    "name": "cri-1.0.0-rc1",
-   "state": "pending: tag creation is not permitted from the agent workspace"
+   "state": "published",
+   "type": "annotated",
+   "tag_object": "c6c99c70f207b4df67381b4288f8d5c9dfeed5ad",
+   "target_commit": "db5ee78ffe7eb6c2de705cce6d141d19da8cc734",
+   "tagger": "tiva-dev",
+   "published": "2026-11-27T19:25Z",
+   "note": "Pushed from the founder's Cloud Shell after a one-time GitHub device authorisation; no earlier cri-* tag existed. The push triggered branchless push workflows (staging deploy of db5ee78, identity verification, candidate validation); fixed so tags never trigger workflows (fix/no-tag-triggers)."
   },
   "merged_to_main_as": "72ddd0ad020b8e1cb5d6c5e7a8e7472a2d4d5750 (squash of PR #29; tree identical to 0aa4672, whose engine code equals the frozen commit)",
   "file_sha256": {

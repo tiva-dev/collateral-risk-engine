@@ -8,6 +8,8 @@ name: GCP Identity Verification
 on:
   workflow_dispatch:
   push:
+    # Branch pushes only: a release-tag push must never deploy, apply or verify.
+    branches: ['**']
     paths: ["infra/requests/identity-verify.json"]
 
 permissions:

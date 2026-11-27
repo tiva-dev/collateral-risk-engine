@@ -2,6 +2,8 @@ name: Platform CI
 
 on:
   push:
+    # Branch pushes only: a release-tag push must never deploy, apply or verify.
+    branches: ['**']
     paths: ["app/**", "infra/**", "Dockerfile", "requirements*.txt", ".github/workflows/platform-ci.yml"]
   pull_request:
 
