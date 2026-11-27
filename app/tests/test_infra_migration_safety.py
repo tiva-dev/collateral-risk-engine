@@ -17,6 +17,10 @@ def _probe(stderr: str, rc: int) -> subprocess.CompletedProcess[str]:
 def test_probe_passes_only_on_permission_denial() -> None:
     assert _probe("ERROR: HTTPError 403: x does not have storage.objects.list access", 1).returncode == 0
     assert _probe("ERROR: The caller does not have permission. PERMISSION_DENIED", 1).returncode == 0
+    # gcloud's wording for project IAM reads (observed in the 27 Nov identity verification run)
+    assert _probe("ERROR: (gcloud.projects.get-iam-policy) [sa@x.iam.gserviceaccount.com] does not have permission "
+                  "to access projects instance [p:getIamPolicy] (or it may not exist): The caller does not have "
+                  "permission.", 1).returncode == 0
     assert _probe("", 0).returncode == 1                                  # success: isolation broken
     assert _probe("ERROR: Could not resolve host", 1).returncode == 1     # network: inconclusive
     assert _probe("ERROR: HTTPError 404: not found", 1).returncode == 1   # wrong name: inconclusive
