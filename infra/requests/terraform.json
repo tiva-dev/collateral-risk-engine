@@ -1,1 +1,1 @@
-{"environment": "staging", "action": "plan", "note": "Post-merge drift check: staging apply completed 27 Nov 2026 (run 46053591933); expected plan is revision/CRI_GIT_SHA deploy-owned noise only."}
+{"environment": "staging", "action": "plan", "note": "Plan database credential rotation 1 (owner and app passwords, secret versions); apply after staging is back on main"}

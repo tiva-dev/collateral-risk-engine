@@ -209,11 +209,19 @@ resource "google_service_networking_connection" "psa" {
 resource "random_password" "db_owner" {
   length  = 32
   special = false
+  # Rotation: set var.db_credential_rotation to a new label (e.g. a date) and apply,
+  # then redeploy so new revisions read the new secret version. Empty = never rotated
+  # (keeps existing passwords; adding no keepers forces no replacement).
+  keepers = var.db_credential_rotation == "" ? null : { rotation = var.db_credential_rotation }
 }
 
 resource "random_password" "db_app" {
   length  = 32
   special = false
+  # Rotation: set var.db_credential_rotation to a new label (e.g. a date) and apply,
+  # then redeploy so new revisions read the new secret version. Empty = never rotated
+  # (keeps existing passwords; adding no keepers forces no replacement).
+  keepers = var.db_credential_rotation == "" ? null : { rotation = var.db_credential_rotation }
 }
 
 resource "google_sql_database_instance" "main" {

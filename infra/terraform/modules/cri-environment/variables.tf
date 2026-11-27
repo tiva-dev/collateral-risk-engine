@@ -110,3 +110,9 @@ variable "placeholder_image" {
   type        = string
   default     = "us-docker.pkg.dev/cloudrun/container/hello"
 }
+
+variable "db_credential_rotation" {
+  description = "Rotation label for the database owner and app passwords. Changing it regenerates both passwords and their secret versions; redeploy afterwards. Empty means never rotated."
+  type        = string
+  default     = ""
+}
