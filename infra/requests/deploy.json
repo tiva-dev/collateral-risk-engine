@@ -1,1 +1,1 @@
-{"environment": "staging", "seed_sandbox": false, "run_jobs": ["apply-exclusions", "shadow", "lifecycle-all"], "note": "candidate-2026.11.6"}
+{"environment": "staging", "seed_sandbox": false, "run_jobs": ["apply-exclusions", "shadow", "lifecycle-all"], "note": "candidate-2026.11.7 with candidate_rc shadow model"}

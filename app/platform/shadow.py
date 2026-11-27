@@ -494,6 +494,12 @@ MODELS: dict[str, Callable[[ShadowInputs], ShadowResult]] = {
     "candidate_combined": lambda inp: candidate_model(
         inp, (("headroom_mode", "adaptive"), ("restoration_volatility", "long_run"),
               ("concentration_control", True), ("suspension_value", "delayed")), "candidate_combined"),
+    # CRI v1.0 release-candidate configuration under evaluation (27 Nov review):
+    # v2026.11.6 baseline + delayed suspension valuation + multivariate stress-aware
+    # protection + regime-conditioned scenarios. Shadow only; never drives accounts.
+    "candidate_rc": lambda inp: candidate_model(
+        inp, (("suspension_value", "delayed"), ("stress_protection", True), ("regime_conditioning", True)),
+        "candidate_rc"),
 }
 
 
