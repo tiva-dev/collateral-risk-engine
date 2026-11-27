@@ -246,6 +246,7 @@ class FirstAvailable:
     candidates: list[Any]
     chosen: Any = None
     errors: list[str] = field(default_factory=list)
+    attempted: list[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
@@ -264,6 +265,9 @@ class FirstAvailable:
             return self.chosen.complete(system, messages, tools)
         import urllib.error
         for c in self.candidates:
+            label = f"{c.model}@{getattr(c, 'region', '')}"
+            if label not in self.attempted:
+                self.attempted.append(label)
             try:
                 r = c.complete(system, messages, tools)
                 self.chosen = c
@@ -313,7 +317,9 @@ def discover_gemini_models(project: str, region: str,
     names: list[tuple[str, str]] = []
     token = ""
     for _ in range(10):
-        url = f"https://{host}/v1beta1/publishers/google/models?pageSize=200" + (f"&pageToken={token}" if token else "")
+        import urllib.parse
+        q = {"pageSize": "200", **({"pageToken": token} if token else {})}
+        url = f"https://{host}/v1beta1/publishers/google/models?" + urllib.parse.urlencode(q)
         d = fetch(url, {"Authorization": f"Bearer {gcp_access_token()}", "x-goog-user-project": project})
         names += [(m.get("name", ""), m.get("launchStage", "")) for m in d.get("publisherModels", [])]
         token = d.get("nextPageToken", "")

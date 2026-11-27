@@ -229,7 +229,7 @@ def test_gemini_discovery_ranks_text_models_and_pages(monkeypatch) -> None:
     pages = [{"publisherModels": [{"name": "publishers/google/models/gemini-2.5-pro", "launchStage": "GA"},
                                   {"name": "publishers/google/models/gemini-embedding-001", "launchStage": "GA"},
                                   {"name": "publishers/google/models/gemini-3-flash-preview", "launchStage": "PUBLIC_PREVIEW"}],
-              "nextPageToken": "p2"},
+              "nextPageToken": "a+b&c=d#e"},
              {"publisherModels": [{"name": "publishers/google/models/gemini-2.5-flash", "launchStage": "GA"},
                                   {"name": "publishers/google/models/gemini-2.5-flash-image", "launchStage": "GA"},
                                   {"name": "publishers/google/models/imagen-4", "launchStage": "GA"}]}]
@@ -240,4 +240,22 @@ def test_gemini_discovery_ranks_text_models_and_pages(monkeypatch) -> None:
         return pages[len(seen) - 1]
     out = discover_gemini_models("proj", "europe-west1", get=get)
     assert out == ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"]
-    assert "pageToken=p2" in seen[1][0] and seen[0][1]["x-goog-user-project"] == "proj"
+    assert "pageToken=a%2Bb%26c%3Dd%23e" in seen[1][0] and seen[0][1]["x-goog-user-project"] == "proj"
+
+
+def test_first_available_records_only_attempted_candidates() -> None:
+    import urllib.error
+
+    from app.analyst.llm import FirstAvailable
+
+    class C:
+        def __init__(self, model, ok):
+            self.model, self.region, self.ok, self.name, self.external = model, "r", ok, "x", False
+
+        def complete(self, *a):
+            if not self.ok:
+                raise urllib.error.HTTPError("u", 404, "nf", None, None)
+            return LLMResponse("hi", [], 1, 1, self.model)
+    fa = FirstAvailable([C("a", False), C("b", True), C("c", True)])
+    assert fa.complete("s", [], []).text == "hi"
+    assert fa.attempted == ["a@r", "b@r"] and fa.chosen.model == "b"
