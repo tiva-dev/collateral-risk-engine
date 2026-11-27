@@ -49,7 +49,10 @@ jobs:
           terraform state list | wc -l | tee count.txt
           # Production is unprovisioned: its state may be empty; dev and staging must not be.
           [ "${{ matrix.env }}" = production ] || test "$(cat count.txt)" -gt 0
-          terraform plan -input=false -lock=false -no-color -detailed-exitcode > plan.txt || code=$?
+          terraform plan -input=false -lock=false -no-color -detailed-exitcode \
+            -var "wif_pool_name=projects/${{ steps.cfg.outputs.ops_number }}/locations/global/workloadIdentityPools/github" \
+            > plan.txt 2> plan.err || code=$?
+          cat plan.err >&2
           grep -E '^Plan:|No changes' plan.txt || true
           test "${code:-0}" != "1"
       - name: Isolation (each probe must be DENIED; other failures are inconclusive and fail)
@@ -109,7 +112,7 @@ jobs:
           set -uo pipefail
           # Empty list, or the API disabled (nothing can exist), are the only passing outcomes.
           none() {
-            out=$("$@" --project tiva-cri-prd-cda9 --format='value(name)' 2>err.txt); rc=$?
+            rc=0; out=$("$@" --project tiva-cri-prd-cda9 --format='value(name)' 2>err.txt) || rc=$?
             if [ $rc = 0 ]; then test -z "$out" || { echo "FAIL: production has: $out"; exit 1; }; return; fi
             grep -Eq 'SERVICE_DISABLED|has not been used in project|is disabled|API not enabled' err.txt ||
               { echo "FAIL: inconclusive: $*"; head -3 err.txt; exit 1; }
