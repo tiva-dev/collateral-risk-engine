@@ -52,7 +52,10 @@ def main() -> int:
                "statuses": {r["case"]: r["status"] for r in out},
                "model": getattr(provider, "model", "?"), "provider": getattr(provider, "name", "?"),
                "input_tokens": sum(r.get("usage", {}).get("input_tokens", 0) for r in out),
-               "output_tokens": sum(r.get("usage", {}).get("output_tokens", 0) for r in out)}
+               "output_tokens": sum(r.get("usage", {}).get("output_tokens", 0) for r in out),
+               "candidates_tried": list(getattr(provider, "attempted", [])),
+               "model_used": getattr(getattr(provider, "chosen", None), "model", None),
+               "provider_errors": sorted(set(getattr(provider, "errors", [])))[:12]}
     print("CRI_ANALYST_DEMO_SUMMARY " + json.dumps(summary), flush=True)
     return 0 if summary["answered"] >= 3 else 1
 

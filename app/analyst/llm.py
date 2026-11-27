@@ -246,6 +246,7 @@ class FirstAvailable:
     candidates: list[Any]
     chosen: Any = None
     errors: list[str] = field(default_factory=list)
+    attempted: list[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
@@ -264,6 +265,9 @@ class FirstAvailable:
             return self.chosen.complete(system, messages, tools)
         import urllib.error
         for c in self.candidates:
+            label = f"{c.model}@{getattr(c, 'region', '')}"
+            if label not in self.attempted:
+                self.attempted.append(label)
             try:
                 r = c.complete(system, messages, tools)
                 self.chosen = c
@@ -278,12 +282,70 @@ class FirstAvailable:
         return (self.chosen or self.candidates[0]).cost_usd(r)
 
 
+_NOT_TEXT = ("image", "embedding", "tts", "live", "audio", "vision", "veo", "imagen", "native", "computer-use",
+             "robotics", "lyria", "chirp", "thinking-exp")
+
+
+def _rank_gemini(names: list[tuple[str, str]]) -> list[str]:
+    """Order discovered Gemini text models: GA before preview, Flash before Pro
+    (cost), newest version first."""
+    def version(m: str) -> tuple[float, ...]:
+        import re as _re
+        v = _re.search(r"gemini-(\d+(?:\.\d+)?)", m)
+        return (float(v.group(1)),) if v else (0.0,)
+    rows = []
+    for name, stage in names:
+        m = name.rsplit("/", 1)[-1]
+        if not m.startswith("gemini") or any(x in m for x in _NOT_TEXT):
+            continue
+        ga = 0 if stage in ("GA", "") else 1
+        tier = 0 if "flash" in m and "lite" not in m else (1 if "lite" in m else 2)
+        rows.append(((ga, tier, tuple(-x for x in version(m))), m))
+    return [m for _, m in sorted(set(rows))]
+
+
+def discover_gemini_models(project: str, region: str,
+                           get: Callable[[str, dict[str, str]], dict[str, Any]] | None = None) -> list[str]:
+    """List Google publisher models available to the project (Model Garden)."""
+    def _get(url: str, headers: dict[str, str]) -> dict[str, Any]:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as r:  # nosec B310 - fixed Vertex AI endpoint
+            out: dict[str, Any] = json.loads(r.read())
+            return out
+    fetch = get or _get
+    host = "aiplatform.googleapis.com" if region == "global" else f"{region}-aiplatform.googleapis.com"
+    names: list[tuple[str, str]] = []
+    token = ""
+    for _ in range(10):
+        import urllib.parse
+        q = {"pageSize": "200", **({"pageToken": token} if token else {})}
+        url = f"https://{host}/v1beta1/publishers/google/models?" + urllib.parse.urlencode(q)
+        d = fetch(url, {"Authorization": f"Bearer {gcp_access_token()}", "x-goog-user-project": project})
+        names += [(m.get("name", ""), m.get("launchStage", "")) for m in d.get("publisherModels", [])]
+        token = d.get("nextPageToken", "")
+        if not token:
+            break
+    return _rank_gemini(names)
+
+
 def provider_from_env() -> LLMProvider:
     kind = os.environ.get("CRI_LLM_PROVIDER", "vertex-gemini")
     project = gcp_project() if kind.startswith("vertex") else ""
     region = os.environ.get("CRI_LLM_REGION", "europe-west1")
     if kind == "vertex-gemini":
-        models = os.environ.get("CRI_LLM_MODEL", "gemini-2.5-flash,gemini-2.5-pro,gemini-3-flash,gemini-3.1-pro").split(",")
+        configured = os.environ.get("CRI_LLM_MODEL", "")
+        if configured:
+            models = configured.split(",")
+        else:
+            models = []
+            for loc in (region, "global"):
+                try:
+                    models = discover_gemini_models(project, loc)[:6]
+                except Exception:  # noqa: BLE001 - discovery is best effort; fall back to known ids
+                    models = []
+                if models:
+                    break
+            models = models or ["gemini-2.5-flash", "gemini-2.0-flash-001", "gemini-3-flash-preview"]
         regions = [region, "global"] if region != "global" else ["global"]
         return FirstAvailable([VertexGemini(project=project, region=r, model=m.strip()) for m in models for r in regions])
     if kind == "vertex-claude":
