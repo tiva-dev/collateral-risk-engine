@@ -240,7 +240,7 @@ def test_gemini_discovery_ranks_text_models_and_pages(monkeypatch) -> None:
         seen.append((url, headers))
         return pages[len(seen) - 1]
     out = discover_gemini_models("proj", "europe-west1", get=get)
-    assert out == ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"]
+    assert out == ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash-preview"]
     assert "pageToken=a%2Bb%26c%3Dd%23e" in seen[1][0] and seen[0][1]["x-goog-user-project"] == "proj"
 
 
@@ -260,3 +260,24 @@ def test_first_available_records_only_attempted_candidates() -> None:
     fa = FirstAvailable([C("a", False), C("b", True), C("c", True)])
     assert fa.complete("s", [], []).text == "hi"
     assert fa.attempted == ["a@r", "b@r"] and fa.chosen.model == "b"
+
+
+def test_first_available_retries_quota_errors() -> None:
+    import urllib.error
+
+    from app.analyst.llm import FirstAvailable
+
+    class Flaky:
+        model, region, name, external = "m", "global", "x", False
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *a):
+            self.calls += 1
+            if self.calls < 3:
+                raise urllib.error.HTTPError("u", 429, "Resource exhausted", None, None)
+            return LLMResponse("ok", [], 1, 1, "m")
+    c = Flaky()
+    fa = FirstAvailable([c], backoff_s=(0.0, 0.0, 0.0))
+    assert fa.complete("s", [], []).text == "ok" and c.calls == 3

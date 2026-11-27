@@ -53,8 +53,18 @@ class LLMProvider(Protocol):
 def _post(url: str, body: dict[str, Any], headers: dict[str, str], timeout: int = 90) -> dict[str, Any]:
     req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", **headers})
-    with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310 - fixed Vertex AI / metadata-server / configured endpoint
-        return json.loads(r.read())
+    import urllib.error
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310 - fixed Vertex AI / metadata-server / configured endpoint
+            out: dict[str, Any] = json.loads(r.read())
+            return out
+    except urllib.error.HTTPError as e:
+        try:
+            raw = e.read().decode(errors="replace")
+            e.msg = json.loads(raw).get("error", {}).get("message", raw)[:300]
+        except (ValueError, AttributeError, OSError):
+            pass
+        raise
 
 
 def gcp_access_token() -> str:
@@ -262,25 +272,36 @@ class FirstAvailable:
 
     def complete(self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
         if self.chosen is not None:
-            return self.chosen.complete(system, messages, tools)
+            return self._with_backoff(self.chosen, system, messages, tools)
         import urllib.error
         for c in self.candidates:
             label = f"{c.model}@{getattr(c, 'region', '')}"
             if label not in self.attempted:
                 self.attempted.append(label)
             try:
-                r = c.complete(system, messages, tools)
+                r = self._with_backoff(c, system, messages, tools)
                 self.chosen = c
                 return r
             except urllib.error.HTTPError as e:
-                try:
-                    detail = json.loads(e.read() or b"{}").get("error", {}).get("message", "")[:160]
-                except (ValueError, AttributeError):
-                    detail = ""
-                self.errors.append(f"{c.model}@{getattr(c, 'region', '')}: HTTP {e.code} {detail}".strip())
-                if e.code not in (400, 404):
+                self.errors.append(f"{c.model}@{getattr(c, 'region', '')}: HTTP {e.code} {str(e.msg)[:160]}".strip())
+                if e.code not in (400, 403, 404, 429):
                     raise
         raise RuntimeError("no candidate model available: " + "; ".join(self.errors))
+
+    backoff_s: tuple[float, ...] = (2.0, 6.0, 15.0)
+
+    def _with_backoff(self, c: Any, system: str, messages: list[dict[str, Any]],
+                      tools: list[dict[str, Any]]) -> LLMResponse:
+        import time
+        import urllib.error
+        for wait in (*self.backoff_s, None):
+            try:
+                return c.complete(system, messages, tools)  # type: ignore[no-any-return]
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or wait is None:
+                    raise
+                time.sleep(wait)
+        raise RuntimeError("unreachable")
 
     def cost_usd(self, r: LLMResponse) -> float:
         return (self.chosen or self.candidates[0]).cost_usd(r)
@@ -291,9 +312,10 @@ _NOT_TEXT = ("image", "embedding", "tts", "live", "audio", "vision", "veo", "ima
 
 
 def _rank_gemini(names: list[tuple[str, str]]) -> list[str]:
-    """Order discovered Gemini text models: newest generation first (Google
-    restricts older generations for projects without prior usage), then Flash
-    before Pro (cost), then GA before preview."""
+    """Order discovered Gemini text models: generally available before preview
+    (preview models carry tight quotas), newest generation first within each
+    (Google retires older generations and blocks new access a month before),
+    then Flash before Pro (cost)."""
     def version(m: str) -> tuple[float, ...]:
         import re as _re
         v = _re.search(r"gemini-(\d+(?:\.\d+)?)", m)
@@ -307,7 +329,7 @@ def _rank_gemini(names: list[tuple[str, str]]) -> list[str]:
             continue
         ga = 0 if stage in ("GA", "") else 1
         tier = 0 if "flash" in m and "lite" not in m else (1 if "lite" in m else 2)
-        rows.append(((tuple(-x for x in version(m)), tier, ga), m))
+        rows.append(((ga, tuple(-x for x in version(m)), tier), m))
     return [m for _, m in sorted(set(rows))]
 
 
