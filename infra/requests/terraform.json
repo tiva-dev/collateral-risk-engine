@@ -1,1 +1,1 @@
-{"environment": "staging", "action": "apply", "note": "Database credential rotation 1 (reviewed plan: 4 add, 4 change, 4 destroy = 2 passwords, 2 secret versions replaced; 2 SQL users updated; service drift only). Redeploy follows."}
+{"environment": "staging", "action": "plan", "note": "Post-merge drift check after database credential rotation 1 (applied 27 Nov, run 46067312421)."}
