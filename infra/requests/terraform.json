@@ -1,1 +1,1 @@
-{"environment": "staging", "action": "plan", "note": "Post-hardening staging configuration (Stage 1 and Stage 2 complete 27 Nov 2026): review plan before apply"}
+{"environment": "staging", "action": "apply", "note": "Apply reviewed staging plan (run 46052040669): egress firewall, shadow schedule, backtest job permissions and definition, Control Centre read roles, cri-run network tags. 7 add, 5 change, 0 destroy."}
