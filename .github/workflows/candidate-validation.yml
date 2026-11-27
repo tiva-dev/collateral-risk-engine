@@ -75,7 +75,9 @@ jobs:
     - name: Run
       run: 'manifest=$(find data/simulation_results -name ''*.manifest.json'' | head -n 1)
 
-        python -m research.methodology_lab.candidate_validation "$manifest" --part ${{ matrix.part }} --out out | tee out.log
+        vset=$(jq -r ''.variant_set // "ablation"'' infra/requests/validation.json)
+
+        python -m research.methodology_lab.candidate_validation "$manifest" --part ${{ matrix.part }} --variant-set "$vset" --out out | tee out.log
 
         '
       if: steps.req.outputs.run == 'true'

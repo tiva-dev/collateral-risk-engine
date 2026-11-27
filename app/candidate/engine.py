@@ -714,6 +714,8 @@ class CandidateEngine:
             return MarginState.LIQUIDATION
 
         state = classify(th, b0)
+        if not 0.5 <= cfg.capacity_utilisation <= 1.0:
+            raise ValueError("capacity_utilisation must be within [0.5, 1.0]: it can only reduce lending")
         p_inf = 0.0
         if cov_q:
             p_inf = float(np.interp(balance, cov_q, np.linspace(0, 1, len(cov_q)), left=0.0, right=1.0))
@@ -798,7 +800,8 @@ class CandidateEngine:
             threshold_ltv={k: ratio(th[k]) for k in ("initial_capacity", "early_warning", "margin_call",
                                                      "forced_recovery", "restoration_target")}
             | {"current": ratio(balance)},
-            approved_credit_limit=b0, current_available_credit=max(0.0, b0 - balance), margin_state=state,
+            approved_credit_limit=b0 * cfg.capacity_utilisation,
+            current_available_credit=max(0.0, b0 * cfg.capacity_utilisation - balance), margin_state=state,
             data_review_required=data_review, data_status=data_status, deterioration=deterioration,
             restriction=restriction, cure_amount=cure, asset_results=assets,
             instruments=[e.summary() for e in all_est], recovery_plan=plan_dict, reasons=reasons,

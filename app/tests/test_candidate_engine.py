@@ -634,3 +634,17 @@ def test_staleness_is_measured_in_exchange_sessions() -> None:
     assert session_lag(date(2026, 12, 24), date(2026, 12, 29), "NGSE") == 1
     assert session_lag(date(2026, 11, 25), date(2026, 11, 27), "ARCA") == 1
     assert session_lag(date(2026, 11, 27), date(2026, 11, 27), "NYSE") == 0
+
+
+def test_capacity_utilisation_scales_credit_not_states() -> None:
+    hs, bars, dates = _cohort_inputs()
+    from app.candidate.lifecycle import run_cohort as rc
+
+    a = rc(holdings=hs, bars=bars, origination=dates[300], term_sessions=5, seed=1,
+           config=CandidateConfig(n_paths=200), workout_sessions=1)
+    b = rc(holdings=hs, bars=bars, origination=dates[300], term_sessions=5, seed=1,
+           config=CandidateConfig(n_paths=200, capacity_utilisation=0.925), workout_sessions=1)
+    assert b["principal"] == pytest.approx(0.925 * a["principal"], rel=1e-9)
+    with pytest.raises(ValueError):
+        rc(holdings=hs, bars=bars, origination=dates[300], term_sessions=5, seed=1,
+           config=CandidateConfig(n_paths=200, capacity_utilisation=1.2), workout_sessions=1)

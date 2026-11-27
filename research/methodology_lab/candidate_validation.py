@@ -47,6 +47,7 @@ from app.candidate.lifecycle import (
     DEFAULT_VARIANTS,
     RESEARCH_VARIANTS,
     STRESS_VARIANTS,
+    Variant,
     aggregate,
     clustered_interval,
     cure_sensitivity,
@@ -56,6 +57,7 @@ from app.candidate.lifecycle import (
     variant_rows,
     zero_event_bound,
 )
+from app.candidate.rc import RC_OVERRIDES
 from app.core.enums import AssetType
 from app.core.models import Holding, Policy
 from app.credit.interest import InterestPolicy
@@ -71,6 +73,10 @@ COMPARE = (DEFAULT_VARIANTS[0], DEFAULT_VARIANTS[1], DEFAULT_VARIANTS[2], RESEAR
 # 27 Nov ablation set: v2026.11.6 baseline, fixed references, the rejected hysteresis/staged
 # reference, and each 2026.11.7 mechanism alone and combined (rc_candidate).
 RC_SET = (DEFAULT_VARIANTS[0], DEFAULT_VARIANTS[1], DEFAULT_VARIANTS[2], RESEARCH_VARIANTS[4]) + STRESS_VARIANTS
+# Frozen RC confirmation set (CRI-1.0.0-rc1 at its own utilisation) against the
+# v2026.11.6 baseline and the fixed references, all at matched exposure.
+RC1_SET = (DEFAULT_VARIANTS[0], DEFAULT_VARIANTS[1], DEFAULT_VARIANTS[2],
+           Variant("rc1", "adaptive", engine=tuple((k, v) for k, v in RC_OVERRIDES if k != "capacity_utilisation")))
 # Policy-originated subset: each adaptive variant lends its own capacity.
 POLICY_SET = (DEFAULT_VARIANTS[0], DEFAULT_VARIANTS[2]) + tuple(
     v for v in STRESS_VARIANTS if v.name in ("adaptive_headroom_cal", "adaptive_concentration_cal",
@@ -343,10 +349,20 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--variant-set", default="ablation", choices=["ablation", "rc1"])
     a = ap.parse_args()
     manifest = json.loads(Path(a.manifest).read_text())
     bars, _fx = _load_replay_inputs(manifest)
     tasks, info = build_tasks(a.part, bars)
+    if a.variant_set == "rc1":
+        # Confirmation of the frozen RC: matched exposure at the RC's utilisation (0.925),
+        # one variant set, no policy-originated duplicates.
+        util = dict(RC_OVERRIDES)["capacity_utilisation"]
+        tasks = [dict(t, variants=RC1_SET, scale=t.get("scale", 1.0) * util,
+                      labels={**t["labels"], "scale_of_rc_credit": t.get("scale", 1.0),
+                              "effective_scale_of_capacity": t.get("scale", 1.0) * util})
+                 for t in tasks if t.get("origination_mode", "matched") == "matched"]
+        info["variant_set"] = "rc1"
     if a.limit:
         tasks = tasks[: a.limit]
     print(json.dumps({"part": a.part, "tasks": len(tasks), **info}, default=str)[:4000], flush=True)

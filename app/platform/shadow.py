@@ -494,13 +494,18 @@ MODELS: dict[str, Callable[[ShadowInputs], ShadowResult]] = {
     "candidate_combined": lambda inp: candidate_model(
         inp, (("headroom_mode", "adaptive"), ("restoration_volatility", "long_run"),
               ("concentration_control", True), ("suspension_value", "delayed")), "candidate_combined"),
-    # CRI v1.0 release-candidate configuration under evaluation (27 Nov review):
-    # v2026.11.6 baseline + delayed suspension valuation + multivariate stress-aware
-    # protection + regime-conditioned scenarios. Shadow only; never drives accounts.
-    "candidate_rc": lambda inp: candidate_model(
-        inp, (("suspension_value", "delayed"), ("stress_protection", True), ("regime_conditioning", True)),
-        "candidate_rc"),
+    # CRI v1.0 Release Candidate 1 (app/candidate/rc.py). Shadow only; never drives accounts.
+    "candidate_rc": lambda inp: _rc_model(inp),
 }
+
+
+def _rc_model(inp: ShadowInputs) -> ShadowResult:
+    from dataclasses import replace
+
+    from app.candidate.rc import RC_ID, RC_OVERRIDES
+
+    r = candidate_model(inp, RC_OVERRIDES, "candidate_rc")
+    return replace(r, model_version=f"{RC_ID} ({r.model_version.split('+')[0]})")
 
 
 def build_inputs(services: Any, tenant_id: str, account: Any, now: datetime) -> ShadowInputs:

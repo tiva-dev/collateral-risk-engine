@@ -311,7 +311,7 @@ def run_cohort(
         return {"origination": origination.isoformat(), "skipped": f"data {base.data_status} at origination",
                 "reasons": base.reasons[:6]}
     cap0 = min(base.thresholds["initial_capacity_uncapped"], base.thresholds["client_ceiling"])
-    p0 = float(principal if principal is not None else cap0 * principal_scale)
+    p0 = float(principal if principal is not None else cap0 * cfg.capacity_utilisation * principal_scale)
     if p0 <= 0:
         return {"origination": origination.isoformat(), "skipped": "no lending capacity at origination",
                 "reasons": base.reasons[:6]}
@@ -350,7 +350,7 @@ def run_cohort(
             # baseline candidate lend the baseline candidate capacity).
             b_v = evaluate(v.engine, q0, Loan(1.0, currency=ccy), origination, md0)
             p_v = float(min(b_v.thresholds["initial_capacity_uncapped"], b_v.thresholds["client_ceiling"])
-                        * principal_scale)
+                        * cfg.capacity_utilisation * principal_scale)
             if p_v <= 0 or b_v.data_status != "ok":
                 results[v.name] = {"skipped": "no capacity under this policy"}
                 continue

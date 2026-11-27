@@ -76,6 +76,10 @@ class CandidateConfig:
     # Calibrated research controls (recalibrated 27 Nov: v2026.11.6 forms were too punitive).
     headroom_cap_sessions: int = 10           # adaptive headroom cap
     concentration_threshold: float = 0.25     # add-on applies only to weight above this share
+    # Origination utilisation (risk-appetite proposal, authorised research band 0.85-1.0):
+    # the approved credit limit is this share of the capacity level. State thresholds
+    # (restriction, warning, margin call, forced recovery) are NOT scaled.
+    capacity_utilisation: float = 1.0
     # Simulation.
     n_paths: int = 2000
     history: int = 500
