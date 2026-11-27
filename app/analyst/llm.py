@@ -303,6 +303,8 @@ def _rank_gemini(names: list[tuple[str, str]]) -> list[str]:
         m = name.rsplit("/", 1)[-1]
         if not m.startswith("gemini") or any(x in m for x in _NOT_TEXT):
             continue
+        if stage in ("PRIVATE_PREVIEW", "EXPERIMENTAL"):   # need allowlisting; never take a candidate slot
+            continue
         ga = 0 if stage in ("GA", "") else 1
         tier = 0 if "flash" in m and "lite" not in m else (1 if "lite" in m else 2)
         rows.append(((tuple(-x for x in version(m)), tier, ga), m))

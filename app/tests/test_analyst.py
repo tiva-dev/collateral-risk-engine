@@ -228,7 +228,8 @@ def test_gemini_discovery_ranks_text_models_and_pages(monkeypatch) -> None:
     monkeypatch.setenv("CRI_GCP_ACCESS_TOKEN", "tok")
     pages = [{"publisherModels": [{"name": "publishers/google/models/gemini-2.5-pro", "launchStage": "GA"},
                                   {"name": "publishers/google/models/gemini-embedding-001", "launchStage": "GA"},
-                                  {"name": "publishers/google/models/gemini-3-flash-preview", "launchStage": "PUBLIC_PREVIEW"}],
+                                  {"name": "publishers/google/models/gemini-3-flash-preview", "launchStage": "PUBLIC_PREVIEW"},
+                                  {"name": "publishers/google/models/gemini-9-pro", "launchStage": "PRIVATE_PREVIEW"}],
               "nextPageToken": "a+b&c=d#e"},
              {"publisherModels": [{"name": "publishers/google/models/gemini-2.5-flash", "launchStage": "GA"},
                                   {"name": "publishers/google/models/gemini-2.5-flash-image", "launchStage": "GA"},
