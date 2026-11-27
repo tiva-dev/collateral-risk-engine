@@ -661,3 +661,58 @@ def test_rc1_frozen_configuration_matches_published_spec() -> None:
     cfg = rc_config()
     assert cfg.suspension_value == "delayed" and cfg.regime_conditioning and cfg.capacity_utilisation == 0.925
     assert not cfg.stress_protection and cfg.headroom_mode == "fixed" and not cfg.concentration_control
+
+
+def test_rc1_financial_definition_is_frozen() -> None:
+    """Any change to a file that defines RC1's financial behaviour must be released
+    as RC2 (new manifest), never silently applied to RC1."""
+    import hashlib
+    import json
+    from pathlib import Path
+
+    from app.candidate.rc import rc_fingerprint
+
+    root = Path(__file__).resolve().parents[2]
+    man = json.loads((root / "release/CRI-1.0.0-rc1/manifest.json").read_text())
+    assert man["configuration"]["fingerprint_sha256"] == rc_fingerprint()
+    engine_files = ["app/candidate/config.py", "app/candidate/engine.py", "app/candidate/estimation.py",
+                    "app/candidate/rc.py", "app/markets/profiles.py", "app/markets/hierarchical.py",
+                    "app/liquidation/planning.py", "app/liquidation/policy.py", "app/credit/interest.py",
+                    "app/historical_data/calendars.py"]
+    for f in engine_files:
+        assert hashlib.sha256((root / f).read_bytes()).hexdigest() == man["source"]["file_sha256"][f], f
+
+
+def test_measurements_do_not_change_outcomes_and_costs_add_up() -> None:
+    from app.candidate.lifecycle import metrics, paired_difference
+
+    hs, bars, dates = _cohort_inputs()
+    cohorts = [run_cohort(holdings=hs, bars=bars, origination=dates[i], term_sessions=30, seed=i, maturity=m,
+                          config=CandidateConfig(n_paths=200), workout_sessions=20)
+               for i, m in ((400, "default"), (410, "refinance"))]
+    for c in cohorts:
+        for v in c["variants"].values():
+            assert v["execution_costs_intervention"] + v["execution_costs_workout"] == pytest.approx(
+                v["execution_costs"], abs=1e-6)
+            for cal in v["calibration"]:
+                assert cal["censored"] == (cal["realized_level"] is None)
+    m = metrics([c["variants"]["adaptive"] | {"origination": c["origination"]} for c in cohorts])
+    assert "cost_intervention_share" in m and "cost_maturity_workout_share" in m
+    d = paired_difference(cohorts, "adaptive", "fixed_psi_1.15", "margin_calls")
+    assert d["pairs"] == 2 and len(d["ci95"]) == 2
+
+
+def test_rc1_matched_origination_uses_rc1_capacity() -> None:
+    from app.candidate.lifecycle import Variant
+    from app.candidate.rc import RC_OVERRIDES
+
+    hs, bars, dates = _cohort_inputs()
+    eng = tuple((k, v) for k, v in RC_OVERRIDES if k != "capacity_utilisation")
+    base = run_cohort(holdings=hs, bars=bars, origination=dates[300], term_sessions=5, seed=1, workout_sessions=1,
+                      config=CandidateConfig(n_paths=200), variants=(Variant("rc1", "adaptive", engine=eng),),
+                      origination_engine=eng, principal_scale=0.925)
+    pol = run_cohort(holdings=hs, bars=bars, origination=dates[300], term_sessions=5, seed=1, workout_sessions=1,
+                     config=CandidateConfig(n_paths=200, capacity_utilisation=0.925),
+                     variants=(Variant("rc1", "adaptive", engine=eng),), origination_mode="policy")
+    # Matched (scale 0.925 on RC1's engine) and policy-originated (RC1 utilisation) lend the same.
+    assert base["principal"] == pytest.approx(pol["variants"]["rc1"]["principal"], rel=1e-9)

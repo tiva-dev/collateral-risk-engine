@@ -429,7 +429,8 @@ def build_router(p: Platform) -> APIRouter:
 
     @r.get("/shadow/history/{account_ref}")
     def shadow_history(account_ref: str, model_id: str | None = None, limit: int = 500) -> dict[str, Any]:
-        sql = ("SELECT model_id, evaluated_at, approved_credit, available_credit, capacity_ltv, risk_state, "
+        sql = ("SELECT model_id, evaluated_at, approved_credit, available_credit, capacity_ltv, approved_ltv, "
+               "uncapped_capacity_ltv, risk_state, "
                "margin_call, estimated_recovery, collateral_value, loan_balance, error FROM shadow_evaluations "
                "WHERE tenant_id=%s AND account_ref=%s")
         params: list[Any] = [require_principal().tenant_id, account_ref]

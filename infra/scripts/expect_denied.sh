@@ -14,8 +14,8 @@ err="$(mktemp)"; trap 'rm -f "$err"' EXIT
 if "$@" >/dev/null 2>"$err"; then
   echo "FAIL: ${desc}: the command succeeded (isolation broken)"; exit 1
 fi
-if grep -Eiq 'PERMISSION_DENIED|HTTPError 403|\b403\b|does not have [a-z.]+ (access|permission)|AccessDenied|permission[^ ]* denied|Forbidden' "$err"; then
-  echo "ok: ${desc}: denied ($(grep -Eio 'PERMISSION_DENIED|403|Forbidden|AccessDenied|does not have [a-z.]+ (access|permission)' "$err" | head -1))"
+if grep -Eiq 'PERMISSION_DENIED|HTTPError 403|\b403\b|does not have [a-z.]+ (access|permission)|does not have permission|caller does not have permission|AccessDenied|permission[^ ]* denied|Forbidden' "$err"; then
+  echo "ok: ${desc}: denied ($(grep -Eio 'PERMISSION_DENIED|403|Forbidden|AccessDenied|does not have [a-z.]+ (access|permission)|does not have permission' "$err" | head -1))"
   exit 0
 fi
 echo "FAIL: ${desc}: failed for a reason other than permission denial (inconclusive):"

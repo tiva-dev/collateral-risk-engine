@@ -146,6 +146,16 @@ class Outcome:
     unnecessary_liquidations: int = 0
     executed_gross: float = 0.0
     execution_costs: float = 0.0
+    # Measurement only (27 Nov acceptance evaluation): cost attribution, maturity
+    # outcome, recovery accuracy and coverage calibration. None of these feed back
+    # into a decision.
+    execution_costs_intervention: float = 0.0
+    execution_costs_workout: float = 0.0
+    executed_gross_intervention: float = 0.0
+    executed_gross_workout: float = 0.0
+    maturity_outcome: str = ""              # repaid | partial_then_default | refinanced | refinance_refused | default | in_recovery | ""
+    episode_accuracy: list[dict[str, Any]] = field(default_factory=list)
+    calibration: list[dict[str, Any]] = field(default_factory=list)
     no_fill_sessions: int = 0
     recovery_sessions: list[int] = field(default_factory=list)
     residual_after_recovery: list[float] = field(default_factory=list)
@@ -221,6 +231,7 @@ def run_cohort(
     maturity: str = "repay",
     workout_sessions: int = 60,
     origination_mode: str = "matched",
+    origination_engine: tuple[tuple[str, Any], ...] = (),
 ) -> dict[str, Any]:
     """Run all variants on one matched cohort with common random numbers."""
     policy = policy or Policy.default()
@@ -296,16 +307,63 @@ def run_cohort(
                           interest_policy=anchored, as_of=datetime.combine(d, time(21), UTC), seed=engine_seed,
                           plan=True, restoration_override=override, force_plan_state=state)
         orders: dict[str, float] = {}
+        expected = 0.0
         for o in (ev.recovery_plan or {}).get("orders", []):
             orders[o["instrument_key"]] = orders.get(o["instrument_key"], 0.0) + float(o["quantity"])
+            expected += float(o.get("expected_net_proceeds") or 0.0)
+        plan_expected[0] = expected
         return orders, bool(ev.data_review_required)
+
+    plan_expected = [0.0]
+
+    def realized_coverage(i0: int, start: int, qty_s: dict[str, float], loan_s: Loan,
+                          counted: set[str]) -> tuple[float | None, int]:
+        """Measurement: the balance level actually covered if the counted collateral had
+        been sold starting at session ``start`` on the observed path, within participation
+        limits, without fills on no-volume or limit-locked sessions, at the session's typical
+        price less costs, with settlement and contractual interest. Returned in session-i0
+        balance terms (comparable with the thresholds stated at i0). None if the sale or its
+        settlement does not finish within the observed path (censored observation)."""
+        rem = {k: q for k, q in qty_s.items() if k in counted and q > 1e-9}
+        cash_s = sum(q for k, q in qty_s.items() if k in cash_keys)
+        proceeds, last_settle = 0.0, start
+        j = start
+        while rem and j < len(path) and j - start < cfg.max_exit_sessions:
+            d_j = path[j]
+            for k in list(rem):
+                b = fillable(k, d_j)
+                if b is None:
+                    continue
+                prof = profiles[k]
+                assert prof is not None
+                part = min(prof.max_participation_rate, execution.max_participation_rate)
+                sell = min(rem[k], part * float(b["volume"]))
+                hs_ = _half_spread(b, prof.spread_floor, prof.spread_fallback)
+                impact = cfg.impact_coefficient * vol20[keys[k]].get(d_j, 0.02) * math.sqrt(part)
+                px = (float(b.get("open") or b["close"]) + float(b["high"]) + float(b["low"]) + float(b["close"])) / 4
+                proceeds += sell * px * max(0.0, 1 - hs_ - impact - execution.execution_cost_rate)
+                rem[k] -= sell
+                if rem[k] <= 1e-9:
+                    rem.pop(k)
+                last_settle = j + settle
+            j += 1
+        if rem and j - start < cfg.max_exit_sessions:
+            return None, j            # path ended before the sale finished: censored
+        if last_settle >= len(path):
+            return None, last_settle  # settlement after the observed path: censored
+        t0 = datetime.combine(path[i0], time(21), UTC)
+        grown, _ = accrue_scheduled_periods(loan_s, anchored, t0, datetime.combine(path[last_settle], time(21), UTC))
+        g = grown.balance / loan_s.balance if loan_s.balance > 0 else 1.0
+        return (cash_s + proceeds) / g, last_settle
 
     feed0 = _Feed(holdings, keys, series)
     md0 = feed0.market(origination)
     q0 = {h.stable_key: h.quantity for h in holdings}
     cash0 = sum(h.quantity for h in holdings if h.asset_type == AssetType.CASH)
     v0 = sum(q0[k] * md0[k].last_price for k in md0) + cash0
-    base = evaluate((), q0, Loan(1.0, currency=ccy), origination, md0)
+    # Matched exposure: every policy lends the capacity of the origination engine (the
+    # baseline candidate by default; RC1's own engine when RC1 is the reference).
+    base = evaluate(origination_engine, q0, Loan(1.0, currency=ccy), origination, md0)
     if principal is None and base.data_status != "ok":
         # No new borrowing while material data is missing, stale or unreliable.
         return {"origination": origination.isoformat(), "skipped": f"data {base.data_status} at origination",
@@ -416,6 +474,16 @@ def run_cohort(
                     pending.append((i + settle, proceeds))
                     out.executed_gross += sell * px
                     out.execution_costs += sell * px - proceeds
+                    if episode == "workout":
+                        out.execution_costs_workout += sell * px - proceeds
+                        out.executed_gross_workout += sell * px
+                    else:
+                        out.execution_costs_intervention += sell * px - proceeds
+                        out.executed_gross_intervention += sell * px
+                        if out.episode_accuracy and out.episode_accuracy[-1]["start"] == sale_start:
+                            ea = out.episode_accuracy[-1]
+                            ea["realized_net"] += proceeds
+                            ea["last_fill"] = i
             cash = sum(q for k, q in qty.items() if k in cash_keys)
             value = cash + sum(qty.get(k, 0.0) * m.last_price for k, m in md.items())
             bal = loan.balance
@@ -426,6 +494,8 @@ def run_cohort(
             if i >= term_sessions - 1 and not matured:   # path[term-1] is `term` sessions after origination
                 matured = True
                 pay = 0.0
+                if episode is not None:
+                    out.maturity_outcome = "in_recovery"
                 if episode is None:
                     if maturity == "repay":
                         pay = bal
@@ -436,6 +506,13 @@ def run_cohort(
                         cap_m = (min(th_m["initial_capacity_uncapped"], th_m["client_ceiling"]) if th_m
                                  else ltv0 * value)
                         pay = bal if net_bal <= cap_m else 0.0
+                        out.maturity_outcome = "refinanced" if pay > 0 else "refinance_refused"
+                    elif maturity == "default":
+                        out.maturity_outcome = "default"
+                    if maturity == "repay":
+                        out.maturity_outcome = "repaid"
+                    elif maturity.startswith("partial:"):
+                        out.maturity_outcome = "partial_then_default"
                 if pay > 0:
                     loan, _ = apply_repayment(loan, pay)
                     out.borrower_repayment += pay
@@ -502,6 +579,19 @@ def run_cohort(
             # 5) Monitoring, margin calls, urgent protection.
             urgent = False
             exit_level = b_ew if v.hysteresis else b_mc
+            if (v.kind == "adaptive" and episode is None and state in BAD
+                    and not (data_hold and state in BAD)):
+                counted = {a.instrument_key for a in ev.asset_results if a.lending_value_eligible
+                           or (a.data_status == "not_trading" and dict(v.engine).get("suspension_value") == "delayed"
+                               and "impaired" not in a.notes)}
+                delay_s = (execution.margin_call_grace_observations if state == MarginState.MARGIN_CALL
+                           else execution.liquidation_delay_observations)
+                cov, _end = realized_coverage(i, i + 1 + delay_s, qty, loan, counted)
+                lvl = b_mc if state == MarginState.MARGIN_CALL else b_f
+                out.calibration.append({"session": i, "kind": state.value, "balance": net_bal, "threshold": lvl,
+                                        "realized_level": cov, "censored": cov is None,
+                                        "shortfall_vs_threshold": None if cov is None else bool(cov < lvl),
+                                        "shortfall_vs_balance": None if cov is None else bool(cov < net_bal)})
             if episode is None and state == MarginState.LIQUIDATION:
                 out.forced_events += 1
                 episode, urgent = "selling", v.urgent_first
@@ -540,6 +630,8 @@ def run_cohort(
                 planned = dict(orders)
                 submit_from = i + 1
                 sale_start = i
+                out.episode_accuracy.append({"start": i, "expected_net": plan_expected[0], "realized_net": 0.0,
+                                             "last_fill": None, "kind": "urgent" if urgent else plan_state.value})
                 out.liquidation_episodes += 1
                 out.unnecessary_liquidations += unnecessary(i)
                 out.events.append({"session": i, "date": d.isoformat(), "event": "liquidation_decided",
@@ -633,7 +725,105 @@ def metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "data_review_sessions": int(sum(r["sessions_data_review"] for r in rows)),
         "no_fill_sessions": int(sum(r["no_fill_sessions"] for r in rows)),
         "repaid_at_maturity": float(np.mean([r["repaid_at_maturity"] for r in rows])),
+        **_measurements(rows, principal),
     }
+
+
+def _measurements(rows: list[dict[str, Any]], principal: np.ndarray) -> dict[str, Any]:
+    """Acceptance-evaluation measurements (27 Nov): cost attribution, maturity outcomes,
+    recovery accuracy and coverage calibration. Absent fields (older results) are skipped."""
+    if not rows or "execution_costs_intervention" not in rows[0]:
+        return {}
+    tot = principal.sum()
+    out: dict[str, Any] = {
+        "cost_intervention_share": float(sum(r["execution_costs_intervention"] for r in rows) / tot),
+        "cost_maturity_workout_share": float(sum(r["execution_costs_workout"] for r in rows) / tot),
+        "executed_intervention_share": float(sum(r["executed_gross_intervention"] for r in rows) / tot),
+        "executed_workout_share": float(sum(r["executed_gross_workout"] for r in rows) / tot),
+    }
+    outcomes = [r.get("maturity_outcome") or "none" for r in rows]
+    for o in sorted(set(outcomes)):
+        out[f"maturity_{o}"] = float(np.mean([x == o for x in outcomes]))
+    refused = [r for r in rows if r.get("maturity_outcome") == "refinance_refused"]
+    out["refinance_refused_cost_share"] = float(sum(r["execution_costs_workout"] for r in refused) / tot)
+    eps = [e for r in rows for e in r.get("episode_accuracy", []) if e.get("expected_net")]
+    if eps:
+        ratio = np.array([e["realized_net"] / e["expected_net"] for e in eps])
+        out.update({"episodes_measured": len(eps), "realized_over_expected_median": float(np.median(ratio)),
+                    "realized_over_expected_p05": float(np.percentile(ratio, 5)),
+                    "realized_below_90pct_of_expected": float(np.mean(ratio < 0.9))})
+    cal = [c for r in rows for c in r.get("calibration", [])]
+    if cal:
+        for kind in ("margin_call", "liquidation"):
+            ck = [c for c in cal if c["kind"] == kind]
+            done = [c for c in ck if not c["censored"]]
+            out[f"calibration_{kind}_events"] = len(ck)
+            out[f"calibration_{kind}_censored"] = len(ck) - len(done)
+            if done:
+                k = sum(c["shortfall_vs_threshold"] for c in done)
+                from scipy.stats import beta
+
+                out[f"calibration_{kind}_shortfall_rate"] = k / len(done)
+                out[f"calibration_{kind}_shortfall_upper95"] = float(beta.ppf(0.95, k + 1, len(done) - k))
+                out[f"calibration_{kind}_below_balance_rate"] = float(np.mean([c["shortfall_vs_balance"]
+                                                                                for c in done]))
+    return out
+
+
+PAIRED_KEYS = ("loss", "cost", "cost_intervention", "margin_calls", "restricted", "liquidation")
+
+
+def _per_loan(r: dict[str, Any], key: str) -> float | None:
+    p = r["principal"]
+    if key == "loss":
+        return None if r["censored"] else (r["lender_loss"] or 0.0) / p
+    if key == "cost":
+        return r["execution_costs"] / p
+    if key == "cost_intervention":
+        return r.get("execution_costs_intervention", r["execution_costs"]) / p
+    if key == "margin_calls":
+        return float(r["margin_calls"])
+    if key == "restricted":
+        return r["sessions_restricted"] / max(r["sessions"], 1)
+    if key == "liquidation":
+        return float(r["liquidation_episodes"] > 0)
+    raise KeyError(key)
+
+
+def paired_difference(cohorts: list[dict[str, Any]], a: str, b: str, key: str, cluster_days: int = 91,
+                      reps: int = 2000, seed: int = 11) -> dict[str, Any]:
+    """Mean of per-cohort differences a - b on the SAME cohorts (same origination, path,
+    principal and random numbers), with a 95% interval resampling origination-quarter
+    clusters in moving blocks. Overlapping marginal intervals are not used to claim
+    equivalence; this interval is the uncertainty of the difference itself."""
+    pts: list[tuple[date, float]] = []
+    for c in cohorts:
+        va, vb = c.get("variants", {}).get(a), c.get("variants", {}).get(b)
+        if not va or not vb or "skipped" in va or "skipped" in vb:
+            continue
+        xa, xb = _per_loan(va, key), _per_loan(vb, key)
+        if xa is None or xb is None:
+            continue
+        pts.append((_date(c["origination"]), xa - xb))
+    if not pts:
+        return {"pairs": 0}
+    t0 = min(d for d, _ in pts)
+    groups: dict[int, list[float]] = {}
+    for d, x in pts:
+        groups.setdefault((d - t0).days // cluster_days, []).append(x)
+    ids = sorted(groups)
+    sums = np.array([sum(groups[g]) for g in ids])
+    cnts = np.array([len(groups[g]) for g in ids])
+    rng = np.random.default_rng(seed)
+    n, block = len(ids), min(2, len(ids))
+    nb = math.ceil(n / block)
+    starts = rng.integers(0, n - block + 1, size=(reps, nb))
+    idx = (starts[:, :, None] + np.arange(block)[None, None, :]).reshape(reps, -1)[:, :n]
+    est = sums[idx].sum(axis=1) / np.maximum(cnts[idx].sum(axis=1), 1)
+    diffs = np.array([x for _, x in pts])
+    return {"pairs": len(pts), "clusters": n, "mean_difference": float(diffs.mean()),
+            "ci95": [float(np.percentile(est, 2.5)), float(np.percentile(est, 97.5))],
+            "share_a_worse": float(np.mean(diffs > 1e-12)), "share_a_better": float(np.mean(diffs < -1e-12))}
 
 
 def clustered_interval(rows: list[dict[str, Any]], key: str, cluster_days: int = 91, reps: int = 2000,

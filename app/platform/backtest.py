@@ -118,6 +118,16 @@ def run(db: Database, services: Any, run_id: str) -> dict[str, Any]:
             # holding's stable key and bars by its exchange:symbol:ccy:type.
             keys = {h.stable_key: data_key(h) for h in holdings}
             bars = {k: load_bars(k, 2000) for k in keys.values()}
+        # Locked-period protection: no bar after the examined boundary unless this is
+        # the authorised formal evaluation (app/platform/governance/data_lock.py).
+        from app.platform.governance.data_lock import (
+            EXAMINED_THROUGH,
+            cap_bars,
+            locked_evaluation_authorised,
+        )
+
+        bars = cap_bars(bars, params)
+        params["data_through"] = (None if locked_evaluation_authorised(params) else EXAMINED_THROUGH.isoformat())
         asset_ids = {h.stable_key: h.asset_id for h in holdings}
 
         def cash_md(ts: datetime) -> dict[str, Any]:

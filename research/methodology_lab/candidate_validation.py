@@ -224,7 +224,8 @@ def run_task(t: dict[str, Any]) -> dict[str, Any]:
                          execution=LiquidationExecutionPolicy(), cure_probability=t.get("cure", 0.5),
                          seed=t["seed"], config=CFG, priors=t["priors"], workout_sessions=40,
                          maturity=t.get("maturity", "repay"), principal_scale=t.get("scale", 1.0),
-                         origination_mode=t.get("origination_mode", "matched"))
+                         origination_mode=t.get("origination_mode", "matched"),
+                         origination_engine=t.get("origination_engine", ()))
     except ValueError as exc:
         res = {"origination": t["origination"].isoformat(), "skipped": str(exc)}
     res["group"] = t["group"]
@@ -350,6 +351,8 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--variant-set", default="ablation", choices=["ablation", "rc1"])
+    ap.add_argument("--shard", default="0/1", help="i/n: run every n-th task starting at i (partitioned jobs)")
+    ap.add_argument("--paths", type=int, default=0, help="Monte Carlo paths (default: the runner's 400)")
     a = ap.parse_args()
     manifest = json.loads(Path(a.manifest).read_text())
     bars, _fx = _load_replay_inputs(manifest)
@@ -358,11 +361,22 @@ def main() -> None:
         # Confirmation of the frozen RC: matched exposure at the RC's utilisation (0.925),
         # one variant set, no policy-originated duplicates.
         util = dict(RC_OVERRIDES)["capacity_utilisation"]
-        tasks = [dict(t, variants=RC1_SET, scale=t.get("scale", 1.0) * util,
+        rc_engine = tuple((k, v) for k, v in RC_OVERRIDES if k != "capacity_utilisation")
+        tasks = [dict(t, variants=RC1_SET, scale=t.get("scale", 1.0) * util, origination_engine=rc_engine,
                       labels={**t["labels"], "scale_of_rc_credit": t.get("scale", 1.0),
                               "effective_scale_of_capacity": t.get("scale", 1.0) * util})
                  for t in tasks if t.get("origination_mode", "matched") == "matched"]
         info["variant_set"] = "rc1"
+        info["origination"] = "every policy lends RC1's own approved credit (RC1 engine capacity x 0.925)"
+    si, sn = (int(x) for x in a.shard.split("/"))
+    tasks = tasks[si::sn]
+    info["shard"] = a.shard
+    if a.paths:
+        global CFG
+        CFG = CandidateConfig(n_paths=a.paths)
+        info["n_paths"] = a.paths
+    else:
+        info["n_paths"] = CFG.n_paths
     if a.limit:
         tasks = tasks[: a.limit]
     print(json.dumps({"part": a.part, "tasks": len(tasks), **info}, default=str)[:4000], flush=True)
@@ -417,6 +431,19 @@ def main() -> None:
         key = "|".join(parts[:2]) if parts[0] in ("sim", "simpolicy", "repay", "frontier") else \
             f"{parts[0]}|{parts[-1]}" if parts[0] in ("hist", "histpolicy") else parts[0]
         pools.setdefault(key, []).append(r)
+    # Compact per-cohort records (no event logs), gzip+base64, so partitioned jobs can be
+    # pooled exactly in analysis: one COHORTS line per 200 cohorts.
+    import base64
+    import gzip
+    compact = []
+    for c in results:
+        c2 = {k: v for k, v in c.items() if k != "variants"}
+        c2["variants"] = {n: ({k: v for k, v in vv.items() if k != "events"} if isinstance(vv, dict) else vv)
+                          for n, vv in c.get("variants", {}).items()}
+        compact.append(c2)
+    for j in range(0, len(compact), 200):
+        blob = base64.b64encode(gzip.compress(json.dumps(compact[j:j + 200], default=str).encode())).decode()
+        print(f"COHORTS {a.part} {a.shard} {j} {blob}", flush=True)
     for key, rows in sorted(pools.items()):
         names = sorted({n for c in rows if "variants" in c for n in c["variants"]})
         line = {"pool": key, "part": a.part, "cohorts": sum(1 for c in rows if "variants" in c), "v": {}}

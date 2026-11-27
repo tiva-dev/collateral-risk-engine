@@ -350,6 +350,18 @@ CREATE TABLE IF NOT EXISTS excluded_runs (
 );
 """
 
+# Approved LTV (approved credit / collateral value) and uncapped risk-capacity LTV
+# reported separately for every model. capacity_ltv is retained as the legacy
+# column (its meaning differed between models) and is no longer summarised.
+_M8_POSTGRES = """
+ALTER TABLE shadow_evaluations ADD COLUMN IF NOT EXISTS approved_ltv DOUBLE PRECISION;
+ALTER TABLE shadow_evaluations ADD COLUMN IF NOT EXISTS uncapped_capacity_ltv DOUBLE PRECISION;
+"""
+_M8_SQLITE = """
+ALTER TABLE shadow_evaluations ADD COLUMN approved_ltv DOUBLE PRECISION;
+ALTER TABLE shadow_evaluations ADD COLUMN uncapped_capacity_ltv DOUBLE PRECISION;
+"""
+
 MIGRATIONS: list[tuple[int, str, dict[str, str]]] = [
     (1, "initial platform schema", {"postgres": _M1, "sqlite": _M1}),
     (2, "append-only audit and row-level security", {"postgres": _M2_POSTGRES + _rls_statements(), "sqlite": ""}),
@@ -358,6 +370,7 @@ MIGRATIONS: list[tuple[int, str, dict[str, str]]] = [
     (5, "market bars and shadow model evaluations", {"postgres": _M5 + _shadow_rls() + _grants(), "sqlite": _M5}),
     (6, "operational drill records", {"postgres": _M6 + _grants(), "sqlite": _M6}),
     (7, "defective or superseded model runs excluded from summaries", {"postgres": _M7 + _grants(), "sqlite": _M7}),
+    (8, "approved LTV and uncapped risk capacity reported separately", {"postgres": _M8_POSTGRES, "sqlite": _M8_SQLITE}),
 ]
 
 

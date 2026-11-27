@@ -122,6 +122,29 @@ class ShadowTests(unittest.TestCase):
         self.assertLessEqual(res["B_gap"].explanation["capacity_ltv_uncapped"],
                              res["A"].explanation["capacity_ltv_uncapped"] + 1e-9)
 
+    def test_rc1_shadow_uses_frozen_config_and_persists_release(self) -> None:
+        from app.candidate.rc import RC_ID, rc_fingerprint
+
+        with self.db.transaction("alpha"):
+            acct = self.services.service("alpha").account_repo.get("acct")
+            now = datetime.now(UTC)
+            inp = shadow.build_inputs(self.services, "alpha", acct, now)
+            res = {r.model_id: r for r in shadow.evaluate_all(inp, {k: shadow.MODELS[k]
+                                                                     for k in ("baseline", "candidate_rc")})}
+            rc = res["candidate_rc"]
+            self.assertIsNone(rc.error, rc.error)
+            self.assertTrue(rc.model_version.startswith(RC_ID))
+            self.assertEqual(rc.explanation["release"]["fingerprint_sha256"], rc_fingerprint())
+            if rc.approved_ltv is not None and rc.uncapped_capacity_ltv is not None:
+                # Approved credit is 92.5% of capped capacity, never above uncapped capacity.
+                self.assertLessEqual(rc.approved_ltv, rc.uncapped_capacity_ltv + 1e-9)
+            self.assertIsNotNone(res["baseline"].approved_ltv)
+            shadow.persist("shr_test_rc", "alpha", "acct", list(res.values()), now)
+            rows = shadow.latest_by_account("alpha", "acct")
+        stored = {r["model_id"]: r for r in rows}
+        self.assertIn("approved_ltv", stored["candidate_rc"])
+        self.assertIn("uncapped_capacity_ltv", stored["candidate_rc"])
+
     def test_backtest_uses_only_past_bars_and_stores_results(self) -> None:
         with self.db.transaction("*") as conn:
             conn.execute("INSERT INTO backtest_runs (run_id, tenant_id, account_ref, requested_by, models, params, "

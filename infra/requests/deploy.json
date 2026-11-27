@@ -1,1 +1,1 @@
-{"environment": "staging", "seed_sandbox": false, "run_jobs": ["apply-exclusions", "shadow", "lifecycle-all"], "note": "CRI-1.0.0-rc1 shadow (candidate-2026.11.8)"}
+{"environment": "staging", "seed_sandbox": false, "run_jobs": ["apply-exclusions", "shadow", "lifecycle-all"], "note": "RC1 frozen-config shadow with release fingerprint; migration 8 (approved vs uncapped LTV); locked-period enforcement"}

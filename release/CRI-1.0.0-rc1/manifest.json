@@ -1,0 +1,254 @@
+{
+ "release": "CRI-1.0.0-rc1",
+ "status": "advisory, shadow only; not approved for lending or autonomous liquidation",
+ "source": {
+  "repository": "tiva-dev/collateral-risk-engine",
+  "frozen_commit": "db5ee78ffe7eb6c2de705cce6d141d19da8cc734",
+  "tag": {
+   "name": "cri-1.0.0-rc1",
+   "state": "pending: tag creation is not permitted from the agent workspace"
+  },
+  "merged_to_main_as": "72ddd0ad020b8e1cb5d6c5e7a8e7472a2d4d5750 (squash of PR #29; tree identical to 0aa4672, whose engine code equals the frozen commit)",
+  "file_sha256": {
+   "app/candidate/config.py": "edd2f7e170dd7115b14711a40a56f4ae137ccd2c8ab1474a0f7ef855161faf9e",
+   "app/candidate/engine.py": "d776a54a3590d6f1d6ca135defa5be23378c2fd6589f1ef34cc1da7f16e2389d",
+   "app/candidate/estimation.py": "3ee9c0413c08f13cda0ba38dc6d329c6e957ebab50c85b11b29661ae2bc065e2",
+   "app/candidate/lifecycle.py": "61b0e625b5033151f221df5910a161adfb02f7c8352ddc0434da2b421f5f7772",
+   "app/candidate/rc.py": "64f3897ffb96870c7a10847d8fd792b321124589f36fe562b7db51b570608c86",
+   "app/markets/profiles.py": "cd6d50b60d5c312dd6992b8a904f8ee8f8516ef9d4119ad5f3f0512d5850119a",
+   "app/markets/hierarchical.py": "1f33e455e2159901a4d1ef6777674eb333e0822d368dffb2e2dfbce1e3a1c32d",
+   "app/liquidation/planning.py": "d5944016e348a1b43e3b3677c491e3fb640b499f630837630e62fa34a4aa8b76",
+   "app/liquidation/policy.py": "36995d45664d7f871ae2fdc62e26345422e3e2dc07f397450c7b4c4dff62f21e",
+   "app/credit/interest.py": "281646c7f5855233e5a8e252294a0026175b627de4854c27cc60c29186d87598",
+   "app/historical_data/calendars.py": "b72f759a6ae2737662633dc4829a768123e923a3f50cd32b8784230e9e0601b0",
+   "research/methodology_lab/candidate_validation.py": "19a9d4311dc3d7ddb3b6a869846a898a2b64061aa8f6e52c578fab94cfa1939d",
+   ".github/workflows/candidate-validation.yml": "146316553270fc27f6698c1048b4b846d4a40c9db74f559cba1174a43c5e8a79",
+   "requirements.txt": "7eed68f2f6614d6ec5a0caf85ab7b50137d065a33df57301038b0735cefa79f8"
+  }
+ },
+ "engine_version": "candidate-2026.11.8",
+ "configuration": {
+  "fingerprint_sha256": "17534330c290f443fed44c7442560b967a017469ec6db47d5fd3c3ba146bf9f5",
+  "overrides": {
+   "suspension_value": "delayed",
+   "regime_conditioning": true,
+   "capacity_utilisation": 0.925
+  },
+  "parameters": {
+   "margin_call_confidence": 0.99,
+   "forced_confidence": 0.95,
+   "headroom_confidence": 0.95,
+   "headroom_sessions": 5,
+   "warning_confidence": 0.9,
+   "warning_sessions": 1,
+   "restoration": "initial_capacity",
+   "min_sessions": 20,
+   "full_tail_sessions": 250,
+   "min_data_quality": 0.5,
+   "uncertainty_z": 1.0,
+   "multi_session_lag": 10,
+   "max_exit_sessions": 60,
+   "impact_coefficient": 0.7,
+   "spread_stress_multiplier": 1.5,
+   "liquidity_noise_sd": 0.35,
+   "liquidity_persistence": 0.7,
+   "volume_drawdown_elasticity": 2.0,
+   "min_volume_multiplier": 0.05,
+   "no_fill_share_of_stale": 0.5,
+   "suspension_floor": 0.001,
+   "suspension_mean_sessions": 3.0,
+   "price_limit_scenarios": true,
+   "material_share": 0.02,
+   "max_quote_lag_business_days": 1,
+   "max_bar_lag_business_days": 2,
+   "headroom_mode": "fixed",
+   "max_headroom_sessions": 30,
+   "restoration_volatility": "current",
+   "concentration_control": false,
+   "suspension_value": "delayed",
+   "permanent_impairment_sessions": 60,
+   "max_suspension_sessions": 40,
+   "stress_protection": false,
+   "stress_infeasible_prob": 0.05,
+   "regime_conditioning": true,
+   "regime_recent_sessions": 60,
+   "regime_recent_weight": 5.0,
+   "headroom_cap_sessions": 10,
+   "concentration_threshold": 0.25,
+   "capacity_utilisation": 0.925,
+   "history": 500,
+   "ewma_lambda": 0.94
+  },
+  "export": "docs/methodology/CRI_v1.0_RC1_config.json"
+ },
+ "monte_carlo": {
+  "n_paths_frozen_configuration": 2000,
+  "n_paths_validation_runs": 400,
+  "seed_to_seed_relative_sd": {
+   "400": {
+    "initial_capacity_uncapped": 0.02145701461573582,
+    "margin_call": 0.011719785499184005,
+    "forced_recovery": 0.005618171737089796
+   },
+   "2000": {
+    "initial_capacity_uncapped": 0.013723533350323731,
+    "margin_call": 0.007344003136768201,
+    "forced_recovery": 0.0026678121408765924
+   }
+  },
+  "note": "validation evidence to date used 400 paths; the locked-period evaluation must use the frozen 2000"
+ },
+ "random_seed_methodology": {
+  "engine_default": "seed = int(sha256(decision_date | sorted instrument identities)[:12], 16): reproducible per date and portfolio",
+  "lifecycle": "each cohort task seed = 1000 + running index in build_tasks; engine_seed = default_rng(task seed).integers(0, 2**40), shared by every variant of the cohort (common random numbers)",
+  "synthetic_paths": "path_seed drawn from default_rng(7 + task count); every stress overlay of a base path reuses the same path_seed",
+  "bootstrap_intervals": "clustered by origination quarter, seed fixed in aggregate()"
+ },
+ "market_profiles": {
+  "US": {
+   "settlement_days": 1,
+   "daily_price_limit": null,
+   "max_participation_rate": 0.1,
+   "spread_floor": 0.0002,
+   "spread_fallback": 0.0005,
+   "volume_reported_from": null,
+   "currency_convertibility": "free",
+   "provenance": {
+    "settlement_days": "configured: SEC T+1 settlement effective 28 May 2024",
+    "daily_price_limit": "configured: no daily limit; LULD bands are intraday pauses",
+    "spread_floor": "assumption: research default (methodology_lab real_data.py)",
+    "max_participation_rate": "assumption: CRI default 10% of ADV",
+    "volume": "observed: Alpaca IEX feed only (partial consolidated volume)"
+   },
+   "status": {}
+  },
+  "NGX": {
+   "settlement_days": 2,
+   "daily_price_limit": 0.1,
+   "max_participation_rate": 0.1,
+   "spread_floor": 0.005,
+   "spread_fallback": 0.02,
+   "volume_reported_from": "2025-08-01",
+   "currency_convertibility": "managed",
+   "provenance": {
+    "settlement_days": "assumption: T+2; confirm against current NGX/CSCS rule before use",
+    "daily_price_limit": "observed: one-day moves cluster at exactly +/-10% in NGNMarket data",
+    "spread_floor": "assumption: research default (methodology_lab real_data.py)",
+    "max_participation_rate": "assumption: CRI default 10% of ADV",
+    "volume": "observed: NGNMarket reports volume only from 2025-08-01",
+    "currency_convertibility": "configured: managed float; no executable USD/NGN source available"
+   },
+   "status": {
+    "daily_price_limit": "not_in_approved_methodology"
+   }
+  }
+ },
+ "market_profiles_source_sha256": "cd6d50b60d5c312dd6992b8a904f8ee8f8516ef9d4119ad5f3f0512d5850119a",
+ "holiday_calendars_source_sha256": "b72f759a6ae2737662633dc4829a768123e923a3f50cd32b8784230e9e0601b0",
+ "datasets": {
+  "US": {
+   "provider_run": 45873299276,
+   "range": "2018-01-02 to 2026-11-25",
+   "feed": "Alpaca SIP",
+   "snapshot_id": "cfa1e9c2f3a34b326a2422481f0e9d261e1a63098a2a4a9b7635ca76cdf6ccdd",
+   "artifact_sha256": {
+    "historical-data-snapshot": "7395e059ec20b5342d2aebf169a276f07cbe47a7ccc50c03b9ba7183ed41c54f",
+    "official-provider-validation-evidence": "e933ba32bc4358b5fa546ac6857365137b02758a2f2cda724bd1aa6e04d662ee"
+   }
+  },
+  "NGX": {
+   "provider_run": 45681534542,
+   "range": "2018 onward; volume reported from 2025-08-01",
+   "snapshot_id": "3410aba88472a047143e2c392f50071c387ba1914b033fba28c2e8de629c5205",
+   "artifact_sha256": {
+    "historical-data-snapshot": "581b64130305efd52c05189b26d728082cf9c50f8f48d33efcc9afd9c468e68e",
+    "official-provider-validation-evidence": "f0d42edcf0f10b18e9de7d465f05d87cd2bd8c173390fc192d98061cc4616abd"
+   }
+  },
+  "tiers": "all history to 2026-11-25 previously examined; locked unseen data from 2026-11-27 (docs/governance/DATA_TIERS.md)"
+ },
+ "dependencies": {
+  "python": "3.11.18 (actions/setup-python, ubuntu-latest)",
+  "constraints_file": "release/CRI-1.0.0-rc1/constraints.txt",
+  "observed_identical_in_all_8_confirmation_jobs": true,
+  "note": "requirements.txt uses lower bounds; the constraints file pins the exact set the evidence was produced with"
+ },
+ "execution_and_interest_assumptions": {
+  "execution_policy_defaults": {
+   "margin_call_grace_observations": 1,
+   "liquidation_delay_observations": 0,
+   "settlement_delay_observations": 1,
+   "max_execution_observations": 5,
+   "max_participation_rate": 0.1,
+   "execution_cost_rate": 0.0025,
+   "maximum_price_slippage": 0.1,
+   "maximum_quote_age_days": 3,
+   "full_liquidation_on_forced_trigger": true,
+   "data_review_escalation_minutes": 1440.0,
+   "data_review_reescalation_minutes": 1440.0
+  },
+  "validation_interest": {
+   "US": {
+    "annual_rate": 0.1
+   },
+   "NGX": {
+    "annual_rate": 0.25
+   },
+   "accrual": "monthly",
+   "compounding": "compound",
+   "anchor": "origination"
+  },
+  "validation_lifecycle": {
+   "term_sessions": 63,
+   "origination_spacing_sessions": 21,
+   "warmup_sessions": 250,
+   "cure_probability": "0.5 (0 in the zero-voluntary scenario)",
+   "workout_sessions": 40,
+   "maturity_scenarios": [
+    "repay",
+    "default",
+    "partial:0.5",
+    "refinance"
+   ],
+   "position_sizes": {
+    "US": {
+     "retail": 250000.0,
+     "institutional": 25000000.0
+    },
+    "NGX": {
+     "retail": 50000000.0,
+     "institutional": 2000000000.0
+    }
+   },
+   "execution": "next session at the session's typical price within participation limits; settled proceeds only",
+   "ngx_liquidity_assumption": "before 2025-08-01: position sells in 20 sessions at 10% participation"
+  },
+  "accrued_interest_rounding": {
+   "lifecycle_cache_key": "rho = accrued/balance rounded to 0.01",
+   "max_relative_threshold_difference": {
+    "initial_capacity_uncapped": 3.694657589436476e-05,
+    "early_warning": 2.468638183919214e-05,
+    "margin_call": 1.6379792795779922e-05,
+    "forced_recovery": 1.3657936968712207e-05,
+    "restoration_uncapped": 3.694657589436476e-05
+   }
+  }
+ },
+ "evidence_runs": {
+  "rc1_confirmation": {
+   "US": {
+    "run": 46012087784,
+    "commit": "5f81f05f5a7ea44d2d3d2666b1f62f473b2a3ee6"
+   },
+   "NGX": {
+    "run": 46012146061,
+    "commit": "e4a101280f85a4a9bc442ca85c5db7e4605e2e2e"
+   },
+   "equivalence_to_frozen_commit": "git diff of app/candidate, app/markets, app/liquidation, app/credit, app/core, app/historical_data, app/simulations, research, the validation workflow, requirements and pyproject against the frozen commit is empty; only tests, docs and request files differ"
+  },
+  "ablation_v2026_11_7": {
+   "US": 45968326901,
+   "NGX": 45968501252
+  }
+ }
+}

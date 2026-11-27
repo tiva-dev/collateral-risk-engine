@@ -128,10 +128,23 @@ def main(argv: list[str]) -> int:
                         ids = [e["run_id"]]
                     else:
                         sel = e["selector"]
-                        rows = conn.fetchall("SELECT run_id, params, created_at FROM backtest_runs WHERE requested_by=%s",
-                                             (sel["requested_by"],))
+                        if sel.get("requested_by", "*") == "*":
+                            rows = conn.fetchall("SELECT run_id, params, created_at, summary FROM backtest_runs")
+                        else:
+                            rows = conn.fetchall("SELECT run_id, params, created_at, summary FROM backtest_runs "
+                                                 "WHERE requested_by=%s", (sel["requested_by"],))
                         ids = []
                         for r in rows:
+                            if "window_end_after" in sel:
+                                # Runs whose data window reached into the locked period.
+                                try:
+                                    win = (json.loads(r["summary"] or "{}") or {}).get("window") or []
+                                except (TypeError, ValueError):
+                                    win = []
+                                if not win or str(win[-1])[:10] <= sel["window_end_after"]:
+                                    continue
+                                ids.append(r["run_id"])
+                                continue
                             ver = json.loads(r["params"] or "{}").get("engine_version")
                             if "created_before" in sel and str(r["created_at"]) >= sel["created_before"]:
                                 continue

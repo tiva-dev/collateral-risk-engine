@@ -1,0 +1,12 @@
+{
+ "400": {
+  "initial_capacity_uncapped": 0.02145701461573582,
+  "margin_call": 0.011719785499184005,
+  "forced_recovery": 0.005618171737089796
+ },
+ "2000": {
+  "initial_capacity_uncapped": 0.013723533350323731,
+  "margin_call": 0.007344003136768201,
+  "forced_recovery": 0.0026678121408765924
+ }
+}
