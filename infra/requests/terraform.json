@@ -1,1 +1,1 @@
-{"environment": "staging", "action": "apply", "note": "Re-apply: services no longer re-send the deploy-generated revision name (409 fix); remaining: cri-api and cri-worker network tag cri-run, scheduler cri-shadow-models. CRI_GIT_SHA is restored by the redeploy that follows."}
+{"environment": "staging", "action": "plan", "note": "Post-merge drift check: staging apply completed 27 Nov 2026 (run 46053591933); expected plan is revision/CRI_GIT_SHA deploy-owned noise only."}
