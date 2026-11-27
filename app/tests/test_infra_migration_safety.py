@@ -11,7 +11,7 @@ PROBE = ROOT / "infra/scripts/expect_denied.sh"
 
 def _probe(stderr: str, rc: int) -> subprocess.CompletedProcess[str]:
     cmd = f"echo {stderr!r} >&2; exit {rc}"
-    return subprocess.run(["bash", str(PROBE), "probe", "sh", "-c", cmd], capture_output=True, text=True)
+    return subprocess.run(["bash", str(PROBE), "probe", "sh", "-c", cmd], capture_output=True, text=True, check=False)
 
 
 def test_probe_passes_only_on_permission_denial() -> None:
