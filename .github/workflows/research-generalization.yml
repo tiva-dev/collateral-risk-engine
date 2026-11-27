@@ -11,6 +11,8 @@ on:
         required: true
         default: "45681534542"
   push:
+    # Branch pushes only (branches-ignore alone excludes tags): a release-tag push
+    # must never deploy, apply or verify.
     branches-ignore: [main]
     paths: ["infra/requests/research.json"]
 

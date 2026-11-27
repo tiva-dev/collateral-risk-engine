@@ -12,6 +12,8 @@ on:
         type: boolean
         default: false
   push:
+    # Branch pushes only: a release-tag push must never deploy, apply or verify.
+    branches: ['**']
     paths: ["infra/requests/deploy.json"]
 
 permissions:
@@ -36,6 +38,7 @@ jobs:
       - uses: actions/checkout@v4
       - id: r
         run: |
+          case "${{ github.ref }}" in refs/tags/*) echo "::error::refusing to run from a tag ref (${{ github.ref }})"; exit 1;; esac
           if [ "${{ github.event_name }}" = "push" ]; then
             env=$(jq -r .environment infra/requests/deploy.json); seed=$(jq -r '.seed_sandbox // false' infra/requests/deploy.json)
             sync=$(jq -r '.sync_provider_secrets // false' infra/requests/deploy.json)
