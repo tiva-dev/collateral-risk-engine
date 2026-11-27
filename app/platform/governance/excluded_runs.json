@@ -27,6 +27,16 @@
       "model_id": "*",
       "reason": "lifecycle batches produced by candidate versions before 2026.11.5 (same-session execution, shared market state between passes, unsold collateral marked as recovered, and the earlier defects); superseded by 2026.11.6 (also: origination capacity under data deterioration).",
       "fixed_in": "candidate-2026.11.6"
+    },
+    {
+      "kind": "backtest",
+      "selector": {
+        "requested_by": "*",
+        "window_end_after": "2026-11-25"
+      },
+      "model_id": "*",
+      "reason": "the run's data window reached into the locked period (data dated from 2026-11-27 is reserved for the formal RC1 evaluation; docs/governance/LOCKED_PERIOD_PROTOCOL.md). Backtests now stop at 2026-11-25 unless authorised.",
+      "fixed_in": "release/rc1-ops"
     }
   ]
 }
