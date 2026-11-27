@@ -44,7 +44,7 @@ module "cri" {
   schedules_enabled        = true
   # Staging rotation 1: 27 Nov 2026, after hardening Stage 2 (old shared Terraform identity
   # could read these values from state).
-  db_credential_rotation   = "2026-11-27"
+  db_credential_rotation = "2026-11-27"
   watchlist = [
     "NASDAQ:TSLA:USD:LISTED_EQUITY", "NASDAQ:NVDA:USD:LISTED_EQUITY", "NASDAQ:AAPL:USD:LISTED_EQUITY",
     "NYSE:SPY:USD:ETF", "NASDAQ:QQQ:USD:ETF",
