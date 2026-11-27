@@ -66,8 +66,7 @@ from app.market_data.identity import InstrumentIdentity
 from app.markets.hierarchical import Prior
 from app.markets.profiles import profile_for_exchange
 
-_CAL_EXCHANGES = {"NYSE": "nyse", "NASDAQ": "nyse", "NYSEARCA": "nyse", "AMEX": "nyse", "ARCA": "nyse",
-                  "BATS": "nyse", "NGX": "ngx", "NSE": "ngx"}
+_PROFILE_CALENDAR = {"US": "nyse", "NGX": "ngx"}   # market profile -> exchange holiday calendar
 
 
 def session_lag(last: date, day: date, exchange: str | None) -> int:
@@ -76,7 +75,8 @@ def session_lag(last: date, day: date, exchange: str | None) -> int:
     the last session before a holiday is not stale on the holiday."""
     if last >= day:
         return 0
-    which = _CAL_EXCHANGES.get((exchange or "").upper())
+    prof = profile_for_exchange(exchange or "")
+    which = _PROFILE_CALENDAR.get(prof.code) if prof is not None else None
     if which is None:
         return int(np.busday_count(last, day))
     from app.historical_data.calendars import ngx_calendar, nyse_calendar

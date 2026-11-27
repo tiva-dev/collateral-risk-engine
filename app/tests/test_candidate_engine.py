@@ -631,4 +631,6 @@ def test_staleness_is_measured_in_exchange_sessions() -> None:
     assert session_lag(date(2026, 11, 25), date(2026, 11, 27), "XYZ") == 2
     # NGX: Christmas and Boxing Day are not sessions.
     assert session_lag(date(2026, 12, 24), date(2026, 12, 29), "NGX") == 1
+    assert session_lag(date(2026, 12, 24), date(2026, 12, 29), "NGSE") == 1
+    assert session_lag(date(2026, 11, 25), date(2026, 11, 27), "ARCA") == 1
     assert session_lag(date(2026, 11, 27), date(2026, 11, 27), "NYSE") == 0
