@@ -41,10 +41,15 @@ jobs:
           if [ "${{ github.event_name }}" = "push" ]; then
             env=$(jq -r .environment infra/requests/terraform.json); act=$(jq -r .action infra/requests/terraform.json)
           else
-            env="${{ needs.request.outputs.environment }}"; act="${{ inputs.action }}"
+            env="${{ inputs.environment }}"; act="${{ inputs.action }}"
           fi
           case "$env" in dev|staging|production) ;; *) echo "bad environment"; exit 1;; esac
           case "$act" in plan|apply) ;; *) echo "bad action"; exit 1;; esac
+          # State-migration freeze: while infra/MIGRATION_FREEZE exists, no apply runs
+          # anywhere (plan-only runs are allowed; they mutate nothing).
+          if [ -f infra/MIGRATION_FREEZE ] && [ "$act" = "apply" ]; then
+            echo "::error::Terraform apply is frozen: $(head -1 infra/MIGRATION_FREEZE)"; exit 1
+          fi
           if [ "$env" = "production" ] && [ "$act" = "apply" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
             echo "::error::production apply runs only from main"; exit 1
           fi

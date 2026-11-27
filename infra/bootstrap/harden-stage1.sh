@@ -23,6 +23,14 @@
 # * State is copied with a create-only precondition (never overwritten) and
 #   verified byte-for-byte (SHA-256), plus lineage, serial and the exact set
 #   of resource instance addresses.
+# * After each exact copy is verified, the old backend is frozen for good: its
+#   lock object is left in place and both the state and the lock get temporary
+#   holds; the shared identity is reduced to read-only on the old bucket. A
+#   superseded branch that still targets the old backend therefore cannot
+#   acquire the lock or write state.
+# * The verification checks bucket versioning, uniform access, public access
+#   prevention, bucket IAM, and that each identity is impersonable only by its
+#   own GitHub environment (production: only from main).
 # * Every failure stops the script (set -euo pipefail); nothing is suppressed
 #   except "already exists" outcomes that are checked explicitly.
 set -euo pipefail
@@ -43,6 +51,18 @@ release_locks() {
   for l in "${LOCKS[@]}"; do gcloud storage rm "$l" >/dev/null 2>&1 || echo "WARNING: could not remove lock $l (remove it manually)"; done
 }
 trap release_locks EXIT
+
+unlock_list_remove() {  # keep a lock in place permanently (old backend freeze)
+  local keep=() l
+  for l in "${LOCKS[@]}"; do [ "$l" = "$1" ] || keep+=("$l"); done
+  LOCKS=("${keep[@]}")
+}
+
+held() {  # True if the object has a temporary hold
+  gcloud storage objects describe "$1" --format=json | python3 -c '
+import json, sys
+print(bool(json.load(sys.stdin).get("temporary_hold") or False))'
+}
 
 lock() {  # create-only lock object; fails if Terraform (or another run) holds it
   local obj="$1"
@@ -81,8 +101,13 @@ for env in dev staging production; do
   gcloud storage buckets update "$bucket" --versioning >/dev/null
   gcloud storage buckets add-iam-policy-binding "$bucket" --member "serviceAccount:${sa}" --role roles/storage.objectAdmin >/dev/null
   old="${OLD_BUCKET}/cri/${env}/default.tfstate"; new="${bucket}/cri/${env}/default.tfstate"
+  oldlock="${OLD_BUCKET}/cri/${env}/default.tflock"
   if gcloud storage ls "$old" >/dev/null 2>&1; then
-    lock "${OLD_BUCKET}/cri/${env}/default.tflock"
+    if [ "$(held "$old")" = True ]; then
+      frozen=1   # rerun: the old backend was frozen by an earlier run and cannot have changed
+    else
+      frozen=0; lock "$oldlock"
+    fi
     lock "${bucket}/cri/${env}/default.tflock"
     if ! gcloud storage ls "$new" >/dev/null 2>&1; then
       gcloud storage cp "$old" "$new" --if-generation-match=0 >/dev/null
@@ -91,14 +116,22 @@ for env in dev staging production; do
     read -r h_old lin_old ser_old n_old a_old <<<"$(state_digest "$old")"
     read -r h_new lin_new ser_new n_new a_new <<<"$(state_digest "$new")"
     echo "${env} state: sha256 ${h_old:0:12}/${h_new:0:12} lineage ${lin_old}/${lin_new} serial ${ser_old}/${ser_new} instances ${n_old}/${n_new}"
-    if [ "$h_old" != "$h_new" ]; then
-      # Only acceptable if Terraform has already written newer state with the new identity.
-      [ "$lin_old" = "$lin_new" ] && [ "$ser_new" -gt "$ser_old" ] ||
-        { echo "FAIL: ${env} new state differs from the old state and is not a later serial of the same lineage"; exit 1; }
-      echo "note: ${env} new state is a later serial written since migration"
-    else
-      [ "$a_old" = "$a_new" ] && [ "$lin_old" = "$lin_new" ] && [ "$ser_old" = "$ser_new" ] ||
+    if [ "$h_old" = "$h_new" ]; then
+      [ "$a_old" = "$a_new" ] && [ "$lin_old" = "$lin_new" ] && [ "$ser_old" = "$ser_new" ] && [ "$n_old" = "$n_new" ] ||
         { echo "FAIL: ${env} state verification"; exit 1; }
+    elif [ "$frozen" = 1 ] && [ "$lin_old" = "$lin_new" ] && [ "$ser_new" -gt "$ser_old" ]; then
+      # Only on a rerun after the freeze: Terraform has since written newer state with the new identity.
+      echo "note: ${env} new state is a later serial written by the new identity since the freeze"
+    else
+      echo "FAIL: ${env} new state is not an exact copy of the old state"; exit 1
+    fi
+    if [ "$frozen" = 0 ]; then
+      # Freeze the old backend permanently: the lock stays (Terraform cannot acquire it),
+      # and temporary holds stop the state and the lock from being overwritten or deleted.
+      gcloud storage objects update "$old" --temporary-hold >/dev/null
+      gcloud storage objects update "$oldlock" --temporary-hold >/dev/null
+      unlock_list_remove "$oldlock"
+      echo "${env}: old backend frozen (state and lock held)"
     fi
   else
     echo "${env} state: none in the old bucket (new environment)"
@@ -130,6 +163,20 @@ for env in dev staging production; do
   fi
 done
 
+# The shared identity keeps read-only access to the retired backend until stage 2
+# removes it entirely: a superseded branch that still targets the old backend
+# fails at lock acquisition and cannot write state.
+gcloud storage buckets add-iam-policy-binding "$OLD_BUCKET" --member "serviceAccount:${OLD_SA}" \
+  --role roles/storage.objectViewer >/dev/null
+if gcloud storage buckets get-iam-policy "$OLD_BUCKET" --format=json | python3 -c '
+import json, sys
+p = json.load(sys.stdin); m = "serviceAccount:'"${OLD_SA}"'"
+sys.exit(0 if any(b["role"] == "roles/storage.objectAdmin" and m in b["members"] for b in p.get("bindings", [])) else 1)'; then
+  gcloud storage buckets remove-iam-policy-binding "$OLD_BUCKET" --member "serviceAccount:${OLD_SA}" \
+    --role roles/storage.objectAdmin >/dev/null
+fi
+echo "shared identity reduced to read-only on the retired backend"
+
 # Production image repository, separate from the shared dev/staging repository.
 gcloud artifacts repositories describe cri-prod --project "$OPS" --location "$REGION" >/dev/null 2>&1 || \
   gcloud artifacts repositories create cri-prod --project "$OPS" --location "$REGION" --repository-format docker \
@@ -148,11 +195,50 @@ for env in dev staging production; do
   sa="${SA_ID[$env]}@${OPS}.iam.gserviceaccount.com"
   for e2 in dev staging production; do
     roles=$(gcloud projects get-iam-policy "${PROJ[$e2]}" --flatten='bindings[].members' \
-      --filter="bindings.members:serviceAccount:${sa}" --format='value(bindings.role)' | tr '\n' ' ')
+      --filter="bindings.members:serviceAccount:${sa}" --format='value(bindings.role)' | xargs)
     echo "${SA_ID[$env]} on ${PROJ[$e2]}: ${roles:-none}"
     if [ "$e2" != "$env" ] && [ -n "$roles" ]; then echo "FAIL: ${SA_ID[$env]} has roles outside ${env}"; fail=1; fi
   done
 done
+for env in dev staging production; do
+  sa="${SA_ID[$env]}@${OPS}.iam.gserviceaccount.com"; bucket="gs://${OPS}-tfstate-${env}"
+  # Bucket: versioned, uniform access, public access prevention enforced, and no
+  # Terraform identity other than this environment's can use it.
+  gcloud storage buckets describe "$bucket" --format=json | python3 -c '
+import json, sys
+b = json.load(sys.stdin)
+ok = (b.get("versioning_enabled") is True and b.get("uniform_bucket_level_access") is True
+      and b.get("public_access_prevention") == "enforced")
+print("'"${env}"' bucket: versioning=%s uniform=%s public_access_prevention=%s" % (
+    b.get("versioning_enabled"), b.get("uniform_bucket_level_access"), b.get("public_access_prevention")))
+sys.exit(0 if ok else 1)' || { echo "FAIL: ${env} state bucket configuration"; fail=1; }
+  gcloud storage buckets get-iam-policy "$bucket" --format=json | python3 -c '
+import json, sys
+own = "serviceAccount:'"${sa}"'"
+mem = {m for b in json.load(sys.stdin).get("bindings", []) for m in b["members"]}
+bad = sorted(m for m in mem if m in ("allUsers", "allAuthenticatedUsers")
+             or (m.startswith("serviceAccount:terraform") and m != own))
+print("'"${env}"' bucket members:", ", ".join(sorted(mem)))
+sys.exit(1 if bad or own not in mem else 0)' || { echo "FAIL: ${env} state bucket IAM"; fail=1; }
+  wif=$(gcloud iam service-accounts get-iam-policy "$sa" --project "$OPS" --format=json | python3 -c '
+import json, sys
+print(" ".join(sorted(m for b in json.load(sys.stdin).get("bindings", []) if b["role"] == "roles/iam.workloadIdentityUser" for m in b["members"])))')
+  if [ "$env" = production ]; then want="principalSet://iam.googleapis.com/${POOL}/attribute.env_ref/terraform-production@refs/heads/main"
+  else want="principalSet://iam.googleapis.com/${POOL}/attribute.environment/terraform-${env}"; fi
+  echo "${SA_ID[$env]} impersonable by: ${wif:-none}"
+  [ "$wif" = "$want" ] || { echo "FAIL: ${SA_ID[$env]} federation binding is not exactly the ${env} environment"; fail=1; }
+  old="${OLD_BUCKET}/cri/${env}/default.tfstate"
+  if gcloud storage ls "$old" >/dev/null 2>&1; then
+    [ "$(held "$old")" = True ] && [ "$(held "${OLD_BUCKET}/cri/${env}/default.tflock")" = True ] ||
+      { echo "FAIL: ${env} retired backend is not frozen"; fail=1; }
+  fi
+done
+gcloud storage buckets get-iam-policy "$OLD_BUCKET" --format=json | python3 -c '
+import json, sys
+m = "serviceAccount:'"${OLD_SA}"'"
+roles = sorted(b["role"] for b in json.load(sys.stdin).get("bindings", []) if m in b["members"])
+print("shared identity on retired backend:", roles)
+sys.exit(0 if roles == ["roles/storage.objectViewer"] else 1)' || { echo "FAIL: shared identity can write the retired backend"; fail=1; }
 if gcloud artifacts repositories get-iam-policy cri --project "$OPS" --location "$REGION" --format=json |
      grep -q "service-${ppnum}@serverless-robot-prod\|cri-deployer@${PROJ[production]}"; then
   echo "FAIL: production identities can use the shared repository"; fail=1

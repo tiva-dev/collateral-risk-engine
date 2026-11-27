@@ -52,19 +52,21 @@ jobs:
           terraform plan -input=false -lock=false -no-color -detailed-exitcode > plan.txt || code=$?
           grep -E '^Plan:|No changes' plan.txt || true
           test "${code:-0}" != "1"
-      - name: Isolation (must fail)
+      - name: Isolation (each probe must be DENIED; other failures are inconclusive and fail)
         run: |
-          set +e
+          set -euo pipefail
+          deny=infra/scripts/expect_denied.sh
           other=${{ steps.cfg.outputs.other }}
-          gcloud projects get-iam-policy "$other" >/dev/null 2>&1 && { echo "FAIL: can read $other IAM"; exit 1; }
+          $deny "read $other IAM" gcloud projects get-iam-policy "$other"
           for e in dev staging production; do
             [ "$e" = "${{ matrix.env }}" ] && continue
-            gcloud storage ls "gs://tiva-cri-ops-cda9-tfstate-$e/" >/dev/null 2>&1 && { echo "FAIL: can read $e state"; exit 1; }
+            $deny "list $e state bucket" gcloud storage ls "gs://tiva-cri-ops-cda9-tfstate-$e/"
           done
+          $deny "list the retired shared state bucket" gcloud storage ls "gs://tiva-cri-ops-cda9-tfstate/"
           if [ "${{ matrix.env }}" != production ]; then
-            gcloud projects get-iam-policy tiva-cri-prd-cda9 >/dev/null 2>&1 && { echo "FAIL: can read production IAM"; exit 1; }
-            gcloud artifacts repositories get-iam-policy cri-prod --project tiva-cri-ops-cda9 --location europe-west1 >/dev/null 2>&1 \
-              && { echo "FAIL: can read the production image repository policy"; exit 1; }
+            $deny "read production IAM" gcloud projects get-iam-policy tiva-cri-prd-cda9
+            $deny "read the production image repository policy" \
+              gcloud artifacts repositories get-iam-policy cri-prod --project tiva-cri-ops-cda9 --location europe-west1
           fi
           echo "isolation OK for ${{ matrix.env }}"
 
@@ -104,21 +106,32 @@ jobs:
           # Production is unprovisioned: no plan (its APIs and billing are off by design).
       - name: Production remains unprovisioned
         run: |
-          test -z "$(gcloud run services list --project tiva-cri-prd-cda9 --format='value(name)' 2>/dev/null)"
-          test -z "$(gcloud sql instances list --project tiva-cri-prd-cda9 --format='value(name)' 2>/dev/null)"
+          set -uo pipefail
+          # Empty list, or the API disabled (nothing can exist), are the only passing outcomes.
+          none() {
+            out=$("$@" --project tiva-cri-prd-cda9 --format='value(name)' 2>err.txt); rc=$?
+            if [ $rc = 0 ]; then test -z "$out" || { echo "FAIL: production has: $out"; exit 1; }; return; fi
+            grep -Eq 'SERVICE_DISABLED|has not been used in project|is disabled|API not enabled' err.txt ||
+              { echo "FAIL: inconclusive: $*"; head -3 err.txt; exit 1; }
+            echo "API disabled for: $*"
+          }
+          none gcloud run services list
+          none gcloud sql instances list
           echo "no Cloud Run services or Cloud SQL instances in production"
-      - name: Isolation (must fail)
+      - name: Isolation (each probe must be DENIED; other failures are inconclusive and fail)
         run: |
-          set +e
+          set -euo pipefail
+          deny=infra/scripts/expect_denied.sh
           other=${{ steps.cfg.outputs.other }}
-          gcloud projects get-iam-policy "$other" >/dev/null 2>&1 && { echo "FAIL: can read $other IAM"; exit 1; }
+          $deny "read $other IAM" gcloud projects get-iam-policy "$other"
           for e in dev staging production; do
             [ "$e" = "production" ] && continue
-            gcloud storage ls "gs://tiva-cri-ops-cda9-tfstate-$e/" >/dev/null 2>&1 && { echo "FAIL: can read $e state"; exit 1; }
+            $deny "list $e state bucket" gcloud storage ls "gs://tiva-cri-ops-cda9-tfstate-$e/"
           done
+          $deny "list the retired shared state bucket" gcloud storage ls "gs://tiva-cri-ops-cda9-tfstate/"
           if [ "production" != production ]; then
-            gcloud projects get-iam-policy tiva-cri-prd-cda9 >/dev/null 2>&1 && { echo "FAIL: can read production IAM"; exit 1; }
-            gcloud artifacts repositories get-iam-policy cri-prod --project tiva-cri-ops-cda9 --location europe-west1 >/dev/null 2>&1 \
-              && { echo "FAIL: can read the production image repository policy"; exit 1; }
+            $deny "read production IAM" gcloud projects get-iam-policy tiva-cri-prd-cda9
+            $deny "read the production image repository policy" \
+              gcloud artifacts repositories get-iam-policy cri-prod --project tiva-cri-ops-cda9 --location europe-west1
           fi
           echo "isolation OK for production"
