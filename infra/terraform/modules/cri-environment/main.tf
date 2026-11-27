@@ -130,6 +130,28 @@ resource "google_service_account_iam_member" "deployer_acts_as" {
 
 
 
+# CRI Analyst: Gemini on Vertex AI (Google first-party models are covered by
+# the Google for Startups credits; third-party models are billed directly and
+# stay disabled). Called with the runtime identity: no API keys.
+resource "google_project_service" "vertex" {
+  count                      = var.analyst_llm_enabled ? 1 : 0
+  project                    = var.project_id
+  service                    = "aiplatform.googleapis.com"
+  disable_on_destroy         = false
+  disable_dependent_services = false
+}
+
+resource "google_project_iam_member" "analyst_vertex" {
+  for_each = var.analyst_llm_enabled ? {
+    api  = google_service_account.api.email
+    jobs = google_service_account.jobs.email
+  } : {}
+  project    = var.project_id
+  role       = "roles/aiplatform.user"
+  member     = "serviceAccount:${each.value}"
+  depends_on = [google_project_service.vertex]
+}
+
 resource "google_project_iam_member" "runtime_roles" {
   for_each = {
     "api-log"       = ["roles/logging.logWriter", google_service_account.api.email]

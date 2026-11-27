@@ -116,3 +116,9 @@ variable "db_credential_rotation" {
   type        = string
   default     = ""
 }
+
+variable "analyst_llm_enabled" {
+  description = "Enable Vertex AI for CRI Analyst (Gemini) and grant the API and jobs identities aiplatform.user."
+  type        = bool
+  default     = false
+}
