@@ -494,7 +494,10 @@ def test_suspended_instrument_delayed_value_not_lendable_not_sellable() -> None:
     delayed = ev(hs, md2, susp, asof, cfg=replace(CFG, suspension_value="delayed")).thresholds
     assert delayed["delayed_recovery_value"] > 0
     assert delayed["margin_call"] > zero["margin_call"]                     # economic value recognised
-    assert delayed["initial_capacity"] == pytest.approx(zero["initial_capacity"], rel=1e-6)  # not lendable
+    # Not lendable: capacity differs only by scenario-set sampling (joint dates and horizon change
+    # when the suspended leg joins the simulation), never by the suspended value itself.
+    assert delayed["initial_capacity"] <= zero["initial_capacity"] * 1.05
+    assert delayed["initial_capacity"] < zero["initial_capacity"] + 0.5 * delayed["delayed_recovery_value"]
     r = ev(hs, md2, susp, asof, cfg=replace(CFG, suspension_value="delayed"))
     assert not next(a for a in r.asset_results if a.asset_id == "AAA").eligible        # not sellable now
     old = dict(bars, **{key: bars[key][:-80]})
@@ -517,3 +520,102 @@ def test_origination_capacity_ignores_normalised_balance_and_data_holds() -> Non
     s2 = run_cohort(holdings=hs, bars=stale, origination=dates[400], term_sessions=40, seed=2,
                     config=CandidateConfig(n_paths=200), workout_sessions=20)
     assert "skipped" in s2 and "data" in s2["skipped"]
+
+
+def test_entirely_suspended_portfolio() -> None:
+    hs, md, bars, asof = setup(cash=0.0)
+    # Both holdings stop trading while the market trades (a third instrument trades).
+    other = Holding("CCC", AssetType.LISTED_EQUITY, 1.0, "USD", "NYSE")
+    bc = make_bars(9)
+    bars2 = {k: v[:-6] for k, v in bars.items()} | {data_key(other): bc}
+    md2 = {k: replace(v, timestamp=asof - timedelta(days=8)) for k, v in md.items()}
+    md2[other.stable_key] = MarketData("CCC", bc[-1]["close"], timestamp=asof)
+    r = ev([*hs, other], md2, bars2, asof, cfg=replace(CFG, suspension_value="delayed"), balance=50_000.0)
+    t = r.thresholds
+    assert t["delayed_recovery_value"] > 0                       # positive future recovery value
+    assert t["initial_capacity"] < 1_000                         # no lending value (only the tiny CCC)
+    assert all(not a.eligible for a in r.asset_results if a.asset_id in ("AAA", "BBB"))
+
+
+def test_stress_protection_skips_grace_when_recovery_infeasible() -> None:
+    hs, md, bars, asof = setup()
+    base = ev(hs, md, bars, asof)
+    t = base.thresholds
+    bal = t["margin_call"] + 0.9 * (t["forced_recovery"] - t["margin_call"])
+    plain = ev(hs, md, bars, asof, balance=bal)
+    assert plain.margin_state == MarginState.MARGIN_CALL
+    p = plain.p_infeasible_after_grace(bal)
+    assert 0 < p < 1
+    strict = ev(hs, md, bars, asof, balance=bal, cfg=replace(CFG, stress_protection=True, stress_infeasible_prob=p / 2))
+    assert strict.margin_state == MarginState.LIQUIDATION
+    assert {"liquidity_ratio", "move_5d_sigmas", "correlation_recent", "p_infeasible_after_grace"} <= set(
+        strict.stress_indicators)
+
+
+def test_recalibrated_controls_are_bounded() -> None:
+    hs, md, bars, asof = setup()
+    a = ev(hs, md, bars, asof, cfg=replace(CFG, headroom_mode="adaptive")).thresholds
+    assert CFG.headroom_sessions <= a["headroom_sessions"] <= CFG.headroom_cap_sessions
+    diversified = ev(hs, md, bars, asof, cfg=replace(CFG, concentration_control=True)).thresholds
+    assert diversified["concentration_addon"] >= 0
+
+
+# ------------------------------------------- 27 Nov final-phase regression tests
+
+def test_pending_settlement_is_not_realized_at_cutoff() -> None:
+    hs, bars, dates = _cohort_inputs()
+    c = run_cohort(holdings=hs, bars=bars, origination=dates[400], term_sessions=30, seed=1, maturity="default",
+                   config=CandidateConfig(n_paths=200), workout_sessions=1)
+    for v in c["variants"].values():
+        if v["executed_gross"] > 0 and v["pending_at_cutoff"] > 0:
+            assert v["censored"] and v["lender_loss"] is None
+            assert v["status"] in ("censored_settlement", "censored_collateral")
+        assert v["realized_recovery"] <= v["executed_gross"] - v["execution_costs"] - v["pending_at_cutoff"] + 1e-6
+
+
+def test_no_completed_outcomes_gives_no_loss_statistics() -> None:
+    from app.candidate.lifecycle import metrics
+
+    rows = [{"principal": 100.0, "censored": True, "lender_loss": None, "outstanding_debt": 50.0}]
+    m = metrics(rows)
+    assert m["completed"] == 0 and "loss_probability" not in m
+
+
+def test_zero_event_bound_is_cluster_level() -> None:
+    from app.candidate.lifecycle import zero_event_bound
+
+    rows = [{"origination": (date(2020, 1, 1) + timedelta(days=91 * i + j)).isoformat(), "censored": False,
+             "lender_loss": 0.0, "principal": 1.0} for i in range(20) for j in range(5)]
+    b = zero_event_bound(rows)
+    assert b["clusters"] == 20 and b["clusters_with_loss"] == 0
+    assert b["cluster_loss_probability_upper95"] == pytest.approx(1 - 0.05 ** (1 / 20), rel=1e-6)
+
+
+def test_policy_originated_principal_differs_by_variant() -> None:
+    from app.candidate.lifecycle import Variant
+
+    hs, bars, dates = _cohort_inputs()
+    vs = (Variant("adaptive", "adaptive"), Variant("adaptive_headroom_cal", "adaptive",
+                                                   engine=(("headroom_mode", "adaptive"),)))
+    c = run_cohort(holdings=hs, bars=bars, origination=dates[400], term_sessions=20, seed=1, variants=vs,
+                   config=CandidateConfig(n_paths=200), workout_sessions=5, origination_mode="policy")
+    p = {n: v["principal"] for n, v in c["variants"].items()}
+    assert p["adaptive_headroom_cal"] <= p["adaptive"] + 1e-6
+
+
+def test_interest_and_maturity_boundaries_are_consistent() -> None:
+    from app.candidate.lifecycle import Variant
+    from app.credit.interest import accrue_scheduled_periods as acc
+
+    hs, bars, dates = _cohort_inputs()
+    calm = {k: [dict(b, close=50.0, open=50.0, high=50.5, low=49.5) for b in v] for k, v in bars.items()}
+    terms = InterestPolicy(0.2, accrual_frequency="monthly", compounding="compound")
+    c = run_cohort(holdings=hs, bars=calm, origination=dates[300], term_sessions=40, seed=1, interest=terms,
+                   variants=(Variant("fixed_psi_1.30", "fixed", psi=1.3),), config=CandidateConfig(n_paths=200),
+                   workout_sessions=5)
+    v = c["variants"]["fixed_psi_1.30"]
+    assert v["repaid_at_maturity"] and v["status"] == "repaid"
+    t0 = datetime.combine(dates[300], time(21), UTC)
+    t1 = datetime.combine(dates[340], time(21), UTC)           # maturity: term sessions after origination
+    expect, _ = acc(Loan(c["principal"]), replace(terms, schedule_anchor=t0), t0, t1)
+    assert v["interest_accrued"] == pytest.approx(expect.balance - c["principal"], rel=1e-9)

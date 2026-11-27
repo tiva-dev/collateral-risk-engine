@@ -82,6 +82,17 @@ DEFAULT_VARIANTS = (
 COMBINED_ENGINE = (("headroom_mode", "adaptive"), ("restoration_volatility", "long_run"),
                    ("concentration_control", True), ("suspension_value", "delayed"))
 
+STRESS_VARIANTS = (
+    Variant("adaptive_stress_grace", "adaptive", engine=(("stress_protection", True),)),
+    Variant("adaptive_regime", "adaptive", engine=(("regime_conditioning", True),)),
+    Variant("adaptive_stress_aware", "adaptive", engine=(("stress_protection", True), ("regime_conditioning", True))),
+    Variant("adaptive_headroom_cal", "adaptive", engine=(("headroom_mode", "adaptive"),)),
+    Variant("adaptive_concentration_cal", "adaptive", engine=(("concentration_control", True),)),
+    Variant("adaptive_suspension_value", "adaptive", engine=(("suspension_value", "delayed"),)),
+    Variant("rc_candidate", "adaptive", engine=(("suspension_value", "delayed"), ("stress_protection", True),
+                                                ("regime_conditioning", True))),
+)
+
 RESEARCH_VARIANTS = (
     Variant("adaptive_headroom", "adaptive", engine=(("headroom_mode", "adaptive"),)),
     Variant("adaptive_longrun_restore", "adaptive", engine=(("restoration_volatility", "long_run"),)),
@@ -115,6 +126,8 @@ class Outcome:
     residual_collateral_estimate: float = 0.0
     censored: bool = False
     realized_recovery: float = 0.0          # settled sale proceeds applied to the debt
+    pending_at_cutoff: float = 0.0          # sale proceeds not yet settled at the observation cutoff
+    status: str = "open"                    # repaid | recovered | loss | censored_collateral | censored_settlement
     borrower_repayment: float = 0.0
     repaid_at_maturity: bool = False
     defaulted_at_maturity: bool = False
@@ -207,6 +220,7 @@ def run_cohort(
     principal_scale: float = 1.0,
     maturity: str = "repay",
     workout_sessions: int = 60,
+    origination_mode: str = "matched",
 ) -> dict[str, Any]:
     """Run all variants on one matched cohort with common random numbers."""
     policy = policy or Policy.default()
@@ -316,7 +330,7 @@ def run_cohort(
         margin_cf[i] = cash0 + sum(q0[k] * m.last_price * 0.98 for k, m in md.items()) - loan_cf.balance
 
     def unnecessary(i: int) -> bool:
-        return bool(margin_cf[i:term_sessions].min() > 0) if i < term_sessions else False
+        return bool(margin_cf[i:term_sessions].min() > 0) if i < term_sessions else False  # through maturity
 
     def fillable(k: str, d: date) -> dict[str, Any] | None:
         b = series[keys[k]].get(d)
@@ -330,9 +344,20 @@ def run_cohort(
     results = {}
     for v in variants:
         cure_p = cure_probability if v.cure_probability is None else v.cure_probability
-        loan = Loan(p0, currency=ccy)
+        p_v = p0
+        if origination_mode == "policy" and v.kind == "adaptive" and v.engine and principal is None:
+            # Policy-originated: the variant lends its own capacity (fixed policies and the
+            # baseline candidate lend the baseline candidate capacity).
+            b_v = evaluate(v.engine, q0, Loan(1.0, currency=ccy), origination, md0)
+            p_v = float(min(b_v.thresholds["initial_capacity_uncapped"], b_v.thresholds["client_ceiling"])
+                        * principal_scale)
+            if p_v <= 0 or b_v.data_status != "ok":
+                results[v.name] = {"skipped": "no capacity under this policy"}
+                continue
+        loan = Loan(p_v, currency=ccy)
         qty = dict(q0)
-        out = Outcome(v.name, p0, ltv0)
+        out = Outcome(v.name, p_v, p_v / v0)
+        ltv_v = p_v / v0
         feed = _Feed(holdings, keys, series)
         feed.market(origination)
         prev_t = datetime.combine(origination, time(21), UTC)
@@ -398,7 +423,7 @@ def run_cohort(
             if bal <= 0.01 and not pending:
                 break
             # 2) Maturity: borrower behaviour scenario.
-            if i >= term_sessions and not matured:
+            if i >= term_sessions - 1 and not matured:   # path[term-1] is `term` sessions after origination
                 matured = True
                 pay = 0.0
                 if episode is None:
@@ -443,13 +468,16 @@ def run_cohort(
                 data_hold = ev.data_status == "missing" or (ev.data_status == "degraded"
                                                             and net_bal <= te["margin_call"])
             else:
-                b0 = b_ew = target = ltv0 * value
-                b_mc, b_f, data_hold = v.psi * ltv0 * value, math.inf, False
+                b0 = b_ew = target = ltv_v * value
+                b_mc, b_f, data_hold = v.psi * ltv_v * value, math.inf, False
             out.sessions += 1
             out.capacity_sum += b0
             state = (MarginState.LIQUIDATION if net_bal > b_f else MarginState.MARGIN_CALL if net_bal > b_mc
                      else MarginState.WATCH if net_bal > b_ew else MarginState.RESTRICT_NEW_BORROWING
                      if net_bal > b0 + 1e-9 else MarginState.SAFE)
+            if (v.kind == "adaptive" and dict(v.engine).get("stress_protection") and state == MarginState.MARGIN_CALL
+                    and ev.p_infeasible_after_grace(net_bal) > cfg.stress_infeasible_prob):
+                state = MarginState.LIQUIDATION   # recovery after grace likely infeasible: urgent protection
             if data_hold and state in BAD:
                 out.sessions_data_review += 1
                 state = MarginState.RESTRICT_NEW_BORROWING
@@ -517,24 +545,28 @@ def run_cohort(
                 out.events.append({"session": i, "date": d.isoformat(), "event": "liquidation_decided",
                                    "urgent": urgent, "balance": net_bal,
                                    "orders": {k: round(q, 4) for k, q in orders.items()}})
-        for _, amt in pending:   # proceeds still settling after the window
-            b4 = loan.balance
-            loan, _ = apply_repayment(loan, amt)
-            out.realized_recovery += b4 - loan.balance
-        if not out.repaid_at_maturity:
+        # Proceeds not yet settled at the cutoff are NOT realized recovery: reported separately.
+        out.pending_at_cutoff = sum(a for _, a in pending)
+        if out.repaid_at_maturity:
+            out.status = "repaid"
+        else:
             cash = sum(q for k, q in qty.items() if k in cash_keys)
             loan, _ = apply_repayment(loan, cash)
             out.outstanding_debt = loan.balance
             remaining = {k: q for k, q in qty.items() if k not in cash_keys and q > 1e-9}
             out.residual_collateral_estimate = sum(q * feed.last_px.get(k, 0.0) for k, q in remaining.items())
-            if loan.balance > 0.01 and remaining:
-                # Unsold collateral is not recovered cash: censored outcome.
+            if loan.balance <= 0.01:
+                out.status, out.lender_loss, out.loss_lower_bound = "recovered", 0.0, 0.0
+            elif remaining or out.pending_at_cutoff > 0:
+                # Unsold collateral or unsettled proceeds: censored, loss not observed.
+                out.status = "censored_collateral" if remaining else "censored_settlement"
                 out.censored = True
                 out.lender_loss = None
-                out.loss_lower_bound = max(0.0, loan.balance - out.residual_collateral_estimate)
+                out.loss_lower_bound = max(0.0, loan.balance - out.residual_collateral_estimate
+                                           - out.pending_at_cutoff)
             else:
-                out.lender_loss = loan.balance if loan.balance > 0.01 else 0.0
-                out.loss_lower_bound = out.lender_loss
+                out.status, out.lender_loss = "loss", loan.balance
+                out.loss_lower_bound = loan.balance
         results[v.name] = out.to_dict()
     return {"origination": origination.isoformat(), "principal": p0, "collateral_value": v0,
             "initial_ltv": ltv0, "term_sessions": term_sessions, "cure_probability": cure_probability,
@@ -544,7 +576,7 @@ def run_cohort(
 
 def variant_rows(cohorts: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
     return [c["variants"][name] | {"origination": c["origination"]} for c in cohorts
-            if "variants" in c and name in c["variants"]]
+            if "variants" in c and name in c["variants"] and "skipped" not in c["variants"][name]]
 
 
 def metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -553,7 +585,13 @@ def metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return {"loans": 0}
     principal = np.array([r["principal"] for r in rows])
     unc = [r for r in rows if not r["censored"]]
-    loss = np.array([(r["lender_loss"] or 0.0) / r["principal"] for r in unc]) if unc else np.zeros(1)
+    if not unc:
+        return {"loans": len(rows), "completed": 0, "censored": len(rows),
+                "note": "no completed outcomes: loss statistics not estimable"}
+    loss = np.array([(r["lender_loss"] or 0.0) / r["principal"] for r in unc])
+    # Conservative bound: censored loans lose their entire outstanding debt.
+    upper = np.array([((r["lender_loss"] or 0.0) if not r["censored"] else r["outstanding_debt"]) / r["principal"]
+                      for r in rows])
     lb = np.array([r["loss_lower_bound"] / r["principal"] for r in rows])
     episodes = float(sum(r["liquidation_episodes"] for r in rows))
     sess = np.array([max(r["sessions"], 1) for r in rows], dtype=float)
@@ -564,7 +602,11 @@ def metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return float(np.sort(x)[-k:].mean())
 
     return {
-        "loans": len(rows), "censored": len(rows) - len(unc),
+        "loans": len(rows), "completed": len(unc), "censored": len(rows) - len(unc),
+        "expected_loss_conservative_upper": float(upper.mean()),
+        "loss_probability_conservative_upper": float(np.mean(upper > 1e-6)),
+        "pending_at_cutoff_share": float(sum(r.get("pending_at_cutoff", 0.0) for r in rows) / principal.sum()),
+        "initial_ltv_mean": float(np.mean([r["initial_ltv"] for r in rows])),
         "mean_capacity_share_of_principal": float(np.mean([(r["mean_capacity"] or 0) / r["principal"] for r in rows])),
         "loss_probability": float((loss > 1e-6).mean()), "expected_loss": float(loss.mean()),
         "es95_loss": es(loss, 0.95), "es99_loss": es(loss, 0.99), "worst_loss": float(loss.max()),
@@ -625,6 +667,27 @@ def clustered_interval(rows: list[dict[str, Any]], key: str, cluster_days: int =
     return [float(np.percentile(est, 2.5)), float(np.percentile(est, 97.5))]
 
 
+def zero_event_bound(rows: list[dict[str, Any]], cluster_days: int = 91, conf: float = 0.95) -> dict[str, Any]:
+    """Dependence-aware inference when few or no losses occur. Loans originated in the same
+    quarter share market shocks, so the unit of inference is the quarter cluster: with k of n
+    clusters containing a completed loss, the exact (Clopper-Pearson) one-sided upper bound on
+    the probability that a quarter's cohort contains a loss. Per-loan bounds are not claimed."""
+    from scipy.stats import beta
+
+    if not rows:
+        return {"clusters": 0}
+    t0 = min(_date(r["origination"]) for r in rows)
+    cl: dict[int, bool] = {}
+    for r in rows:
+        if r["censored"]:
+            continue
+        g = (_date(r["origination"]) - t0).days // cluster_days
+        cl[g] = cl.get(g, False) or bool((r["lender_loss"] or 0.0) > 1e-6 * r["principal"])
+    n, k = len(cl), sum(cl.values())
+    ub = float(beta.ppf(conf, k + 1, n - k)) if n else 1.0
+    return {"clusters": n, "clusters_with_loss": k, "cluster_loss_probability_upper95": ub}
+
+
 def aggregate(cohorts: list[dict[str, Any]], spacing_sessions: int | None = None,
               term_sessions: int | None = None, seed: int = 7) -> dict[str, Any]:
     """Metrics per variant with clustered 95% intervals (see clustered_interval)."""
@@ -640,6 +703,7 @@ def aggregate(cohorts: list[dict[str, Any]], spacing_sessions: int | None = None
         m["expected_loss_ci95"] = clustered_interval(rows, "loss", seed=seed)
         m["liquidation_frequency_ci95"] = clustered_interval(rows, "liquidation", seed=seed)
         m["margin_calls_ci95"] = clustered_interval(rows, "margin_calls", seed=seed)
+        m.update(zero_event_bound(rows))
         out["variants"][n] = m
     return out
 

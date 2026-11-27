@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-VERSION = "candidate-2026.11.6"
+VERSION = "candidate-2026.11.7"
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,16 @@ class CandidateConfig:
     concentration_control: bool = False       # single-name jump add-on on capacity and restoration
     suspension_value: str = "zero"            # zero | delayed (time- and uncertainty-adjusted recovery value)
     permanent_impairment_sessions: int = 60   # no trades for longer: treated as impaired (value 0)
+    max_suspension_sessions: int = 40         # cap on the modelled time to resumption
+    # Multivariate stress-aware intervention (research, 27 Nov review).
+    stress_protection: bool = False           # skip grace when recovery during grace is likely infeasible
+    stress_infeasible_prob: float = 0.05      # P(coverage after grace < balance) that triggers urgent protection
+    regime_conditioning: bool = False         # recent-weighted joint bootstrap + current liquidity when stressed
+    regime_recent_sessions: int = 60
+    regime_recent_weight: float = 5.0
+    # Calibrated research controls (recalibrated 27 Nov: v2026.11.6 forms were too punitive).
+    headroom_cap_sessions: int = 10           # adaptive headroom cap
+    concentration_threshold: float = 0.25     # add-on applies only to weight above this share
     # Simulation.
     n_paths: int = 2000
     history: int = 500

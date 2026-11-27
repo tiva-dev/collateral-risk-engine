@@ -46,6 +46,7 @@ from app.candidate.estimation import group_prior, raw_daily_vol
 from app.candidate.lifecycle import (
     DEFAULT_VARIANTS,
     RESEARCH_VARIANTS,
+    STRESS_VARIANTS,
     aggregate,
     clustered_interval,
     cure_sensitivity,
@@ -53,6 +54,7 @@ from app.candidate.lifecycle import (
     run_cohort,
     simulated_bars,
     variant_rows,
+    zero_event_bound,
 )
 from app.core.enums import AssetType
 from app.core.models import Holding, Policy
@@ -66,6 +68,13 @@ DEV_START = date(2026, 2, 16)
 LOCK_DATE = date(2026, 11, 26)
 ALL_VARIANTS = DEFAULT_VARIANTS + RESEARCH_VARIANTS
 COMPARE = (DEFAULT_VARIANTS[0], DEFAULT_VARIANTS[1], DEFAULT_VARIANTS[2], RESEARCH_VARIANTS[-1])
+# 27 Nov ablation set: v2026.11.6 baseline, fixed references, the rejected hysteresis/staged
+# reference, and each 2026.11.7 mechanism alone and combined (rc_candidate).
+RC_SET = (DEFAULT_VARIANTS[0], DEFAULT_VARIANTS[1], DEFAULT_VARIANTS[2], RESEARCH_VARIANTS[4]) + STRESS_VARIANTS
+# Policy-originated subset: each adaptive variant lends its own capacity.
+POLICY_SET = (DEFAULT_VARIANTS[0], DEFAULT_VARIANTS[2]) + tuple(
+    v for v in STRESS_VARIANTS if v.name in ("adaptive_headroom_cal", "adaptive_concentration_cal",
+                                             "adaptive_suspension_value", "rc_candidate"))
 CFG = CandidateConfig(n_paths=400)
 EXCH = {"US": "NYSE", "NGX": "NGX"}
 CCY = {"US": "USD", "NGX": "NGN"}
@@ -208,7 +217,8 @@ def run_task(t: dict[str, Any]) -> dict[str, Any]:
                          interest=InterestPolicy(t["rate"], accrual_frequency="monthly", compounding="compound"),
                          execution=LiquidationExecutionPolicy(), cure_probability=t.get("cure", 0.5),
                          seed=t["seed"], config=CFG, priors=t["priors"], workout_sessions=40,
-                         maturity=t.get("maturity", "repay"), principal_scale=t.get("scale", 1.0))
+                         maturity=t.get("maturity", "repay"), principal_scale=t.get("scale", 1.0),
+                         origination_mode=t.get("origination_mode", "matched"))
     except ValueError as exc:
         res = {"origination": t["origination"].isoformat(), "skipped": str(exc)}
     res["group"] = t["group"]
@@ -251,21 +261,25 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
                 if mode == "hist":
                     seed += 1
                     tasks.append({"holdings": hs, "bars": bars, "origination": d, "term": 63, "rate": RATE[market],
-                                  "variants": ALL_VARIANTS, "seed": seed, "priors": pri,
+                                  "variants": RC_SET, "seed": seed, "priors": pri,
                                   "group": f"hist|{pname}|{size}|{period}", "labels": base_labels})
+                    tasks.append({"holdings": hs, "bars": bars, "origination": d, "term": 63, "rate": RATE[market],
+                                  "variants": POLICY_SET, "seed": seed, "priors": pri, "origination_mode": "policy",
+                                  "group": f"histpolicy|{pname}|{size}|{period}",
+                                  "labels": {**base_labels, "origination": "policy"}})
                 elif mode == "repay" and pname in ("concentrated_TSLA", "diversified", "banks", "mixed"):
                     for mat, cure in (("default", 0.5), ("partial:0.5", 0.5), ("refinance", 0.5), ("default", 0.0)):
                         seed += 1
                         tag = "zero_voluntary" if cure == 0.0 else mat
                         tasks.append({"holdings": hs, "bars": bars, "origination": d, "term": 63,
-                                      "rate": RATE[market], "variants": COMPARE, "seed": seed, "priors": pri,
+                                      "rate": RATE[market], "variants": RC_SET, "seed": seed, "priors": pri,
                                       "maturity": mat, "cure": cure, "group": f"repay|{tag}|{pname}|{period}",
                                       "labels": {**base_labels, "maturity": tag}})
                 elif mode == "frontier":
-                    for scale in (0.7, 0.85, 1.0, 1.15):
+                    for scale in (0.85, 0.925, 1.0, 1.15):
                         seed += 1
                         tasks.append({"holdings": hs, "bars": bars, "origination": d, "term": 63,
-                                      "rate": RATE[market], "variants": COMPARE, "seed": seed, "priors": pri,
+                                      "rate": RATE[market], "variants": RC_SET, "seed": seed, "priors": pri,
                                       "maturity": "refinance", "scale": scale,
                                       "group": f"frontier|scale{scale}|{pname}|{size}",
                                       "labels": {**base_labels, "principal_scale": scale, "maturity": "refinance"}})
@@ -304,12 +318,17 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
                                 sb[k0] = ([b for b in sb[k0] if b["bar_date"] <= d][-40:]
                                           + [b for b in sb[k0] if b["bar_date"] > d])
                             seed += 1
+                            lab = {**base_labels, "period": "held_out_origination",
+                                   "data": "observed history + synthetic future", "scenario": kind,
+                                   "path_seed": path_seed}
                             tasks.append({"holdings": hs, "bars": sb, "origination": d, "term": 63,
-                                          "rate": RATE[market], "variants": ALL_VARIANTS, "seed": seed,
-                                          "priors": pri, "group": f"sim|{kind}|{pname}|{size}",
-                                          "labels": {**base_labels, "period": "held_out_origination",
-                                                     "data": "observed history + synthetic future", "scenario": kind,
-                                                     "path_seed": path_seed}})
+                                          "rate": RATE[market], "variants": RC_SET, "seed": seed,
+                                          "priors": pri, "group": f"sim|{kind}|{pname}|{size}", "labels": lab})
+                            tasks.append({"holdings": hs, "bars": sb, "origination": d, "term": 63,
+                                          "rate": RATE[market], "variants": POLICY_SET, "seed": seed,
+                                          "priors": pri, "origination_mode": "policy",
+                                          "group": f"simpolicy|{kind}|{pname}|{size}",
+                                          "labels": {**lab, "origination": "policy"}})
     info = {"market": market, "mode": mode, "missing_symbols": missing,
             "coverage": coverage({s: bars_by_symbol.get(s, []) for s in syms}, market)}
     return tasks, info
@@ -356,7 +375,9 @@ def main() -> None:
             "recovery_sessions_median", "recovery_sessions_p95", "recovery_completion",
             "residual_after_recovery_share", "time_restricted", "repeated_margin_call_share",
             "time_margin_call_or_forced", "data_review_sessions", "no_fill_sessions", "censored",
-            "censored_outstanding_share", "censored_loss_lower_bound_mean", "es95_loss")
+            "censored_outstanding_share", "censored_loss_lower_bound_mean", "es95_loss", "completed",
+            "expected_loss_conservative_upper", "loss_probability_conservative_upper", "pending_at_cutoff_share",
+            "initial_ltv_mean", "clusters", "clusters_with_loss", "cluster_loss_probability_upper95", "note")
 
     def rnd(x: Any) -> Any:
         if isinstance(x, float):
@@ -377,8 +398,8 @@ def main() -> None:
     pools: dict[str, list[dict[str, Any]]] = {}
     for r in results:
         parts = r["group"].split("|")
-        key = "|".join(parts[:2]) if parts[0] in ("sim", "repay", "frontier") else \
-            f"{parts[0]}|{parts[-1]}" if parts[0] == "hist" else parts[0]
+        key = "|".join(parts[:2]) if parts[0] in ("sim", "simpolicy", "repay", "frontier") else \
+            f"{parts[0]}|{parts[-1]}" if parts[0] in ("hist", "histpolicy") else parts[0]
         pools.setdefault(key, []).append(r)
     for key, rows in sorted(pools.items()):
         names = sorted({n for c in rows if "variants" in c for n in c["variants"]})
@@ -386,6 +407,7 @@ def main() -> None:
         for n in names:
             vr = variant_rows(rows, n)
             m = metrics(vr)
+            m.update(zero_event_bound(vr))
             m["loss_probability_ci95"] = clustered_interval(vr, "loss_event")
             m["expected_loss_ci95"] = clustered_interval(vr, "loss")
             m["liquidation_frequency_ci95"] = clustered_interval(vr, "liquidation")
