@@ -281,3 +281,32 @@ def test_first_available_retries_quota_errors() -> None:
     c = Flaky()
     fa = FirstAvailable([c], backoff_s=(0.0, 0.0, 0.0))
     assert fa.complete("s", [], []).text == "ok" and c.calls == 3
+
+
+def test_provider_merge_keeps_launch_stages(monkeypatch) -> None:
+    from app.analyst import llm
+    monkeypatch.delenv("CRI_LLM_MODEL", raising=False)
+    monkeypatch.setenv("CRI_LLM_PROJECT", "p")
+    cats = {"europe-west1": [("publishers/google/models/gemini-2.5-flash", "GA")],
+            "global": [("publishers/google/models/gemini-3-flash-preview", "PUBLIC_PREVIEW"),
+                       ("publishers/google/models/gemini-3.1-flash-lite", "GA")]}
+    monkeypatch.setattr(llm, "discover_gemini_catalogue", lambda project, loc, get=None: cats[loc])
+    p = llm.provider_from_env()
+    order = [(c.model, c.region) for c in p.candidates]
+    assert order == [("gemini-3.1-flash-lite", "global"), ("gemini-2.5-flash", "europe-west1"),
+                     ("gemini-3-flash-preview", "global")]
+
+
+def test_post_raises_http_error_with_vertex_message(monkeypatch) -> None:
+    import io
+    import urllib.error
+
+    from app.analyst import llm
+
+    def boom(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {},
+                                     io.BytesIO(b'{"error": {"message": "Invalid function declaration"}}'))
+    monkeypatch.setattr(llm.urllib.request, "urlopen", boom)
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        llm._post("https://example.invalid/x", {"a": 1}, {})
+    assert ei.value.code == 400 and "Invalid function declaration" in str(ei.value)

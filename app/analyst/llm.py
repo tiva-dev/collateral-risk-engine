@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Callable
@@ -53,7 +55,6 @@ class LLMProvider(Protocol):
 def _post(url: str, body: dict[str, Any], headers: dict[str, str], timeout: int = 90) -> dict[str, Any]:
     req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", **headers})
-    import urllib.error
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310 - fixed Vertex AI / metadata-server / configured endpoint
             out: dict[str, Any] = json.loads(r.read())
@@ -273,7 +274,6 @@ class FirstAvailable:
     def complete(self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMResponse:
         if self.chosen is not None:
             return self._with_backoff(self.chosen, system, messages, tools)
-        import urllib.error
         for c in self.candidates:
             label = f"{c.model}@{getattr(c, 'region', '')}"
             if label not in self.attempted:
@@ -293,7 +293,6 @@ class FirstAvailable:
     def _with_backoff(self, c: Any, system: str, messages: list[dict[str, Any]],
                       tools: list[dict[str, Any]]) -> LLMResponse:
         import time
-        import urllib.error
         for wait in (*self.backoff_s, None):
             try:
                 return c.complete(system, messages, tools)  # type: ignore[no-any-return]
@@ -335,7 +334,14 @@ def _rank_gemini(names: list[tuple[str, str]]) -> list[str]:
 
 def discover_gemini_models(project: str, region: str,
                            get: Callable[[str, dict[str, str]], dict[str, Any]] | None = None) -> list[str]:
-    """List Google publisher models available to the project (Model Garden)."""
+    """Ranked Gemini text model ids listed for the project at ``region``."""
+    return _rank_gemini(discover_gemini_catalogue(project, region, get))
+
+
+def discover_gemini_catalogue(project: str, region: str,
+                              get: Callable[[str, dict[str, str]], dict[str, Any]] | None = None
+                              ) -> list[tuple[str, str]]:
+    """(resource name, launch stage) of Google publisher models (Model Garden)."""
     def _get(url: str, headers: dict[str, str]) -> dict[str, Any]:
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=20) as r:  # nosec B310 - fixed Vertex AI endpoint
@@ -346,7 +352,6 @@ def discover_gemini_models(project: str, region: str,
     names: list[tuple[str, str]] = []
     token = ""
     for _ in range(10):
-        import urllib.parse
         q = {"pageSize": "200", **({"pageToken": token} if token else {})}
         url = f"https://{host}/v1beta1/publishers/google/models?" + urllib.parse.urlencode(q)
         d = fetch(url, {"Authorization": f"Bearer {gcp_access_token()}", "x-goog-user-project": project})
@@ -354,7 +359,7 @@ def discover_gemini_models(project: str, region: str,
         token = d.get("nextPageToken", "")
         if not token:
             break
-    return _rank_gemini(names)
+    return names
 
 
 def provider_from_env() -> LLMProvider:
@@ -365,18 +370,22 @@ def provider_from_env() -> LLMProvider:
         configured = os.environ.get("CRI_LLM_MODEL", "")
         locations = [region, "global"] if region != "global" else ["global"]
         listed: dict[str, list[str]] = {}          # model id -> locations whose catalogue lists it
+        stage: dict[str, str] = {}                 # model id -> launch stage (GA wins across locations)
         if not configured:
             for loc in locations:
                 try:
-                    for m in discover_gemini_models(project, loc):
+                    for name, st in discover_gemini_catalogue(project, loc):
+                        m = name.rsplit("/", 1)[-1]
                         listed.setdefault(m, []).append(loc)
+                        if stage.get(m) != "GA":
+                            stage[m] = st
                 except Exception as e:  # noqa: BLE001 - discovery is best effort; fall back to known ids
                     import logging
                     logging.getLogger(__name__).warning("Gemini model discovery failed at %s: %s", loc, e)
         if configured:
             pairs = [(m.strip(), loc) for m in configured.split(",") for loc in locations]
         elif listed:
-            ranked = _rank_gemini([(f"publishers/google/models/{m}", "") for m in listed])[:8]
+            ranked = _rank_gemini([(f"publishers/google/models/{m}", stage.get(m, "")) for m in listed])[:8]
             pairs = [(m, loc) for m in ranked for loc in listed[m]]
         else:
             fallback = ["gemini-3.1-flash-lite", "gemini-3-flash", "gemini-3-flash-preview"]
