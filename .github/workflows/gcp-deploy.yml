@@ -69,7 +69,14 @@ jobs:
           set -euo pipefail
           required="quality-gates postgres"
           for i in $(seq 1 80); do
-            gh api "repos/${{ github.repository }}/commits/$SHA/check-runs?per_page=100" > runs.json
+            # Query each required check by name: a commit can carry more than 100 check runs
+            # (validation matrices), and an unpaginated listing would miss the required ones.
+            : > runs.ndjson
+            for name in $required; do
+              gh api "repos/${{ github.repository }}/commits/$SHA/check-runs?check_name=$name&per_page=100" \
+                -q '.check_runs[]' >> runs.ndjson
+            done
+            jq -s '{check_runs: .}' runs.ndjson > runs.json
             pending=0; failed=0
             for name in $required; do
               c=$(jq -r --arg n "$name" '[.check_runs[] | select(.name==$n)] | sort_by(.started_at) | last | .conclusion // "pending"' runs.json)
