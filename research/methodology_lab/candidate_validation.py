@@ -82,6 +82,9 @@ POLICY_SET = (DEFAULT_VARIANTS[0], DEFAULT_VARIANTS[2]) + tuple(
     v for v in STRESS_VARIANTS if v.name in ("adaptive_headroom_cal", "adaptive_concentration_cal",
                                              "adaptive_suspension_value", "rc_candidate"))
 CFG = CandidateConfig(n_paths=400)
+# Principal scales (multiples of RC1's approved credit under --variant-set rc1) for the
+# full-lifecycle frontier; --scales overrides.
+FRONTIER_SCALES: tuple[float, ...] = (0.85, 0.925, 1.0, 1.15)
 EXCH = {"US": "NYSE", "NGX": "NGX"}
 CCY = {"US": "USD", "NGX": "NGN"}
 RATE = {"US": 0.10, "NGX": 0.25}
@@ -283,7 +286,7 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
                                       "maturity": mat, "cure": cure, "group": f"repay|{tag}|{pname}|{period}",
                                       "labels": {**base_labels, "maturity": tag}})
                 elif mode == "frontier":
-                    for scale in (0.85, 0.925, 1.0, 1.15):
+                    for scale in FRONTIER_SCALES:
                         seed += 1
                         tasks.append({"holdings": hs, "bars": bars, "origination": d, "term": 63,
                                       "rate": RATE[market], "variants": RC_SET, "seed": seed, "priors": pri,
@@ -353,7 +356,11 @@ def main() -> None:
     ap.add_argument("--variant-set", default="ablation", choices=["ablation", "rc1"])
     ap.add_argument("--shard", default="0/1", help="i/n: run every n-th task starting at i (partitioned jobs)")
     ap.add_argument("--paths", type=int, default=0, help="Monte Carlo paths (default: the runner's 400)")
+    ap.add_argument("--scales", default="", help="frontier principal scales, comma-separated")
     a = ap.parse_args()
+    if a.scales:
+        global FRONTIER_SCALES
+        FRONTIER_SCALES = tuple(float(x) for x in a.scales.split(","))
     manifest = json.loads(Path(a.manifest).read_text())
     bars, _fx = _load_replay_inputs(manifest)
     tasks, info = build_tasks(a.part, bars)

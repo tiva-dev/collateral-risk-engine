@@ -25,6 +25,7 @@ contractual limits separately (they are never folded into the risk numbers).
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -32,6 +33,14 @@ from typing import Any
 import numpy as np
 
 VIEW = "recovery_conditional"
+# RC1 exposes its recovery distribution as 201 quantiles (step 0.005). Validated
+# against the raw Monte Carlo samples (test_quantile_view_matches_raw_samples):
+# shortfall probability is exact at the grid, expected-shortfall rate within
+# 0.1pp of balance, CVaR95 within 1pp, but CVaR99 rests on two quantile points
+# and erred by up to ~3pp. Tail levels above MAX_ALPHA are therefore refused on
+# this view; 99% tail measures come from the full-lifecycle frontier, which
+# uses every simulated loan.
+MAX_ALPHA = 0.975
 _U = (np.arange(4000) + 0.5) / 4000   # quantile-level grid for integration
 
 
@@ -43,7 +52,11 @@ def _proceeds_sample(quantiles: Sequence[float]) -> np.ndarray:
     return np.interp(_U, levels, np.maximum.accumulate(q))
 
 
-def shortfall_metrics(proceeds: np.ndarray, balance: float, alpha: float = 0.99) -> dict[str, float]:
+def shortfall_metrics(proceeds: np.ndarray, balance: float, alpha: float = 0.95) -> dict[str, float]:
+    if not (math.isfinite(balance) and balance >= 0):
+        raise ValueError(f"balance must be a finite non-negative number, got {balance}")
+    if not 0.5 <= alpha < 1.0:
+        raise ValueError(f"alpha must be in [0.5, 1), got {alpha}")
     loss = np.maximum(balance - proceeds, 0.0)
     k = max(1, round((1 - alpha) * loss.size))
     tail = np.sort(loss)[-k:]
@@ -65,8 +78,17 @@ class RiskAppetite:
     max_p_shortfall: float | None = None          # e.g. 0.02
     max_expected_shortfall_rate: float | None = None   # E[L]/B, e.g. 0.002
     max_cvar_rate: float | None = None            # CVaR_alpha / B
-    alpha: float = 0.99
+    alpha: float = 0.95
     min_risk_adjusted_return: float | None = None # on the economics view, if supplied
+
+    def __post_init__(self) -> None:
+        if not 0.5 <= self.alpha <= MAX_ALPHA:
+            raise ValueError(f"alpha {self.alpha} is outside the validated range of the quantile view "
+                             f"[0.5, {MAX_ALPHA}]; use the full-lifecycle frontier for deeper tails")
+        for k in ("max_p_shortfall", "max_expected_shortfall_rate", "max_cvar_rate"):
+            v = getattr(self, k)
+            if v is not None and not (math.isfinite(v) and 0.0 <= v <= 1.0):
+                raise ValueError(f"{k} must be in [0, 1], got {v}")
 
 
 PRESETS = {
@@ -137,13 +159,15 @@ def _proceeds_from(evals: Sequence[Any]) -> list[np.ndarray]:
     return [_proceeds_sample(e.coverage_grace_quantiles) for e in evals]
 
 
-def frontier(evals: Sequence[Any], balances: Sequence[float] | None = None, alpha: float = 0.99,
+def frontier(evals: Sequence[Any], balances: Sequence[float] | None = None, alpha: float = 0.95,
              econ: LendingEconomics | None = None, n_points: int = 41) -> Frontier:
     """Frontier over loan balances. ``evals`` are RC1 evaluations of the same
     portfolio with different Monte Carlo seeds (one is allowed); the spread
     across replicas is reported as Monte Carlo uncertainty."""
     if not evals:
         raise ValueError("at least one evaluation required")
+    if alpha > MAX_ALPHA:
+        raise ValueError(f"alpha {alpha} exceeds the quantile view's validated tail resolution ({MAX_ALPHA})")
     e0 = evals[0]
     samples = _proceeds_from(evals)
     if balances is None:

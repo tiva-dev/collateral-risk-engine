@@ -12,7 +12,8 @@ dependencies = [
   "uvicorn[standard]>=0.27.0",
   "pydantic>=2.5.0",
   "httpx>=0.27.0",
-  "jsonschema>=4.20"
+  "jsonschema>=4.20",
+  "scikit-learn>=1.4"
 ]
 
 [tool.setuptools.packages.find]
@@ -61,7 +62,7 @@ ignore_errors = true
 # Frozen engine snapshots (shadow mode) and research code are imported lazily
 # by the platform; they are checked in their own branches, not re-typed here.
 [[tool.mypy.overrides]]
-module = ["shadow_engines.*", "research.*", "scipy.*"]
+module = ["shadow_engines.*", "research.*", "scipy.*", "sklearn.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 ignore_errors = true

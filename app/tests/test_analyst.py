@@ -146,7 +146,7 @@ def test_agent_answers_with_tool_figures_only(book) -> None:
 def test_agent_withholds_fabricated_figures(book) -> None:
     a = Analyst(_scripted("Expected lender loss would be $123,457 (fabricated)."), gw(book))
     r = a.ask("Stress the book")
-    assert r.status == "needs_review" and "$123,457" in r.ungrounded and "withheld" in r.answer
+    assert r.status == "needs_review" and any("$123,457" in u for u in r.ungrounded) and "withheld" in r.answer
 
 
 # -------------------------------------------------------- provider wire
@@ -329,3 +329,44 @@ def test_gemini_replays_thought_signatures_and_groups_parallel_responses(monkeyp
     assert c[1] == {"role": "model", "parts": parts}                    # signature kept verbatim
     assert len(c) == 3 and [list(p) for p in c[2]["parts"]] == [["functionResponse"], ["functionResponse"]]
     assert r.provider_parts == [{"text": "done"}]
+
+
+# ------------------------------------------------ contextual verification
+
+def _stress_env():
+    return [{"data": {"book": {"base_collateral": 2864192.94, "stressed_collateral": 2491442.17,
+                               "base_book_ltv": 0.6564, "stressed_book_ltv": 0.7546,
+                               "base_cure": 248337.35, "stressed_cure": 466287.26},
+                      "accounts": [{"account_ref": "ACC-001", "base": {"current_ltv": 0.7437, "cure_amount": 0.0},
+                                    "stressed": {"current_ltv": 0.9301, "cure_amount": 120000.0}},
+                                   {"account_ref": "ACC-002", "base": {"current_ltv": 0.6111, "cure_amount": 0.0},
+                                    "stressed": {"current_ltv": 0.6111, "cure_amount": 0.0}}]}}]
+
+
+Q = "What happens if technology stocks decline by 30% and volumes fall by 50%?"
+CALLS = [{"tool": "stress_test", "ok": True,
+          "args": {"scenario": {"price_shocks": [{"sector": "technology", "change": -0.3}], "volume_change": -0.5}}}]
+
+
+def test_verifier_accepts_correctly_attributed_figures() -> None:
+    from app.analyst.verify import verify_answer
+    ans = ("Book LTV rises from 0.6564 to 0.7546 and collateral falls by 372,750.77.\n"
+           "| Total Cure Amount | 248,337.35 | 466,287.26 | +217,949.91 |\n"
+           "ACC-001's LTV rises to 93.01% with a cure amount of 120,000.00.")
+    assert verify_answer(ans, _stress_env(), Q, CALLS, ["ACC-001", "ACC-002"]) == []
+
+
+def test_verifier_rejects_wrong_account_metric_direction_and_scenario() -> None:
+    from app.analyst.verify import verify_answer
+    accts = ["ACC-001", "ACC-002"]
+    wrong_acct = verify_answer("ACC-002's stressed LTV is 0.9301.", _stress_env(), Q, CALLS, accts)
+    assert any("different account" in i for i in wrong_acct)
+    wrong_metric = verify_answer("The cure amount rises to 0.7546.", _stress_env(), Q, CALLS, accts)
+    assert any("not a cure figure" in i for i in wrong_metric)
+    wrong_dir = verify_answer("Collateral rises by 372,750.77.", _stress_env(), Q, CALLS, accts)
+    assert any("increase" in i for i in wrong_dir)
+    wrong_unit = verify_answer("Book LTV is 2,864,192.94.", _stress_env(), Q, CALLS, accts)
+    assert wrong_unit
+    bad_calls = [{"tool": "stress_test", "ok": True, "args": {"scenario": {"price_shocks": [{"change": -0.2}]}}}]
+    sc = verify_answer("Book LTV rises to 0.7546.", _stress_env(), Q, bad_calls, accts)
+    assert sum("scenario" in i for i in sc) == 2

@@ -38,7 +38,7 @@ from typing import Any
 
 import jsonschema  # type: ignore[import-untyped]
 
-from app.analyst.tools import Tool, Toolset, release_info
+from app.analyst.tools import Tool, Toolset, release_info, simulation_info
 
 _INJECTION = re.compile(r"(ignore (all |any )?(previous|prior|above) instructions|disregard .{0,40}instructions|"
                         r"you are now|system prompt|developer message|<\s*/?\s*(system|assistant|tool)\s*>|"
@@ -165,6 +165,7 @@ class ToolGateway:
             result = tool.fn(**real_args)
             safe = self._sanitise(self._pseudo(result))
             envelope = {"type": "cri_tool_result", "tool": name, "provenance": {**release_info(),
+                        "simulation": simulation_info(self.toolset.n_paths),
                         "tenant_scoped": True, "computed_at": datetime.now(UTC).isoformat()},
                         "data": safe}
             rec.update(outcome="ok", result_sha256=hashlib.sha256(
