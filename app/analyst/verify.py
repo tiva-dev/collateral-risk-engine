@@ -41,6 +41,12 @@ FAMILIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "exposure": (("exposure",), ("exposure", "market_value")),
     "slippage": (("slippage", "execution cost"), ("slippage",)),
 }
+# Capacity classification (Report 17 review, section 6): experimental (research) capacity must
+# never pass verification under an approved-credit label.
+EXPERIMENTAL_FIELDS = ("risk_supported",)
+APPROVED_WORDS = re.compile(r"\b(approved|credit limit|available credit|can (?:lend|borrow|extend))\b", re.IGNORECASE)
+EXPERIMENTAL_WORDS = re.compile(r"\b(experimental|research|not approved|illustrative|hypothetical)\b",
+                                re.IGNORECASE)
 RATIO_FIELDS = ("ltv", "rate", "p_", "probability", "share", "risk_score", "slippage", "change")
 AMOUNT_FIELDS = ("value", "balance", "credit", "amount", "limit", "capacity", "exposure", "cure", "collateral",
                  "available", "income", "cost", "loss")
@@ -164,6 +170,10 @@ def verify_answer(answer: str, results: list[dict[str, Any]], question: str,
                     issues.append(f"{tok}: value is not a {'/'.join(sorted(fams))} figure")
                     continue
                 cands = fit
+            if (all(any(e in c.field.lower() for e in EXPERIMENTAL_FIELDS) for c in cands)
+                    and APPROVED_WORDS.search(seg) and not EXPERIMENTAL_WORDS.search(seg)):
+                issues.append(f"{tok}: experimental capacity presented as approved credit")
+                continue
             signed = tok.lstrip().startswith(("-", "+"))
             changes = [c for c in cands if c.derived]
             if changes and len(changes) == len(cands) and not signed:

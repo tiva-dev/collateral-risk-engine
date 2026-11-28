@@ -419,3 +419,17 @@ def test_capacity_figures_carry_distinct_categories(book) -> None:
     assert cls["lifetime_estimates"]["category"] == "lifetime_risk_estimate"
     assert {k for k in cls if k != "lifetime_estimates"} <= set(d)
     assert "Never present experimental capacity as available or approved credit" in SYSTEM
+
+
+def test_verifier_rejects_experimental_capacity_labelled_as_approved_credit() -> None:
+    from app.analyst.verify import verify_answer
+    env = [{"tool": "capacity_frontier", "ok": True,
+            "data": {"account_ref": "ACC-001", "rc1_approved_credit_limit": 900000.0,
+                     "risk_supported_capacity": 1250000.0, "risk_supported_ltv": 0.7812}}]
+    calls = [{"tool": "capacity_frontier", "ok": True, "args": {"account_ref": "ACC-001"}}]
+    q = "How much more could ACC-001 borrow?"
+    bad = verify_answer("ACC-001's approved credit limit is 1,250,000.00.", env, q, calls, ["ACC-001"])
+    assert any("experimental capacity presented as approved credit" in i for i in bad)
+    ok = verify_answer("ACC-001's approved RC1 credit limit is 900,000.00; the experimental research capacity "
+                       "is 1,250,000.00 (not approved for lending).", env, q, calls, ["ACC-001"])
+    assert ok == []
