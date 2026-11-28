@@ -44,9 +44,9 @@ FAMILIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 RATIO_FIELDS = ("ltv", "rate", "p_", "probability", "share", "risk_score", "slippage", "change")
 AMOUNT_FIELDS = ("value", "balance", "credit", "amount", "limit", "capacity", "exposure", "cure", "collateral",
                  "available", "income", "cost", "loss")
-UP = re.compile(r"\b(rise|rises|rising|rose|increase|increases|increased|up|higher|grow|grows|jump|jumps)\b", re.I)
+UP = re.compile(r"\b(rise|rises|rising|rose|increase|increases|increased|up|higher|grow|grows|jump|jumps)\b", re.IGNORECASE)
 DOWN = re.compile(r"\b(fall|falls|falling|fell|decline|declines|declined|drop|drops|dropped|lower|decrease|"
-                  r"decreases|decreased|down|shrink|shrinks)\b", re.I)
+                  r"decreases|decreased|down|shrink|shrinks)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)

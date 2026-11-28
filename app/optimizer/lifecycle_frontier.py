@@ -136,8 +136,8 @@ def frontier(cohorts: Sequence[dict[str, Any]], econ: LifecycleEconomics, varian
         for _ in range(reps):
             sample = [r for k in rng.choice(keys, len(keys)) for r in clusters[k]]
             b = point(sample, econ)
-            for k in boots:
-                boots[k].append(b[k])
+            for k, vals in boots.items():
+                vals.append(b[k])
         p["ci95"] = {k: [float(np.quantile(v, 0.025)), float(np.quantile(v, 0.975))] for k, v in boots.items()}
         p["clusters"] = len(keys)
         out.append({"scale_of_rc1_credit": scale, **p})

@@ -384,7 +384,7 @@ def main() -> None:
               "breach_target": BREACH, "step_sessions": a.step, "seed": a.seed,
               "datasets": [ds.meta["dataset_id"] for ds in dss],
               "data_through": max(ds.meta["last_date"] for ds in dss), "evidence_class": "public_historical",
-              "panel": {"rows": int(panel.X.shape[0]), "instruments": int(len(set(panel.sym))),
+              "panel": {"rows": int(panel.X.shape[0]), "instruments": len(set(panel.sym)),
                         **{k: int(v.sum()) for k, v in sp.items()}},
               "hier_shrinkage_k": float(preds["hier"]["k"][0]),
               "z_q05": {k: float(v["z"][0]) for k, v in preds.items() if "z" in v},

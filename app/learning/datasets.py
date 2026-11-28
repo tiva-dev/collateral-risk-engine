@@ -70,9 +70,11 @@ def _gz_csv(path: Path, header: list[str], rows: list[list[Any]]) -> None:
 
 def build_research_dataset(evidence_manifest: Path, market: str, out: Path, *, source_run: str,
                            snapshot_id: str, boundary: date = EXAMINED_THROUGH) -> dict[str, Any]:
+    from app.simulations.config.official_validation_universe import (
+        NGX_UNIVERSE,
+        US_UNIVERSE,
+    )
     from app.simulations.run_official_validation import _load_replay_inputs
-
-    from app.simulations.config.official_validation_universe import NGX_UNIVERSE, US_UNIVERSE
 
     manifest = json.loads(evidence_manifest.read_text())
     bars_by_symbol, fx = _load_replay_inputs(manifest)

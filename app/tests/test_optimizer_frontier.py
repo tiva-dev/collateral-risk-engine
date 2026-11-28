@@ -141,7 +141,12 @@ def _cohorts(seed: int = 1):
 
 
 def test_lifecycle_frontier_economics_and_appetite() -> None:
-    from app.optimizer.lifecycle_frontier import LifecycleEconomics, LifetimeAppetite, frontier, supported_scale
+    from app.optimizer.lifecycle_frontier import (
+        LifecycleEconomics,
+        LifetimeAppetite,
+        frontier,
+        supported_scale,
+    )
     econ = LifecycleEconomics(funding_rate=0.05)
     pts = frontier(_cohorts(), econ, reps=100)
     assert [p["scale_of_rc1_credit"] for p in pts] == [0.75, 1.0, 1.25, 1.5, 2.0]
@@ -158,7 +163,12 @@ def test_lifecycle_frontier_economics_and_appetite() -> None:
 
 
 def test_lifecycle_inputs_are_validated() -> None:
-    from app.optimizer.lifecycle_frontier import LifecycleEconomics, LifetimeAppetite, frontier, supported_scale
+    from app.optimizer.lifecycle_frontier import (
+        LifecycleEconomics,
+        LifetimeAppetite,
+        frontier,
+        supported_scale,
+    )
     for bad in ({"funding_rate": -0.01}, {"funding_rate": float("nan")}, {"funding_rate": 0.05, "tail": 1.0}):
         with pytest.raises(ValueError):
             LifecycleEconomics(**bad)

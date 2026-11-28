@@ -10,7 +10,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from app.learning.datasets import BAR_FIELDS, DatasetError, _gz_csv, _sha256, load_research_dataset
+from app.learning.datasets import (
+    BAR_FIELDS,
+    DatasetError,
+    _gz_csv,
+    _sha256,
+    load_research_dataset,
+)
 
 
 def write_dataset(out: Path, market: str = "US", n_sym: int = 10, start: date = date(2018, 1, 2),
