@@ -1,0 +1,44 @@
+name: Challenger shadow forecast
+
+# Daily prospective record for the frozen US ridge challenger (RC2 research).
+# Runs on the default branch only (schedule); writes create-only records to the
+# private research bucket. Never reads or changes RC1 decisions.
+on:
+  schedule:
+    - cron: '40 22 * * 1-5'   # after the US close and SIP daily-bar availability
+  workflow_dispatch:
+    inputs:
+      asof:
+        description: decision date YYYY-MM-DD (default today)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          echo "project=tiva-cri-stg-cda9" >> "$GITHUB_OUTPUT"
+          echo "ops_number=$(cat infra/terraform/OPS_PROJECT_NUMBER)" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/${{ steps.cfg.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: cri-deployer@${{ steps.cfg.outputs.project }}.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - env:
+          ASOF: ${{ inputs.asof }}
+        run: |
+          args="-m,app.intelligence.challenger,forecast,--out,gs://tiva-cri-stg-cda9-research"
+          if [ -n "$ASOF" ]; then
+            [[ "$ASOF" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "bad asof"; exit 1; }
+            args="$args,--asof,$ASOF"
+          fi
+          gcloud run jobs execute cri-research --project ${{ steps.cfg.outputs.project }} \
+            --region europe-west1 --wait --args="$args"
