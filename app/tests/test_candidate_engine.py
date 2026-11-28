@@ -755,3 +755,37 @@ def test_rc2_measurements_and_options_leave_defaults_unchanged() -> None:
     assert pit["settlement"] == "point_in_time"
     with pytest.raises(ValueError):
         run_cohort(**kw, settlement="tomorrow")
+
+
+def test_workout_policies_on_common_paths() -> None:
+    """RC2 maturity-workout research: identical path and seed for every policy. Selective
+    sales never sell more than the RC1 sell-all workout and, when both recover, leave the
+    borrower at least as well off net of execution cost; paydown-refinancing avoids a full
+    workout and leaves the refinanced debt recorded."""
+    hs, bars, dates = _cohort_inputs()
+    kw: dict = {"holdings": hs, "bars": bars, "origination": dates[400], "term_sessions": 63, "seed": 3,
+                "config": CandidateConfig(n_paths=200), "workout_sessions": 40, "principal_scale": 1.4}
+    allv = run_cohort(**kw, maturity="default")
+    assert allv == run_cohort(**kw, maturity="default", workout_policy="sell_all", refinance_policy="refuse")
+    sel = run_cohort(**kw, maturity="default", workout_policy="selective")
+    pln = run_cohort(**kw, maturity="default", workout_policy="planner")
+    for n, a in allv["variants"].items():
+        s, p = sel["variants"][n], pln["variants"][n]
+        assert s["workout_policy"] == "selective" and p["workout_policy"] == "planner"
+        assert s["executed_gross_workout"] <= a["executed_gross_workout"] + 1e-6
+        assert s["execution_costs_workout"] <= a["execution_costs_workout"] + 1e-6
+        if a["status"] == s["status"] == "recovered":
+            assert s["lender_loss"] == 0.0
+            assert s["workout_end"] >= s["workout_start"] >= 0
+    ref = run_cohort(**{**kw, "origination": dates[300]}, maturity="refinance")
+    pay = run_cohort(**{**kw, "origination": dates[300]}, maturity="refinance", workout_policy="selective",
+                     refinance_policy="paydown")
+    a, b = ref["variants"]["adaptive"], pay["variants"]["adaptive"]
+    assert a["maturity_outcome"] == "refinance_refused" and b["maturity_outcome"] == "paydown_refinance"
+    assert b["status"] == "recovered" and b["lender_loss"] == 0.0
+    assert b["refinanced_amount"] > 0 and b["executed_gross_workout"] < a["executed_gross_workout"]
+    # Refinanced only within the capacity of the collateral left after the paydown sales.
+    assert b["refinanced_amount"] <= b["refinance_capacity"] + 1e-6
+    assert not b["defaulted_at_maturity"]
+    with pytest.raises(ValueError):
+        run_cohort(**kw, workout_policy="fire_sale")
