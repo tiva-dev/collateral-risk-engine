@@ -331,31 +331,58 @@ def cmd_freeze(a: argparse.Namespace) -> None:
     tmp = Path(tempfile.mkdtemp())
     path = _gcs_download(a.dataset, tmp / "ds") if a.dataset.startswith("gs://") else Path(a.dataset)
     ds = load_research_dataset(path)
-    art = freeze(ds, a.code_version or os.environ.get("CRI_CODE_VERSION", "unknown"))
-    blob = json.dumps(art, sort_keys=True, default=float).encode()
     base = _base(a.out)
-    if not gcs_write(f"{base}/artifact.json", blob):
-        raise SystemExit("artifact already exists: versions are immutable")
+    existing = gcs_read(f"{base}/artifact.json")
+    if existing is not None:
+        # Versions are immutable. Resume registration with the stored artifact only if it is
+        # intact and was frozen from the same training dataset; never re-freeze over it.
+        art = load_artifact(existing[0])
+        if art["training_data"]["dataset_id"] != ds.meta["dataset_id"]:
+            raise SystemExit("a different artifact already exists for this version: versions are immutable")
+    else:
+        art = freeze(ds, a.code_version or os.environ.get("CRI_CODE_VERSION", "unknown"))
+        blob = json.dumps(art, sort_keys=True, default=float).encode()
+        if not gcs_write(f"{base}/artifact.json", blob):
+            raise SystemExit("artifact created concurrently; re-run to resume registration")
     # Registry (append-only JSONL in the private bucket; optimistic concurrency).
     reg_uri = f"{a.out.rstrip('/')}/registry/models.jsonl"
     cur = gcs_read(reg_uri)
     local = tmp / "models.jsonl"
     local.write_bytes(cur[0] if cur else b"")
     reg = ModelRegistry(local)
-    rec = reg.register(ModelRecord(model_id=CHALLENGER_ID, version=VERSION, component="intelligence",
+    key = f"{CHALLENGER_ID}@{VERSION}"
+    known = reg.records().get(key)
+    if known is not None and known.config_hash != art["artifact_sha256"]:
+        raise SystemExit(f"{key} is registered with a different artifact")
+    rec = known or reg.register(ModelRecord(model_id=CHALLENGER_ID, version=VERSION, component="intelligence",
                                    task="10-session downside volatility and ex-ante haircut (US)",
                                    config_hash=art["artifact_sha256"],
                                    dataset_hashes=[art["training_data"]["dataset_id"]],
                                    data_through=art["training_data"]["data_through"],
                                    metrics={"artifact": f"{base}/artifact.json"}))
-    reg.promote(rec.key, Stage.SHADOW, actor="cri-research/freeze",
-                reason="frozen for prospective evaluation (Report 17 review); no influence on RC1")
+    if rec.stage != Stage.SHADOW:
+        reg.promote(rec.key, Stage.SHADOW, actor="cri-research/freeze",
+                    reason="frozen for prospective evaluation (Report 17 review); no influence on RC1")
     if not gcs_write(reg_uri, local.read_bytes(), if_generation=cur[1] if cur else 0):
         raise SystemExit("registry changed concurrently; the artifact exists, re-run registration")
     print("CRI_CHALLENGER_FROZEN " + json.dumps({"id": CHALLENGER_ID, "version": VERSION,
                                                  "artifact_sha256": art["artifact_sha256"],
                                                  "training_rows": art["training_data"]["rows"],
                                                  "universe": len(art["universe"]), "stage": "shadow"}), flush=True)
+
+
+# History needed: every calibration outcome in the trailing window plus its decision bar
+# (h sessions earlier) and a holiday buffer; never less than the feature lookback.
+FETCH_DAYS = max(1100, round(365.25 * CAL_YEARS) + 2 * H + 30)
+
+INPUT_FIELDS = ("open", "high", "low", "close", "adj_close", "volume", "range_reported", "volume_reported")
+
+
+def inputs_digest(rows_by_symbol: dict[str, list[dict[str, Any]]], decision: date) -> str:
+    """sha256 of every bar field that can influence a forecast, up to the decision date."""
+    return hashlib.sha256(canonical({s: [[r["date"].isoformat(), *(r[k] for k in INPUT_FIELDS)]
+                                         for r in v if r["date"] <= decision]
+                                     for s, v in sorted(rows_by_symbol.items())})).hexdigest()
 
 
 def cmd_forecast(a: argparse.Namespace) -> None:
@@ -369,7 +396,7 @@ def cmd_forecast(a: argparse.Namespace) -> None:
     prov = AlpacaTradingHistoricalProvider()
     rows_by_symbol = {}
     for s in art["universe"]:
-        ser = prov.fetch_equity_history(s, today - timedelta(days=1100), today, adjustment="all", feed="sip",
+        ser = prov.fetch_equity_history(s, today - timedelta(days=FETCH_DAYS), today, adjustment="all", feed="sip",
                                         force_refresh=True)
         rows_by_symbol[s] = rows_from_bars(ser.bars)
     days = sorted({r["date"] for v in rows_by_symbol.values() for r in v if r["date"] <= today})
@@ -391,9 +418,8 @@ def cmd_forecast(a: argparse.Namespace) -> None:
                     prospective.append((rz[0].toordinal(), method, rz[1], sg))
     rec = forecast_day(art, rows_by_symbol, decision, prospective)
     rec["generated_at"] = datetime.now(UTC).isoformat()
-    rec["inputs_sha256"] = hashlib.sha256(canonical({s: [(r["date"].isoformat(), r["adj_close"], r["volume"])
-                                                         for r in v if r["date"] <= decision]
-                                                     for s, v in sorted(rows_by_symbol.items())})).hexdigest()
+    rec["inputs_sha256"] = inputs_digest(rows_by_symbol, decision)
+    rec["inputs_fields"] = list(INPUT_FIELDS)
     rec["prospective_outcomes_in_pool"] = len(prospective) // 2
     wrote = gcs_write(f"{base}/forecasts/{decision.isoformat()}.json", canonical(rec))
     print("CRI_CHALLENGER_FORECAST " + json.dumps({"decision_date": decision.isoformat(), "written": wrote,

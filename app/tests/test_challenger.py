@@ -98,3 +98,65 @@ def test_realised_return(frozen) -> None:
     assert end == rows[110]["date"]
     assert r == pytest.approx(math.log(rows[110]["adj_close"] / rows[100]["adj_close"]))
     assert ch.realised(rows, rows[-5]["date"]) is None
+
+
+class _Store:
+    """In-memory GCS with generation preconditions."""
+
+    def __init__(self) -> None:
+        self.objs: dict[str, tuple[bytes, int]] = {}
+        self.fail_next_registry = False
+
+    def read(self, uri: str):
+        return self.objs.get(uri)
+
+    def write(self, uri: str, data: bytes, if_generation: int = 0) -> bool:
+        if uri.endswith("models.jsonl") and self.fail_next_registry:
+            self.fail_next_registry = False
+            return False
+        gen = self.objs.get(uri, (b"", 0))[1]
+        if gen != if_generation:
+            return False
+        self.objs[uri] = (data, gen + 1)
+        return True
+
+
+def test_freeze_resumes_registration_after_artifact_upload(tmp_path, monkeypatch, frozen) -> None:
+    import argparse
+
+    from app.learning.governance import ModelRegistry
+    path = write_dataset(tmp_path / "us", n_sym=6, seed=12)
+    st = _Store()
+    monkeypatch.setattr(ch, "gcs_read", st.read)
+    monkeypatch.setattr(ch, "gcs_write", st.write)
+    a = argparse.Namespace(dataset=str(path), out="gs://b/p", code_version="t")
+    st.fail_next_registry = True
+    with pytest.raises(SystemExit, match="re-run registration"):
+        ch.cmd_freeze(a)
+    art_uri = f"{ch._base('gs://b/p')}/artifact.json"
+    first = st.objs[art_uri][0]
+    ch.cmd_freeze(a)                                      # resumes: same artifact, now registered
+    assert st.objs[art_uri][0] == first
+    reg_file = tmp_path / "r.jsonl"
+    reg_file.write_bytes(st.objs["gs://b/p/registry/models.jsonl"][0])
+    rec = ModelRegistry(reg_file).records()[f"{ch.CHALLENGER_ID}@{ch.VERSION}"]
+    assert rec.stage.value == "shadow" and rec.config_hash == json.loads(first)["artifact_sha256"]
+    ch.cmd_freeze(a)                                      # idempotent
+    other = write_dataset(tmp_path / "us2", n_sym=6, seed=13)
+    with pytest.raises(SystemExit, match="immutable"):
+        ch.cmd_freeze(argparse.Namespace(dataset=str(other), out="gs://b/p", code_version="t"))
+
+
+def test_fetch_window_covers_calibration_outcomes() -> None:
+    from app.intelligence.exante import CAL_YEARS
+    assert ch.FETCH_DAYS >= round(365.25 * CAL_YEARS) + 2 * ch.H
+
+
+def test_inputs_digest_covers_every_feature_field(frozen) -> None:
+    from datetime import date
+    rows = {"AAA": [{"date": date(2026, 1, 2), "open": 1.0, "high": 1.2, "low": 0.9, "close": 1.1,
+                     "adj_close": 1.1, "volume": 10.0, "range_reported": True, "volume_reported": True}]}
+    d0 = ch.inputs_digest(rows, date(2026, 1, 2))
+    for k, v in (("open", 1.01), ("high", 1.3), ("low", 0.8), ("range_reported", False), ("volume_reported", False)):
+        changed = {"AAA": [{**rows["AAA"][0], k: v}]}
+        assert ch.inputs_digest(changed, date(2026, 1, 2)) != d0, k
