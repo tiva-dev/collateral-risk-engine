@@ -153,3 +153,12 @@ def test_noise_is_not_reproducible_from_public_metadata() -> None:
         a._round = {"t0": __import__("time").monotonic()}
         outs.append(a._compute(pkg)[0])
     assert not np.allclose(outs[0], outs[1])
+
+
+def test_simulation_refuses_when_budget_permits_no_round() -> None:
+    import pytest
+
+    from app.federation.coordinator import RoundError
+    from app.federation.simulate import run
+    with pytest.raises(RoundError, match="privacy budget"):
+        run(seed=7, rounds=2, noise_multiplier=1.0, eps_limit=0.0)

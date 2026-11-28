@@ -131,8 +131,14 @@ def run(seed: int = 7, rounds: int = 15, noise_multiplier: float = 0.8, eps_limi
     history = []
     for r in range(rounds):
         drop = {"fintech_US"} if r == 3 else set()           # 9. dropout mid-round
-        res = coord.run_round(agents, "cure_logistic_v1", params, ref.tolist(), refsd.tolist(),
-                              drop_after_keys=drop, privacy_limit=eps_limit if noise_multiplier > 0 else None)
+        try:
+            res = coord.run_round(agents, "cure_logistic_v1", params, ref.tolist(), refsd.tolist(),
+                                  drop_after_keys=drop, privacy_limit=eps_limit if noise_multiplier > 0 else None)
+        except RoundError as e:                              # privacy budget exhausted: training stops
+            if "privacy budget" not in str(e) or r == 0:
+                raise                                        # nothing trained: not a demonstrable result
+            demo["2_4_stopped"] = {"after_rounds": r, "reason": str(e), "epsilon_limit": eps_limit}
+            break
         history.append({k: res.get(k) for k in ("round", "survivors", "dropped", "update_norm", "epsilon_spent")})
     demo["2_4_rounds"] = history
     # 7. validation/versioning in the registry (research stage only)
