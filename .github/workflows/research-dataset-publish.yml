@@ -122,14 +122,21 @@ jobs:
           # "already exists" means already published, which makes a partial publish
           # resumable. DATASET.json goes last and is the completion marker (loaders refuse
           # a dataset without it and verify every checksum).
+          # Direct JSON-API upload with ifGenerationMatch=0: create-only, enforced by the
+          # server, and needs no read permission (gcloud storage cp reads the destination).
+          tok=$(gcloud auth print-access-token)
+          bucket=tiva-cri-stg-cda9-research-data
+          prefix="examined/${{ matrix.market }}/${{ steps.build.outputs.id }}"
           for f in bars.csv.gz fx.csv.gz DATASET.json; do
-            if ! out=$(gcloud storage cp --if-generation-match=0 "ds/$f" "$dest/$f" 2>&1); then
-              if echo "$out" | grep -qiE "412|precondition"; then
-                echo "$f already published (content-addressed path)"
-              else
-                echo "$out"; exit 1
-              fi
-            fi
+            name=$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$prefix/$f")
+            code=$(curl -sS -o resp.json -w '%{http_code}' -X POST -H "Authorization: Bearer $tok" \
+              -H "Content-Type: application/octet-stream" --data-binary "@ds/$f" \
+              "https://storage.googleapis.com/upload/storage/v1/b/$bucket/o?uploadType=media&ifGenerationMatch=0&name=$name")
+            case "$code" in
+              200) echo "$f uploaded" ;;
+              412) echo "$f already published (content-addressed path)" ;;
+              *) echo "upload of $f failed: HTTP $code"; cat resp.json; exit 1 ;;
+            esac
           done
           echo "published $dest"
           echo "### ${{ matrix.market }} research dataset" >> "$GITHUB_STEP_SUMMARY"
