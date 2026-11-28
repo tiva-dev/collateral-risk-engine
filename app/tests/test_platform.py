@@ -172,6 +172,25 @@ class AuditTests(_DbCase):
         self.assertFalse(result["valid"])
         self.assertEqual(result["first_invalid_index"], 0)
 
+    def test_verification_streams_across_pages(self) -> None:
+        """Constant-memory keyset pagination: page boundaries do not break the chain,
+        and tampering on a later page is found at its true index."""
+        with self.db.transaction("alpha"):
+            for i in range(7):
+                append_audit("event", {"i": i}, tenant_id="alpha", actor="test")
+            for b in (1, 2, 3, 7, 50):
+                r = verify_chain("alpha", batch=b)
+                self.assertEqual((r["valid"], r["records"]), (True, 7))
+            self.assertEqual(verify_chain("alpha", batch=2)["head"], verify_chain("alpha")["head"])
+        if self.db.dialect == "postgres":
+            return
+        with self.db.transaction("*") as conn:
+            conn.execute("UPDATE audit_log SET payload='{\"i\":99}' WHERE seq = "
+                         "(SELECT seq FROM audit_log WHERE tenant_id='alpha' ORDER BY seq LIMIT 1 OFFSET 4)")
+            result = verify_chain("alpha", batch=2)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["first_invalid_index"], 4)
+
 
 class ControlTests(_DbCase):
     def test_lending_cannot_be_enabled_without_deployment_permit(self) -> None:

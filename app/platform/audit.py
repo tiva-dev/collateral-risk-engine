@@ -62,23 +62,41 @@ def append_audit(action: str, payload: dict[str, Any], *, tenant_id: str | None 
     return audit_id
 
 
-def verify_chain(tenant_id: str) -> dict[str, Any]:
+VERIFY_BATCH = 2000
+
+
+def verify_chain(tenant_id: str, batch: int = VERIFY_BATCH) -> dict[str, Any]:
+    """Verify the tenant's hash chain in constant memory.
+
+    Rows are streamed in seq order by keyset pagination. Loading the whole log
+    at once exhausted API instance memory on the staging sandbox tenant
+    (Cloud Run 503, 28 Nov 2026).
+    """
     conn = current_connection()
-    rows = conn.fetchall(
-        "SELECT audit_id, tenant_id, actor, action, created_at, payload, prev_hash, record_hash "
-        "FROM audit_log WHERE tenant_id = %s ORDER BY seq",
-        (tenant_id,),
-    )
     prev = GENESIS
-    for i, r in enumerate(rows):
-        created_s = ts_str(r["created_at"])
-        expected = _record_hash(prev, r["audit_id"], r["tenant_id"], r["actor"], r["action"],
-                                created_s, r["payload"])
-        if r["prev_hash"] != prev or r["record_hash"] != expected:
-            return {"tenant_id": tenant_id, "valid": False, "records": len(rows),
-                    "first_invalid_index": i, "audit_id": r["audit_id"]}
-        prev = r["record_hash"]
-    return {"tenant_id": tenant_id, "valid": True, "records": len(rows), "head": prev}
+    i = 0
+    last_seq: Any = None
+    while True:
+        if last_seq is None:
+            rows = conn.fetchall(
+                "SELECT seq, audit_id, tenant_id, actor, action, created_at, payload, prev_hash, record_hash "
+                "FROM audit_log WHERE tenant_id = %s ORDER BY seq LIMIT %s", (tenant_id, batch))
+        else:
+            rows = conn.fetchall(
+                "SELECT seq, audit_id, tenant_id, actor, action, created_at, payload, prev_hash, record_hash "
+                "FROM audit_log WHERE tenant_id = %s AND seq > %s ORDER BY seq LIMIT %s",
+                (tenant_id, last_seq, batch))
+        for r in rows:
+            expected = _record_hash(prev, r["audit_id"], r["tenant_id"], r["actor"], r["action"],
+                                    ts_str(r["created_at"]), r["payload"])
+            if r["prev_hash"] != prev or r["record_hash"] != expected:
+                return {"tenant_id": tenant_id, "valid": False, "records_checked": i + 1,
+                        "first_invalid_index": i, "audit_id": r["audit_id"]}
+            prev = r["record_hash"]
+            i += 1
+        if len(rows) < batch:
+            return {"tenant_id": tenant_id, "valid": True, "records": i, "head": prev}
+        last_seq = rows[-1]["seq"]
 
 
 class DatabaseAuditLogger(AuditLogger):
