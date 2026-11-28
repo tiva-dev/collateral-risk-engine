@@ -89,6 +89,7 @@ FRONTIER_SCALES: tuple[float, ...] = (0.85, 0.925, 1.0, 1.15)
 # Frontier v2 (RC2 research, Report 17 review): fine grid around the promising region,
 # common random numbers across scales and cases, contractual ceiling enforced,
 # point-in-time settlement, retail and institutional positions.
+WORKOUT_SCALES: tuple[float, ...] = (1.0, 1.25)
 FRONTIER2_SCALES: tuple[float, ...] = (0.9, 1.0, 1.1, 1.2, 1.25, 1.3, 1.4, 1.5)
 FRONTIER2_TERM_SCALES: tuple[float, ...] = (1.0, 1.25)
 FRONTIER2_TERMS: tuple[int, ...] = (21, 126)
@@ -255,7 +256,9 @@ def run_task(t: dict[str, Any]) -> dict[str, Any]:
                          seed=t["seed"], config=CFG, priors=t["priors"], workout_sessions=40,
                          maturity=t.get("maturity", "repay"), principal_scale=t.get("scale", 1.0),
                          origination_mode=t.get("origination_mode", "matched"),
-                         origination_engine=t.get("origination_engine", ()))
+                         origination_engine=t.get("origination_engine", ()),
+                         workout_policy=t.get("workout_policy", "sell_all"),
+                         refinance_policy=t.get("refinance_policy", "refuse"))
     except ValueError as exc:
         res = {"origination": t["origination"].isoformat(), "skipped": str(exc)}
     res["group"] = t["group"]
@@ -273,7 +276,8 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
     for pname, weights in PORTFOLIOS[market].items():
         if any(s in missing for s in weights):
             continue
-        sizes = ("retail", "institutional") if mode in ("hist", "sim", "frontier2", "fstress") else ("retail",)
+        sizes = (("retail", "institutional") if mode in ("hist", "sim", "frontier2", "fstress", "workout")
+                 else ("retail",))
         for size in sizes:
             liq = 20 if market == "NGX" else None
             bars = {}
@@ -336,6 +340,27 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
                                       "labels": {**base_labels, "principal_scale": scale, "case": case,
                                                  "term": term, "maturity": mat, "cure": cure, "cohort_id": cid,
                                                  "settlement": "point_in_time", "ceiling": "enforced"}})
+                elif mode == "workout":
+                    # RC2 maturity-workout optimisation: every policy on the same cohort, path and
+                    # seed (common random numbers), point-in-time settlement, contractual ceiling.
+                    cid = f"{market}|{pname}|{size}|{d.isoformat()}"
+                    cseed = 60_000_000 + int(hashlib.sha256(cid.encode()).hexdigest()[:7], 16)
+                    common = {"holdings": hs, "bars": bars, "origination": d, "rate": RATE[market], "term": 63,
+                              "variants": RC_SET, "seed": cseed, "priors": pri, "ceiling_cap": True,
+                              "settlement": "point_in_time"}
+                    cases = [("default_zero_cure", "default", 0.0, "refuse", wp)
+                             for wp in ("sell_all", "selective", "planner")]
+                    cases += [("refinance", "refinance", 0.5, rp, wp)
+                              for rp, wp in (("refuse", "sell_all"), ("refuse", "selective"), ("paydown", "selective"))]
+                    for scale in WORKOUT_SCALES:
+                        for case, mat, cure, rp, wp in cases:
+                            tasks.append({**common, "maturity": mat, "cure": cure, "scale": scale,
+                                          "workout_policy": wp, "refinance_policy": rp,
+                                          "group": f"wo|{case}|{rp}|{wp}|scale{scale}|{pname}|{size}",
+                                          "labels": {**base_labels, "principal_scale": scale, "case": case,
+                                                     "maturity": mat, "cure": cure, "cohort_id": cid,
+                                                     "workout_policy": wp, "refinance_policy": rp,
+                                                     "settlement": "point_in_time", "ceiling": "enforced"}})
                 elif mode == "sens" and pname in ("concentrated_TSLA", "diversified", "banks", "mixed"):
                     for rate, term in ((0.05, 63), (0.30, 63), (RATE[market], 21), (RATE[market], 126)):
                         if oi + term >= len(dates):
@@ -428,7 +453,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("manifest")
     ap.add_argument("--part", required=True, choices=[f"{m}-{k}" for m in ("hist", "sens", "sim", "repay", "frontier",
-                                                                          "frontier2", "fstress")
+                                                                          "frontier2", "fstress", "workout")
                                                        for k in ("US", "NGX")])
     ap.add_argument("--out", required=True)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
@@ -449,7 +474,7 @@ def main() -> None:
         # one variant set, no policy-originated duplicates.
         util = dict(RC_OVERRIDES)["capacity_utilisation"]
         rc_engine = tuple((k, v) for k, v in RC_OVERRIDES if k != "capacity_utilisation")
-        only_rc1 = a.part.startswith(("frontier2", "fstress"))        # v2: the RC1 variant alone
+        only_rc1 = a.part.startswith(("frontier2", "fstress", "workout"))        # v2: the RC1 variant alone
         tasks = [dict(t, variants=(RC1_SET[-1],) if only_rc1 else RC1_SET, scale=t.get("scale", 1.0) * util,
                       origination_engine=rc_engine,
                       labels={**t["labels"], "scale_of_rc_credit": t.get("scale", 1.0),

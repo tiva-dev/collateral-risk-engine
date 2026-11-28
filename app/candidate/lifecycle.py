@@ -151,6 +151,13 @@ class Outcome:
     # into a decision.
     execution_costs_intervention: float = 0.0
     execution_costs_workout: float = 0.0
+    # RC2 workout research (measurement): what the borrower keeps and how long a workout takes.
+    borrower_surplus_cash: float = 0.0       # sale proceeds beyond the debt, returned to the borrower
+    borrower_residual_value: float = 0.0     # collateral left with the borrower at the end, at last price
+    workout_start: int = -1
+    workout_end: int = -1
+    workout_policy: str = ""
+    refinanced_amount: float = 0.0           # debt moved to a new facility at maturity (still owed by the borrower)
     executed_gross_intervention: float = 0.0
     executed_gross_workout: float = 0.0
     maturity_outcome: str = ""              # repaid | partial_then_default | refinanced | refinance_refused | default | in_recovery | ""
@@ -241,6 +248,8 @@ def run_cohort(
     ceiling_cap: bool = False,
     max_principal: float | None = None,
     settlement: str = "fixed",
+    workout_policy: str = "sell_all",
+    refinance_policy: str = "refuse",
 ) -> dict[str, Any]:
     """Run all variants on one matched cohort with common random numbers.
 
@@ -248,7 +257,21 @@ def run_cohort(
     x utilisation (independent of the risk capacity being scaled); ``max_principal``:
     an absolute institutional limit. Both default off (unchanged behaviour).
     ``settlement="point_in_time"`` (RC2 research) settles each sale on the cycle in force
-    on its trade date instead of the profile's fixed cycle."""
+    on its trade date instead of the profile's fixed cycle.
+
+    RC2 maturity-workout research (defaults unchanged):
+    ``workout_policy``: on default at maturity, ``"sell_all"`` sells every holding (RC1
+    behaviour); ``"selective"`` sells only what is needed to repay the debt, cheapest
+    expected execution cost first, each quantity haircut for price risk over its expected
+    selling time, re-planned every session; ``"planner"`` asks the unified recovery planner
+    for a full-repayment plan, then falls back to selling the rest if it falls short.
+    ``refinance_policy`` (with ``maturity="refinance"``): ``"refuse"`` sends a loan above
+    refinanceable capacity into a full workout; ``"paydown"`` sells (selectively) down to
+    capacity and refinances the remainder."""
+    if workout_policy not in ("sell_all", "selective", "planner"):
+        raise ValueError(f"unknown workout_policy {workout_policy!r}")
+    if refinance_policy not in ("refuse", "paydown"):
+        raise ValueError(f"unknown refinance_policy {refinance_policy!r}")
     policy = policy or Policy.default()
     interest = interest or InterestPolicy(0.20, accrual_frequency="monthly", compounding="compound")
     execution = execution or LiquidationExecutionPolicy()
@@ -314,12 +337,16 @@ def run_cohort(
         return cache[k]
 
     def plan(v: Variant, qty: dict[str, float], loan: Loan, d: date, md: dict[str, MarketData],
-             state: MarginState, ltv0: float, urgent: bool) -> tuple[dict[str, float], bool]:
+             state: MarginState, ltv0: float, urgent: bool,
+             full_repayment: bool = False) -> tuple[dict[str, float], bool]:
         """The actual candidate recovery decision through the unified planner."""
         hs = [replace(h, quantity=qty.get(h.stable_key, 0.0)) for h in holdings if qty.get(h.stable_key, 0.0) > 0]
         eng = engine_for(v.engine, "early_warning" if v.restoration == "early_warning" else "initial_capacity")
         override = None
-        if v.kind == "fixed":
+        if full_repayment:
+            def override(q: np.ndarray, c: float, sim: Any) -> float:
+                return 0.0                       # maturity workout: restore the balance to zero
+        elif v.kind == "fixed":
             def override(q: np.ndarray, c: float, sim: Any) -> float:
                 return ltv0 * (float(q @ sim.price) + c)
         elif urgent:
@@ -419,6 +446,45 @@ def run_cohort(
     def unnecessary(i: int) -> bool:
         return bool(margin_cf[i:term_sessions].min() > 0) if i < term_sessions else False  # through maturity
 
+    def selective_orders(qty: dict[str, float], existing: dict[str, float], d: date, last_px: dict[str, float],
+                         need: float) -> dict[str, float]:
+        """RC2 workout: additional sell quantities so that the expected net proceeds of all
+        open orders cover ``need``. Instruments are taken cheapest expected cost first
+        (half-spread + impact + execution cost at the participation cap); each unit's
+        proceeds are haircut by 1.645 x 20-session volatility x sqrt(expected selling
+        sessions + settlement), floor 2%, for price risk while it is sold."""
+        def expect(k: str, q: float) -> tuple[float, float]:
+            dk = keys[k]
+            prof = profiles[k]
+            px = last_px.get(k, 0.0)
+            hist = [b for _, b in sorted_bars[dk] if _ <= d][-20:]
+            vols = [float(b["volume"]) for b in hist if b.get("volume_reported") and b.get("volume")]
+            part = min(prof.max_participation_rate, execution.max_participation_rate) if prof else 0.1
+            adv = float(np.median(vols)) if vols else 0.0
+            b = hist[-1] if hist else None
+            hs_ = _half_spread(b, prof.spread_floor, prof.spread_fallback) if (b and prof) else 0.02
+            sig = vol20[dk].get(d, 0.02)
+            cost = hs_ + cfg.impact_coefficient * sig * math.sqrt(part) + execution.execution_cost_rate
+            days = (q / (part * adv) if adv > 0 else 60.0) + settle
+            buf = max(0.02, 1.645 * sig * math.sqrt(max(1.0, days)))
+            return px * max(0.0, 1 - cost) * (1 - buf), cost
+        covered = sum(expect(k, q)[0] * q for k, q in existing.items() if q > 0)
+        short = need - covered
+        add: dict[str, float] = {}
+        if short <= 0:
+            return add
+        avail = {k: qty.get(k, 0.0) - existing.get(k, 0.0) for k in keys if qty.get(k, 0.0) - existing.get(k, 0.0) > 1e-9}
+        for k in sorted(avail, key=lambda k: expect(k, avail[k])[1]):
+            unit, _ = expect(k, avail[k])
+            if unit <= 0:
+                continue
+            q = min(avail[k], short / unit)
+            add[k] = q
+            short -= q * unit
+            if short <= 1e-9:
+                break
+        return add
+
     def fillable(k: str, d: date) -> dict[str, Any] | None:
         b = series[keys[k]].get(d)
         prof = profiles[k]
@@ -451,6 +517,8 @@ def run_cohort(
             compounding counts as interest when repaid (interest first), the rest reduces
             the funded principal."""
             new, alloc = apply_repayment(loan_, amount)
+            out_.borrower_surplus_cash += max(0.0, amount - alloc["fees_paid"] - alloc["interest_paid"]
+                                              - alloc["principal_paid"])
             capitalised = max(0.0, loan_.principal - funded_[0])
             cap_paid = min(alloc["principal_paid"], capitalised)
             out_.interest_received += alloc["interest_paid"] + cap_paid
@@ -469,6 +537,8 @@ def run_cohort(
         pending: list[tuple[int, float]] = []
         sale_start = -1
         matured = False
+        workout_target = 0.0
+        refinance_limit = 0.0
         target = 0.0
         for i, d in enumerate(path):
             now = datetime.combine(d, time(21), UTC)
@@ -550,12 +620,18 @@ def run_cohort(
                                  else ltv0 * value)
                         pay = bal if net_bal <= cap_m else 0.0
                         out.maturity_outcome = "refinanced" if pay > 0 else "refinance_refused"
+                        if pay == 0.0 and refinance_policy == "paydown" and cap_m > 0:
+                            workout_target = 0.98 * cap_m   # aim 2% below capacity (interest accrues meanwhile)
+                            refinance_limit = cap_m
+                            out.maturity_outcome = "paydown_refinance"
                     elif maturity == "default":
                         out.maturity_outcome = "default"
                     if maturity == "repay":
                         out.maturity_outcome = "repaid"
                     elif maturity.startswith("partial:"):
                         out.maturity_outcome = "partial_then_default"
+                if pay > 0 and maturity == "refinance":
+                    out.refinanced_amount += pay
                 if pay > 0:
                     loan = repay(loan, pay)
                     out.borrower_repayment += pay
@@ -563,13 +639,41 @@ def run_cohort(
                     out.repaid_at_maturity = True
                     out.events.append({"session": i, "date": d.isoformat(), "event": "repaid_at_maturity"})
                     break
-                out.defaulted_at_maturity = True
+                out.defaulted_at_maturity = workout_target == 0.0
                 episode = "workout"
-                orders = {k: q for k, q in qty.items() if k not in cash_keys and q > 0}
+                out.workout_start, out.workout_policy = i, workout_policy
+                need = net_bal - workout_target - sum(q for k, q in qty.items() if k in cash_keys)
+                if workout_policy == "sell_all" and workout_target == 0.0:
+                    orders = {k: q for k, q in qty.items() if k not in cash_keys and q > 0}
+                elif workout_policy == "planner" and workout_target == 0.0:
+                    orders, _ = plan(v, qty, loan, d, md, MarginState.LIQUIDATION, ltv0, False, full_repayment=True)
+                    if not orders:
+                        orders = {k: q for k, q in qty.items() if k not in cash_keys and q > 0}
+                else:
+                    orders = selective_orders(qty, {}, d, feed.last_px, need)
                 submit_from = i + 1
                 out.events.append({"session": i, "date": d.isoformat(), "event": "maturity_default",
                                    "balance": loan.balance})
             if episode == "workout":
+                cash_now = sum(q for k, q in qty.items() if k in cash_keys)
+                if workout_target > 0 and not pending and loan.balance - cash_now <= refinance_limit:
+                    loan = repay(loan, cash_now)
+                    for k in cash_keys:
+                        qty[k] = 0.0
+                    out.borrower_repayment += loan.balance          # refinanced remainder
+                    out.refinanced_amount += loan.balance
+                    loan = repay(loan, loan.balance)
+                    out.workout_end = i
+                    orders = {}
+                    break
+                need = net_bal - workout_target - cash_now
+                if workout_target > 0 and net_bal - cash_now <= refinance_limit:
+                    need = 0.0                                  # within capacity once settled: wait, no churn
+                if workout_policy == "selective" or workout_target > 0:
+                    for k, q in selective_orders(qty, orders, d, feed.last_px, need).items():
+                        orders[k] = orders.get(k, 0.0) + q          # re-plan: top up if prices fell
+                elif workout_policy == "planner" and not orders and not pending and need > 0.01:
+                    orders = {k: q for k, q in qty.items() if k not in cash_keys and q > 0}   # planner fallback
                 if not orders and not pending:
                     break
                 continue
@@ -682,6 +786,8 @@ def run_cohort(
                                    "orders": {k: round(q, 4) for k, q in orders.items()}})
         # Proceeds not yet settled at the cutoff are NOT realized recovery: reported separately.
         out.pending_at_cutoff = sum(a for _, a in pending)
+        if out.workout_start >= 0 and out.workout_end < 0:
+            out.workout_end = i
         if out.repaid_at_maturity:
             out.status = "repaid"
         else:
@@ -702,6 +808,9 @@ def run_cohort(
             else:
                 out.status, out.lender_loss = "loss", loan.balance
                 out.loss_lower_bound = loan.balance
+        if out.status in ("repaid", "recovered"):
+            out.borrower_residual_value = sum(q * feed.last_px.get(k, 0.0) for k, q in qty.items()
+                                              if k not in cash_keys and q > 1e-9)
         results[v.name] = out.to_dict()
     return {"origination": origination.isoformat(), "principal": p0, "collateral_value": v0,
             "initial_ltv": ltv0, "term_sessions": term_sessions, "cure_probability": cure_probability,
