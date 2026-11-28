@@ -62,7 +62,7 @@ ignore_errors = true
 # Frozen engine snapshots (shadow mode) and research code are imported lazily
 # by the platform; they are checked in their own branches, not re-typed here.
 [[tool.mypy.overrides]]
-module = ["shadow_engines.*", "research.*", "scipy.*"]
+module = ["shadow_engines.*", "research.*", "scipy.*", "sklearn.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 ignore_errors = true

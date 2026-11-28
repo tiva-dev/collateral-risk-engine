@@ -67,8 +67,13 @@ def test_benchmark_pipeline_runs_and_is_point_in_time(tmp_path) -> None:
     p = build_panel([ds], step=20, rc1=True)
     sp = _splits(p)
     assert sp["train"].any() and sp["val"].any() and sp["test"].any() and sp["test_unseen"].any()
-    # embargo: no training target window reaches into validation
-    assert p.day[sp["train"]].max() + 15 < p.day[sp["val"]].min()
+    # purge by actual target end dates: no training target reaches past the training end
+    from app.intelligence.benchmark import TRAIN_END, VAL_END
+    assert p.end_day[sp["train"]].max() <= TRAIN_END.toordinal()
+    assert p.end_day[sp["val"]].max() <= VAL_END.toordinal() and p.day[sp["val"]].min() > TRAIN_END.toordinal()
+    # liquidity terciles are contemporaneous: every date with >= 3 names has all three buckets
+    d0 = p.day[0]
+    assert set(p.adv_bucket[p.day == d0]) == {0, 1, 2}
     preds = fit_predict(p, sp)
     ev = evaluate(p, sp, preds)
     t = ev["test"]

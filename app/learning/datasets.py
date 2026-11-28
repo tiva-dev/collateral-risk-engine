@@ -72,8 +72,17 @@ def build_research_dataset(evidence_manifest: Path, market: str, out: Path, *, s
                            snapshot_id: str, boundary: date = EXAMINED_THROUGH) -> dict[str, Any]:
     from app.simulations.run_official_validation import _load_replay_inputs
 
+    from app.simulations.config.official_validation_universe import NGX_UNIVERSE, US_UNIVERSE
+
     manifest = json.loads(evidence_manifest.read_text())
     bars_by_symbol, fx = _load_replay_inputs(manifest)
+    # Provider artifacts can contain several markets: keep only the requested
+    # market's universe (and its listing currency), so rows are never mislabelled.
+    universe = {"US": set(US_UNIVERSE), "NGX": set(NGX_UNIVERSE)}[market]
+    currency = {"US": "USD", "NGX": "NGN"}[market]
+    excluded = sorted(s for s in bars_by_symbol if s not in universe)
+    bars_by_symbol = {s: [b for b in v if (b.currency or currency) == currency]
+                      for s, v in bars_by_symbol.items() if s in universe}
     out.mkdir(parents=True, exist_ok=True)
     rows: list[list[Any]] = []
     cut_rows = 0
@@ -116,6 +125,7 @@ def build_research_dataset(evidence_manifest: Path, market: str, out: Path, *, s
             "tier": "examined", "boundary": boundary.isoformat(), "first_date": first.isoformat() if first else None,
             "last_date": last.isoformat() if last else None, "rows": len(rows), "fx_rows": len(fx_rows),
             "instruments": len({r[0] for r in rows}), "rows_removed_after_boundary": cut_rows,
+            "excluded_other_market_symbols": excluded,
             "source": {"provider_validation_run": source_run, "snapshot_id": snapshot_id,
                        "evidence_manifest": evidence_manifest.name},
             "licence": LICENCE.get(market, "provider terms; internal research only"),

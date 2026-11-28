@@ -42,6 +42,7 @@ import json
 import math
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import date
@@ -63,7 +64,6 @@ FEATURES = ["lrv1", "lrv5", "lrv22", "lrv66", "lewma", "ldown22", "lpark22", "ga
 
 def _gcs_download(uri: str, dest: Path) -> Path:
     from app.analyst.llm import gcp_access_token
-    import urllib.parse
     bucket, _, prefix = uri[len("gs://"):].partition("/")
     dest.mkdir(parents=True, exist_ok=True)
     tok = gcp_access_token()
@@ -78,7 +78,6 @@ def _gcs_download(uri: str, dest: Path) -> Path:
 
 def _gcs_upload(uri: str, name: str, data: bytes) -> None:
     from app.analyst.llm import gcp_access_token
-    import urllib.parse
     bucket, _, prefix = uri[len("gs://"):].partition("/")
     obj = urllib.parse.quote(f"{prefix.rstrip('/')}/{name}", safe="")
     req = urllib.request.Request(
@@ -98,7 +97,8 @@ class Panel:
     ret: np.ndarray         # forward h-session log return
     rc1: np.ndarray         # RC1 sigma_used * sqrt(h) (nan where not estimable)
     sym: np.ndarray
-    day: np.ndarray         # ordinal dates
+    day: np.ndarray         # ordinal dates of the evaluation date t
+    end_day: np.ndarray     # ordinal date of the target's last observation (t + h sessions)
     market: np.ndarray
     adv_bucket: np.ndarray  # 0 low, 1 mid, 2 high liquidity (market-specific terciles at t)
 
@@ -138,7 +138,7 @@ def _rc1_sigma(rows: list[dict[str, Any]], i: int) -> float:
 
 def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 260,
                 rc1: bool = True) -> Panel:
-    feats, rv, ret, rcs, syms, days, mkts, advs = [], [], [], [], [], [], [], []
+    feats, rv, ret, rcs, syms, days, ends, mkts, advs = [], [], [], [], [], [], [], [], []
     market_rv: dict[tuple[str, int], list[float]] = {}
     per: list[tuple[str, str, list[dict[str, Any]], dict[str, np.ndarray]]] = []
     for ds in datasets:
@@ -196,37 +196,44 @@ def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 
             rcs.append(_rc1_sigma(rows, i) * math.sqrt(h) if rc1 else math.nan)
             syms.append(f"{m}:{s}")
             days.append(d)
+            ends.append(rows[i + h]["date"].toordinal())
             mkts.append(m)
             advs.append(pre["adv20"][i])
     adv = np.array(advs)
     mk = np.array(mkts)
-    bucket = np.zeros(adv.size, int)
-    for m in set(mkts):
-        sel = mk == m
-        q1, q2 = np.quantile(adv[sel], [1 / 3, 2 / 3])
-        bucket[sel] = np.digitize(adv[sel], [q1, q2])
-    return Panel(np.array(feats), np.array(rv), np.array(ret), np.array(rcs), np.array(syms), np.array(days),
-                 mk, bucket)
+    dy = np.array(days)
+    bucket = np.ones(adv.size, int)          # mid when a cross-section is too small to rank
+    groups: dict[tuple[str, int], list[int]] = {}
+    for j, (m, d) in enumerate(zip(mkts, days, strict=True)):
+        groups.setdefault((m, d), []).append(j)
+    for idx in groups.values():              # contemporaneous terciles within (market, date)
+        if len(idx) >= 3:
+            a = adv[idx]
+            q1, q2 = np.quantile(a, [1 / 3, 2 / 3])
+            bucket[idx] = np.digitize(a, [q1, q2])
+    return Panel(np.array(feats), np.array(rv), np.array(ret), np.array(rcs), np.array(syms), dy,
+                 np.array(ends), mk, bucket)
 
 
 # ------------------------------------------------------------------ models
 
 def _splits(p: Panel, h: int = H) -> dict[str, np.ndarray]:
+    """Purged by each target's actual final observation date: no training target
+    reaches past the training end, no validation target past the validation end."""
     te, ve = TRAIN_END.toordinal(), VAL_END.toordinal()
-    emb = int(h * 7 / 5) + 1          # h sessions in calendar days
     unseen = np.array([int(hashlib.sha256(s.encode()).hexdigest(), 16) % 5 == 0 for s in p.sym])
-    return {"train": (p.day <= te - emb) & ~unseen,
-            "val": (p.day > te + emb) & (p.day <= ve - emb) & ~unseen,
-            "test": (p.day > ve + emb) & ~unseen,
-            "test_unseen": (p.day > ve + emb) & unseen,
+    return {"train": (p.end_day <= te) & ~unseen,
+            "val": (p.day > te) & (p.end_day <= ve) & ~unseen,
+            "test": (p.day > ve) & ~unseen,
+            "test_unseen": (p.day > ve) & unseen,
             "unseen": unseen}
 
 
 def fit_predict(p: Panel, sp: dict[str, np.ndarray], seed: int = 7) -> dict[str, dict[str, np.ndarray]]:
-    from sklearn.ensemble import HistGradientBoostingRegressor  # type: ignore[import-untyped]
-    from sklearn.linear_model import LinearRegression, Ridge  # type: ignore[import-untyped]
-    from sklearn.pipeline import make_pipeline  # type: ignore[import-untyped]
-    from sklearn.preprocessing import StandardScaler  # type: ignore[import-untyped]
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    from sklearn.linear_model import LinearRegression, Ridge
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
 
     y = np.log(p.rv + 1e-6)
     tr = sp["train"]
@@ -254,7 +261,7 @@ def fit_predict(p: Panel, sp: dict[str, np.ndarray], seed: int = 7) -> dict[str,
     gq = HistGradientBoostingRegressor(loss="quantile", quantile=Q, max_iter=300, learning_rate=0.05,
                                        max_leaf_nodes=31, random_state=seed).fit(p.X[tr], p.ret[tr])
     out["gbt_q"] = {"q": gq.predict(p.X)}
-    for name, d in out.items():
+    for d in out.values():
         if "sigma" in d:
             ok = tr & np.isfinite(d["sigma"]) & (d["sigma"] > 0)
             z = float(np.quantile(p.ret[ok] / d["sigma"][ok], Q))

@@ -22,7 +22,20 @@ def _release() -> dict[str, str]:
     return {"release": RC_ID, "engine": ENGINE_VERSION, "fingerprint": rc_fingerprint()[:16]}
 
 
-def _evaluate(v: AccountView, n_paths: int, seed: int = 11) -> Any:
+SEED = 11
+
+
+def simulation_info(n_paths: int) -> dict[str, Any]:
+    """Actual simulation settings behind every Analyst figure (review finding 2)."""
+    from app.candidate.rc import rc_config
+    frozen = rc_config().n_paths
+    return {"monte_carlo_paths": n_paths, "seed": SEED, "frozen_release_paths": frozen,
+            "configuration": "frozen RC1 parameters with a reduced path count; figures carry Monte Carlo "
+                             "error and are not identical to the frozen evaluation" if n_paths < frozen
+            else "frozen RC1 configuration"}
+
+
+def _evaluate(v: AccountView, n_paths: int, seed: int = SEED) -> Any:
     from dataclasses import replace
 
     from app.candidate import CandidateEngine

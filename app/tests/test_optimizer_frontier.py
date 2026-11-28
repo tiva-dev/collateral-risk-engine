@@ -115,3 +115,97 @@ def test_minimum_return_is_enforced_or_refused(evals) -> None:
     if m is not None:
         from app.optimizer import economics
         assert economics(m, econ)["raroc"] >= 0.15 - 1e-6
+
+
+# ------------------------------------------------------------- M4 lifecycle
+
+def _cohorts(seed: int = 1):
+    from datetime import date as _d
+    rng = np.random.default_rng(seed)
+    out = []
+    for q in range(16):
+        orig = _d(2019 + q // 4, 1 + 3 * (q % 4), 15)
+        shock = rng.normal()                      # shared quarter shock
+        for scale in (0.75, 1.0, 1.25, 1.5, 2.0):
+            for _ in range(8):
+                p = 100.0
+                lossp = max(0.0, 0.002 * (scale ** 4) + 0.01 * max(shock, 0) * scale ** 3 + rng.normal(0, 0.002))
+                loss = p * lossp if rng.random() < min(1.0, 0.05 * scale ** 2) else 0.0
+                out.append({"origination": orig.isoformat(), "labels": {"scale_of_rc_credit": scale},
+                            "variants": {"rc1": {"principal": p, "lender_loss": loss, "censored": False,
+                                                 "outstanding_debt": 0.0, "sessions": 63,
+                                                 "interest_accrued": p * 0.10 * 0.25,
+                                                 "liquidation_episodes": int(loss > 0), "margin_calls": int(loss > 0),
+                                                 "execution_costs": 0.1 * loss}}})
+    return out
+
+
+def test_lifecycle_frontier_economics_and_appetite() -> None:
+    from app.optimizer.lifecycle_frontier import LifecycleEconomics, LifetimeAppetite, frontier, supported_scale
+    econ = LifecycleEconomics(funding_rate=0.05)
+    pts = frontier(_cohorts(), econ, reps=100)
+    assert [p["scale_of_rc1_credit"] for p in pts] == [0.75, 1.0, 1.25, 1.5, 2.0]
+    el = [p["expected_loss"] for p in pts]
+    assert el[0] < el[-1]
+    for p in pts:
+        lo, hi = p["ci95"]["expected_loss"]
+        assert lo <= p["expected_loss"] <= hi and p["clusters"] == 16
+        assert p["economic_capital"] >= 0.02 and p["interest_income"] == pytest.approx(0.025)
+    s = supported_scale(pts, LifetimeAppetite(max_expected_loss=0.002))
+    assert s["max_scale_robust_upper95"] is None or s["max_scale_robust_upper95"] <= s["max_scale_point_estimate"]
+    lim = supported_scale(pts, LifetimeAppetite(max_expected_loss=1.0), institutional_max_scale=1.0)
+    assert lim["supported_scale"] == 1.0 and lim["binding"] == "institutional_limit"
+
+
+def test_lifecycle_inputs_are_validated() -> None:
+    from app.optimizer.lifecycle_frontier import LifecycleEconomics, LifetimeAppetite, frontier, supported_scale
+    for bad in ({"funding_rate": -0.01}, {"funding_rate": float("nan")}, {"funding_rate": 0.05, "tail": 1.0}):
+        with pytest.raises(ValueError):
+            LifecycleEconomics(**bad)
+    with pytest.raises(ValueError):
+        LifetimeAppetite(max_expected_loss=-1)
+    with pytest.raises(ValueError):
+        supported_scale([], LifetimeAppetite())
+    assert frontier([{"labels": {}, "variants": {}}], LifecycleEconomics(0.05)) == []
+
+
+def test_appetite_parameters_and_edge_cases_are_validated() -> None:
+    import numpy as _np
+
+    from app.optimizer.frontier import _proceeds_sample, shortfall_metrics
+    with pytest.raises(ValueError):
+        _proceeds_sample([1.0, 2.0])                       # missing simulation
+    m = shortfall_metrics(_np.array([0.0, 0.0, 0.0]), 0.0)  # zero balance
+    assert m["expected_shortfall_rate"] == 0.0 and m["p_shortfall"] == 0.0
+    m2 = shortfall_metrics(_np.zeros(100), 50.0)            # worthless collateral
+    assert m2["p_shortfall"] == 1.0 and m2["expected_shortfall"] == 50.0
+
+
+def test_quantile_view_matches_raw_samples(monkeypatch) -> None:
+    """Review finding 3: the frontier's quantile interpolation against RC1's own raw
+    Monte Carlo recovery samples (captured where the engine summarises them)."""
+    import app.candidate.engine as engine_mod
+    from app.optimizer.frontier import _proceeds_sample
+    hs, md, bars, asof = setup()
+    orig = np.quantile
+    cap: dict[str, np.ndarray] = {}
+
+    def spy(a, q, *args, **kw):
+        if np.ndim(q) == 1 and len(q) == 201:
+            cap["raw"] = np.array(a, float)
+        return orig(a, q, *args, **kw)
+    monkeypatch.setattr(engine_mod.np, "quantile", spy)
+    e = CandidateEngine(replace(rc_config(), n_paths=2000)).evaluate(
+        "t", hs, Loan(0.0), Policy.default(), md, bars=bars, execution_policy=LiquidationExecutionPolicy(),
+        interest_policy=InterestPolicy(0.2), as_of=asof, seed=11)
+    monkeypatch.setattr(engine_mod.np, "quantile", orig)
+    raw, interp = cap["raw"], _proceeds_sample(e.coverage_grace_quantiles)
+    for b in np.quantile(raw, [0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5]):
+        x, y = shortfall_metrics(raw, b), shortfall_metrics(interp, b)
+        assert abs(x["p_shortfall"] - y["p_shortfall"]) <= 0.005 + 1e-9
+        assert abs(x["expected_shortfall_rate"] - y["expected_shortfall_rate"]) <= 0.001
+        assert abs(x["cvar_rate"] - y["cvar_rate"]) <= 0.01            # alpha 0.95 default
+    with pytest.raises(ValueError):
+        RiskAppetite(alpha=0.99)
+    with pytest.raises(ValueError):
+        frontier([e], alpha=0.99)
