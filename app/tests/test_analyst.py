@@ -405,3 +405,31 @@ def test_book_totals_are_per_currency_and_instruments_use_stable_keys(book) -> N
     keys = {d["instrument_key"] for d in det}
     assert keys == {"NASDAQ:TECA:USD:LISTED_EQUITY", "NGX:TECA:NGN:LISTED_EQUITY"}     # same ticker, two instruments
     assert all(len(d["exposure_by_currency"]) == 1 for d in det)
+
+
+def test_capacity_figures_carry_distinct_categories(book) -> None:
+    """Report 17 review, section 6: approved RC1 credit, experimental capacity,
+    recovery-conditional and lifetime estimates are presented distinctly."""
+    from app.analyst.agent import SYSTEM
+    d = gw(book).call("capacity_frontier", {"account_ref": "ACC-001"})["data"]
+    cls = d["classification"]
+    assert cls["rc1_approved_credit_limit"]["category"] == "approved_rc1_credit"
+    assert cls["risk_supported_capacity"]["category"] == cls["risk_supported_ltv"]["category"] == "experimental_capacity"
+    assert cls["points"]["category"] == "recovery_conditional_estimate"
+    assert cls["lifetime_estimates"]["category"] == "lifetime_risk_estimate"
+    assert {k for k in cls if k != "lifetime_estimates"} <= set(d)
+    assert "Never present experimental capacity as available or approved credit" in SYSTEM
+
+
+def test_verifier_rejects_experimental_capacity_labelled_as_approved_credit() -> None:
+    from app.analyst.verify import verify_answer
+    env = [{"tool": "capacity_frontier", "ok": True,
+            "data": {"account_ref": "ACC-001", "rc1_approved_credit_limit": 900000.0,
+                     "risk_supported_capacity": 1250000.0, "risk_supported_ltv": 0.7812}}]
+    calls = [{"tool": "capacity_frontier", "ok": True, "args": {"account_ref": "ACC-001"}}]
+    q = "How much more could ACC-001 borrow?"
+    bad = verify_answer("ACC-001's approved credit limit is 1,250,000.00.", env, q, calls, ["ACC-001"])
+    assert any("experimental capacity presented as approved credit" in i for i in bad)
+    ok = verify_answer("ACC-001's approved RC1 credit limit is 900,000.00; the experimental research capacity "
+                       "is 1,250,000.00 (not approved for lending).", env, q, calls, ["ACC-001"])
+    assert ok == []
