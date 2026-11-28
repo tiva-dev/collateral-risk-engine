@@ -22,7 +22,7 @@ import numpy as np
 
 from app.federation.simulate import institutions, run
 
-CONFIGS = {
+CONFIGS: dict[str, dict[str, Any]] = {
     "no_dp_weighted": {"noise_multiplier": 0.0, "weight_cap": 1500},
     "dp_z1_uniform": {"noise_multiplier": 1.0, "weight_cap": 1},
     "dp_z2_uniform": {"noise_multiplier": 2.0, "weight_cap": 1},
@@ -31,7 +31,9 @@ CONFIGS = {
 
 def one(seed: int, count: int, hetero: float, config: str, eps_limit: float = 20.0) -> dict[str, Any]:
     insts = institutions(count, hetero, seed)
-    res = run(seed, rounds=15, eps_limit=eps_limit, insts=insts, demos=False, **CONFIGS[config])
+    cfg = CONFIGS[config]
+    res = run(seed, rounds=15, noise_multiplier=float(cfg["noise_multiplier"]), eps_limit=eps_limit,
+              weight_cap=int(cfg["weight_cap"]), insts=insts, demos=False)
     comp = res["5_6_comparison"]
     rows = {k: v for k, v in comp.items() if not k.startswith("_")}
     small = min(rows, key=lambda k: rows[k]["train_rows"])
@@ -88,7 +90,8 @@ def main() -> None:
         from app.intelligence.benchmark import _gcs_upload
         _gcs_upload(a.out, "federation_experiments.json", blob.encode())
     elif a.out:
-        open(a.out, "w").write(blob)
+        with open(a.out, "w") as f:
+            f.write(blob)
     print("CRI_FEDERATION_EXPERIMENTS " + json.dumps({"jobs": len(jobs), "seconds": report["seconds"]}), flush=True)
 
 

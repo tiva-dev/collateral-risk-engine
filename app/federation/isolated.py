@@ -30,7 +30,7 @@ def isolation_available() -> bool:
     if shutil.which("unshare") is None:
         return False
     try:
-        return subprocess.run([*ISOLATION_CMD, "true"], capture_output=True, timeout=10).returncode == 0
+        return subprocess.run([*ISOLATION_CMD, "true"], capture_output=True, timeout=10, check=False).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
