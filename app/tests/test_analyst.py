@@ -370,3 +370,38 @@ def test_verifier_rejects_wrong_account_metric_direction_and_scenario() -> None:
     bad_calls = [{"tool": "stress_test", "ok": True, "args": {"scenario": {"price_shocks": [{"change": -0.2}]}}}]
     sc = verify_answer("Book LTV rises to 0.7546.", _stress_env(), Q, bad_calls, accts)
     assert sum("scenario" in i for i in sc) == 2
+
+
+# ------------------------------------------- currencies, identity, snapshots
+
+def _stub_eval(ref, ccy, as_of, mv, bal, assets):
+    from types import SimpleNamespace
+
+    from app.core.enums import MarginState
+    return SimpleNamespace(loan_currency=ccy, as_of=as_of, portfolio_market_value=mv, current_outstanding_balance=bal,
+                           approved_credit_limit=mv * 0.5, current_available_credit=0.0,
+                           margin_state=MarginState.SAFE, cure_amount=0.0, threshold_ltv={},
+                           p_infeasible_after_grace=lambda b: 0.0, data_status="ok", restriction=None,
+                           deterioration=None, asset_results=assets)
+
+
+def test_book_totals_are_per_currency_and_instruments_use_stable_keys(book) -> None:
+    from types import SimpleNamespace
+    ts = Toolset(book, n_paths=100)
+    a = lambda key, sym, mv, rs: SimpleNamespace(instrument_key=key, asset_id=sym, market_value=mv, risk_score=rs,
+                                                 data_status="ok")
+    evs = {"ACC-001": _stub_eval("ACC-001", "USD", "2026-11-20T21:00:00+00:00", 1000.0, 500.0,
+                                 [a("NASDAQ:TECA:USD:LISTED_EQUITY", "TECA", 1000.0, 0.5)]),
+           "ACC-002": _stub_eval("ACC-002", "NGN", "2026-11-18T21:00:00+00:00", 9e6, 4e6,
+                                 [a("NGX:TECA:NGN:LISTED_EQUITY", "TECA", 9e6, 0.4),
+                                  a("CASH:NGN:NGN:CASH", "NGN", 1e5, 0.0)])}
+    ts._eval = lambda v, key="base": evs.get(v.account_ref, evs["ACC-001"])
+    ts.book = InMemoryBook("t", {k: book.accounts[k] for k in ("ACC-001", "ACC-002")}, book.sectors)
+    la = ts.list_accounts()
+    assert set(la["totals_by_currency"]) == {"USD", "NGN"} and "totals" not in la
+    assert la["totals_by_currency"]["NGN"]["loan_balance"] == 4e6
+    assert la["snapshot"]["consistent"] is False and la["snapshot"]["spread_hours"] == 48.0
+    det = ts.deteriorating_assets()["instruments"]
+    keys = {d["instrument_key"] for d in det}
+    assert keys == {"NASDAQ:TECA:USD:LISTED_EQUITY", "NGX:TECA:NGN:LISTED_EQUITY"}     # same ticker, two instruments
+    assert all(len(d["exposure_by_currency"]) == 1 for d in det)
