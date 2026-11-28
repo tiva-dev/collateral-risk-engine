@@ -156,6 +156,7 @@ def test_lifecycle_frontier_economics_and_appetite() -> None:
         lo, hi = p["ci95"]["expected_loss"]
         assert lo <= p["expected_loss"] <= hi and p["clusters"] == 16
         assert p["economic_capital"] >= 0.02 and p["interest_income"] == pytest.approx(0.025)
+        assert p["risk_adjusted_profit_per_rc1_credit"] == pytest.approx(p["scale_of_rc1_credit"] * p["risk_adjusted_profit"])
     s = supported_scale(pts, LifetimeAppetite(max_expected_loss=0.002))
     assert s["max_scale_robust_upper95"] is None or s["max_scale_robust_upper95"] <= s["max_scale_point_estimate"]
     lim = supported_scale(pts, LifetimeAppetite(max_expected_loss=1.0), institutional_max_scale=1.0)

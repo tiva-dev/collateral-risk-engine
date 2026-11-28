@@ -128,14 +128,20 @@ def frontier(cohorts: Sequence[dict[str, Any]], econ: LifecycleEconomics, varian
     for scale in sorted(by_scale):
         rows = by_scale[scale]
         p = point(rows, econ)
+        # Per borrower relationship (absolute, per unit of RC1's approved credit): lending
+        # capacity decisions compare this, not the per-unit-principal return, which can
+        # fall while total risk-adjusted profit still rises.
+        p["risk_adjusted_profit_per_rc1_credit"] = scale * p["risk_adjusted_profit"]
         clusters: dict[str, list[dict[str, Any]]] = {}
         for r in rows:
             clusters.setdefault(_quarter(r), []).append(r)
         keys = list(clusters)
-        boots: dict[str, list[float]] = {"expected_loss": [], "risk_adjusted_profit": [], "liquidation_frequency": []}
+        boots: dict[str, list[float]] = {"expected_loss": [], "risk_adjusted_profit": [], "liquidation_frequency": [],
+                                         "risk_adjusted_profit_per_rc1_credit": []}
         for _ in range(reps):
             sample = [r for k in rng.choice(keys, len(keys)) for r in clusters[k]]
             b = point(sample, econ)
+            b["risk_adjusted_profit_per_rc1_credit"] = scale * b["risk_adjusted_profit"]
             for k, vals in boots.items():
                 vals.append(b[k])
         p["ci95"] = {k: [float(np.quantile(v, 0.025)), float(np.quantile(v, 0.975))] for k, v in boots.items()}
@@ -162,7 +168,7 @@ def supported_scale(points: Sequence[dict[str, Any]], appetite: LifetimeAppetite
         raise ValueError("no frontier points")
     point_ok = [p["scale_of_rc1_credit"] for p in points if ok(p, False)]
     robust_ok = [p["scale_of_rc1_credit"] for p in points if ok(p, True)]
-    best = max(points, key=lambda p: p["risk_adjusted_profit"])
+    best = max(points, key=lambda p: p["risk_adjusted_profit_per_rc1_credit"])
     risk_scale = max(robust_ok) if robust_ok else None
     final = risk_scale if institutional_max_scale is None or risk_scale is None else min(risk_scale,
                                                                                          institutional_max_scale)
@@ -171,4 +177,5 @@ def supported_scale(points: Sequence[dict[str, Any]], appetite: LifetimeAppetite
             "supported_scale": final,
             "binding": None if final is None else ("institutional_limit" if final != risk_scale else "risk_appetite"),
             "profit_maximising_scale": best["scale_of_rc1_credit"],
+            "profit_basis": "risk-adjusted profit per unit of RC1's approved credit (per borrower)",
             "note": "scales are multiples of RC1's approved credit; tested grid only (no extrapolation)"}
