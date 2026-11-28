@@ -19,6 +19,7 @@ Methods:
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -54,8 +55,13 @@ def _sigmoid(z: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-np.clip(z, -30, 30)))
 
 
+class TimeBudgetExceeded(TimeoutError):
+    pass
+
+
 def logistic_fit(x: np.ndarray, y: np.ndarray, w0: np.ndarray, *, epochs: int, lr: float, l2: float,
-                 prox_mu: float = 0.0, rng: np.random.Generator | None = None, batch: int = 64) -> np.ndarray:
+                 prox_mu: float = 0.0, rng: np.random.Generator | None = None, batch: int = 64,
+                 deadline: float | None = None) -> np.ndarray:
     """Mini-batch gradient descent on logistic loss with L2 and a FedProx term
     mu/2 ||w - w0||^2 (keeps heterogeneous local updates near the global model)."""
     rng = rng or np.random.default_rng(0)
@@ -64,6 +70,8 @@ def logistic_fit(x: np.ndarray, y: np.ndarray, w0: np.ndarray, *, epochs: int, l
     for _ in range(epochs):
         idx = rng.permutation(xb.shape[0])
         for s in range(0, idx.size, batch):
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeBudgetExceeded("local training exceeded the institution's time budget")
             b = idx[s:s + batch]
             g = xb[b].T @ (_sigmoid(xb[b] @ w) - y[b]) / b.size + l2 * np.r_[0.0, w[1:]] + prox_mu * (w - w0)
             w -= lr * g
@@ -80,7 +88,8 @@ def metrics(y: np.ndarray, p: np.ndarray) -> dict[str, float]:
     brier = float(np.mean((p - y) ** 2))
     pos, neg = p[y == 1], p[y == 0]
     if pos.size and neg.size:
-        ranks = np.argsort(np.argsort(np.r_[pos, neg])) + 1
+        from scipy.stats import rankdata
+        ranks = rankdata(np.r_[pos, neg])            # average ranks for ties (constant model -> 0.5)
         auc = float((ranks[: pos.size].sum() - pos.size * (pos.size + 1) / 2) / (pos.size * neg.size))
     else:
         auc = math.nan

@@ -42,6 +42,9 @@ class Coordinator:
     threshold_fraction: float = 0.6
     identity: crypto.Identity = field(default_factory=crypto.Identity.generate)
     participants: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Trust anchor: institution identities enrolled out of band at onboarding (contract,
+    # key ceremony); registration must prove possession of exactly the enrolled key.
+    enrolled: dict[str, bytes] = field(default_factory=dict)
     budgets: dict[str, PrivacyBudget] = field(default_factory=dict)
     models: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     audit: list[dict[str, Any]] = field(default_factory=list)
@@ -52,9 +55,20 @@ class Coordinator:
 
     # ---------------------------------------------------- registration
 
+    def enroll(self, institution: str, identity_public: bytes) -> None:
+        """Onboarding step performed by Tiva with the institution (out of band)."""
+        if institution in self.enrolled and self.enrolled[institution] != identity_public:
+            raise ValueError("institution already enrolled with a different identity; re-keying needs revocation")
+        self.enrolled[institution] = identity_public
+        self._log("enroll", institution=institution)
+
     def register(self, msg: dict[str, Any]) -> bool:
         p = msg["payload"]
-        ok = crypto.verify(bytes.fromhex(p["identity"]), p, bytes.fromhex(msg["signature"]))
+        claimed = bytes.fromhex(p["identity"])
+        anchor = self.enrolled.get(p.get("institution", ""))
+        current = self.participants.get(p.get("institution", ""), {}).get("identity")
+        ok = (anchor is not None and claimed == anchor and (current is None or current == anchor)
+              and crypto.verify(claimed, p, bytes.fromhex(msg["signature"])))
         if ok:
             self.participants[p["institution"]] = {"identity": bytes.fromhex(p["identity"]), "status": "active",
                                                    "algorithms": set(p["algorithms"])}
@@ -77,10 +91,6 @@ class Coordinator:
         if len(eligible) < self.min_participants:
             raise RoundError(f"only {len(eligible)} eligible participants; minimum is {self.min_participants}")
         z = float(params.get("noise_multiplier", 0.0))
-        if alg.kind == "ml" and privacy_limit is not None:
-            budget = self.budgets.setdefault(algorithm, PrivacyBudget(privacy_limit))
-            if not budget.can_run(z):
-                raise RoundError("privacy budget exhausted for this model")
         self.round_no += 1
         history = list(self.models.get(algorithm, []))          # copy: appended to below
         parent = history[-1]["version"] if history else None
@@ -100,6 +110,12 @@ class Coordinator:
         t = max(2, int(np.ceil(self.threshold_fraction * len(u1))))
         if len(u1) < self.min_participants:
             raise RoundError(f"only {len(u1)} agents accepted the round")
+        if alg.kind == "ml" and privacy_limit is not None:
+            # reserve budget for the worst case the round can still complete with
+            budget = self.budgets.setdefault(algorithm, PrivacyBudget(privacy_limit))
+            worst = max(t, self.min_participants)
+            if not budget.can_run(z * (worst / len(u1)) ** 0.5):
+                raise RoundError("privacy budget would be exceeded if the round completes at its minimum size")
         ids = {i: self.participants[i]["identity"] for i in u1}
         outbox = {i: agents[i].share_keys(roster, ids, t) for i in u1}
         for sender, msgs in outbox.items():
@@ -110,7 +126,11 @@ class Coordinator:
         for i in u1:
             if i in drop:
                 continue
-            m = agents[i].masked_contribution()
+            try:
+                m = agents[i].masked_contribution()
+            except AgentRefusal as e:
+                refused[i] = str(e)            # treated as a dropout; its masks are cancelled below
+                continue
             if not crypto.verify(ids[i], m["payload"], bytes.fromhex(m["signature"])):
                 raise RoundError(f"unsigned contribution from {i}")
             masked[i] = m["payload"]

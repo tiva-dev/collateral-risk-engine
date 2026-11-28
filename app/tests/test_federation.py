@@ -103,3 +103,53 @@ def test_privacy_budget_enforced() -> None:
     b3.charge(6, 6, 2.0)
     assert b2.spent() > b3.spent()
     assert not PrivacyBudget(10.0).can_run(0.0)
+
+
+def test_review_fixes_identity_noise_bounds_budget_and_auc(demo) -> None:
+    from app.federation.agent import (
+        AgentRefusal,
+        Consent,
+        DataEnvironment,
+        LearningAgent,
+    )
+    from app.federation.algorithms import metrics
+    from app.federation.coordinator import Coordinator, RoundError
+    from app.learning.governance import ModelRegistry
+    assert demo["1_hijack_registration_accepted"] is False
+    # constant predictions -> AUC 0.5 with average ranks
+    assert metrics(np.array([0, 1, 0, 1.0]), np.full(4, 0.5))["auc"] == 0.5
+    # out-of-range parameter values are refused before any work
+    env = DataEnvironment({"margin_call_outcome": (np.zeros((40, 7)), np.zeros(40))},
+                          {"margin_call_outcome": (np.zeros((40, 7)), np.zeros(40))})
+    coord = Coordinator(ModelRegistry("unused.jsonl"))
+    ag = LearningAgent("x", env, Consent(frozenset({"cure_logistic_v1"}), frozenset({"margin_call_outcome"})),
+                       coord.identity.public)
+    pkg = {"round": 1, "algorithm": "cure_logistic_v1", "params": {"epochs": 10_000}, "global_model": [0.0] * 8,
+           "feature_mean": [0.0] * 7, "feature_sd": [1.0] * 7, "planned": 3}
+    with pytest.raises(AgentRefusal):
+        ag.advertise(pkg, coord.identity.sign(pkg))
+    # privacy preflight reserves budget for the minimum survivor count
+    from app.federation.privacy import PrivacyBudget
+    b = PrivacyBudget(6.0)
+    assert b.can_run(1.0) and not b.can_run(1.0 * (4 / 6) ** 0.5)
+    with pytest.raises(RoundError):
+        Coordinator(ModelRegistry("unused2.jsonl")).run_round({}, "cure_logistic_v1", {}, [0.0], [1.0])
+
+
+def test_noise_is_not_reproducible_from_public_metadata() -> None:
+    """Two agents with identical data and package must add different privacy noise."""
+    from app.federation.agent import Consent, DataEnvironment, LearningAgent
+    rng = np.random.default_rng(0)
+    x, y = rng.normal(size=(200, 7)), (rng.random(200) < 0.5).astype(float)
+    env = DataEnvironment({"margin_call_outcome": (x, y)}, {"margin_call_outcome": (x[:50], y[:50])})
+    cons = Consent(frozenset({"cure_logistic_v1"}), frozenset({"margin_call_outcome"}))
+    pkg = {"round": 1, "algorithm": "cure_logistic_v1", "global_model": [0.0] * 8, "feature_mean": [0.0] * 7,
+           "feature_sd": [1.0] * 7, "planned": 3,
+           "params": {"epochs": 1, "lr": 0.1, "l2": 0.0, "prox_mu": 0.0, "clip": 1.0, "noise_multiplier": 1.0,
+                      "weight_cap": 100}}
+    outs = []
+    for _ in range(2):
+        a = LearningAgent("same", env, cons, b"")
+        a._round = {"t0": __import__("time").monotonic()}
+        outs.append(a._compute(pkg)[0])
+    assert not np.allclose(outs[0], outs[1])

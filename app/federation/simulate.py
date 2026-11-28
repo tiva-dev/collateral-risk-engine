@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -102,20 +104,24 @@ def build(seed: int) -> tuple[dict[str, DataEnvironment], dict[str, dict[str, tu
 
 def run(seed: int = 7, rounds: int = 15, noise_multiplier: float = 0.8, eps_limit: float = 20.0) -> dict[str, Any]:
     envs, tests = build(seed)
-    registry = ModelRegistry(f"/tmp/cri-federation-{seed}.jsonl")
-    if registry.path.exists():
-        registry.path.unlink()
+    registry = ModelRegistry(Path(tempfile.mkdtemp()) / f"cri-federation-{seed}.jsonl")
     coord = Coordinator(registry, min_participants=3)
     consent = Consent(frozenset({"cure_logistic_v1", "slippage_ols_v1", "duration_ols_v1"}),
                       frozenset({"margin_call_outcome", "liquidation_execution", "recovery_episode"}))
     # each institution holds its own consent (pause / withdraw affect only itself)
     agents = {n: LearningAgent(n, e, replace(consent), coord.identity.public) for n, e in envs.items()}
     demo: dict[str, Any] = {}
+    for n, a in agents.items():                       # onboarding: identities enrolled out of band
+        coord.enroll(n, a.identity.public)
     # 1. automated registration (signed); a forged registration is refused
     demo["1_registration"] = {n: coord.register(a.registration()) for n, a in agents.items()}
     forged = agents["fintech_US"].registration()
     forged["payload"]["institution"] = "impostor"
     demo["1_forged_registration_accepted"] = coord.register(forged)
+    from app.federation import crypto as _c
+    hijacker = _c.Identity.generate()                 # fresh key claiming an enrolled institution
+    hp = {**agents["bank_NGX"].registration()["payload"], "identity": hijacker.public.hex()}
+    demo["1_hijack_registration_accepted"] = coord.register({"payload": hp, "signature": hijacker.sign(hp).hex()})
     # feature standardisation: a public, schema-level reference (no institution data)
     ref = np.r_[[0.1, 4.0, 11.0, 5.0, 0.6, 0.25, 0.65]]
     refsd = np.r_[[0.07, 2.0, 1.6, 3.5, 0.8, 0.43, 0.18]]

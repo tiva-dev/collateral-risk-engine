@@ -18,6 +18,7 @@ is automatic. Guarantees enforced here:
 
 from __future__ import annotations
 
+import secrets
 import time
 import zlib
 from dataclasses import dataclass, field
@@ -39,6 +40,12 @@ from app.federation.privacy import agent_noise, clip
 
 class AgentRefusal(PermissionError):
     pass
+
+
+# Value bounds for every allow-listed parameter (bounded work and sane privacy settings).
+PARAM_BOUNDS: dict[str, tuple[float, float]] = {
+    "epochs": (1, 20), "lr": (1e-4, 1.0), "l2": (0.0, 10.0), "prox_mu": (0.0, 100.0), "clip": (1e-3, 100.0),
+    "noise_multiplier": (0.0, 20.0), "weight_cap": (1, 1_000_000), "min_rows": (10, 1_000_000)}
 
 
 @dataclass
@@ -103,6 +110,11 @@ class LearningAgent:
             raise AgentRefusal("algorithm or data scope not authorised by the institution")
         if set(package.get("params", {})) - alg.params:
             raise AgentRefusal("unexpected parameters")
+        for k, v in package.get("params", {}).items():
+            if k in PARAM_BOUNDS:
+                lo, hi = PARAM_BOUNDS[k]
+                if not (isinstance(v, (int, float)) and lo <= v <= hi):
+                    raise AgentRefusal(f"parameter {k}={v!r} outside the allowed range [{lo}, {hi}]")
         if "code" in package or "script" in package:
             raise AgentRefusal("remote code is never executed")
         if self.env.rows(alg.schema) > self.consent.max_rows:
@@ -155,7 +167,11 @@ class LearningAgent:
         rnd = self._round
         pkg = rnd["package"]
         alg = REGISTRY[pkg["algorithm"]]
-        contribution, local_metrics = self._compute(pkg)
+        from app.federation.algorithms import TimeBudgetExceeded
+        try:
+            contribution, local_metrics = self._compute(pkg)
+        except TimeBudgetExceeded as e:
+            raise AgentRefusal(str(e)) from e
         if time.monotonic() - rnd["t0"] > self.consent.max_seconds:
             raise AgentRefusal("time budget exceeded")
         k = len(pkg["feature_mean"])
@@ -196,11 +212,15 @@ class LearningAgent:
             return s, {"rows_used": int(y.size >= p.get("min_rows", 30))}
         w0 = np.array(pkg["global_model"])
         rng = np.random.default_rng(pkg["round"] * 1009 + zlib.crc32(self.institution.encode()) % 1000)
-        w = logistic_fit(xs, y, w0, epochs=p["epochs"], lr=p["lr"], l2=p["l2"], prox_mu=p["prox_mu"], rng=rng)
+        deadline = self._round["t0"] + self.consent.max_seconds
+        w = logistic_fit(xs, y, w0, epochs=p["epochs"], lr=p["lr"], l2=p["l2"], prox_mu=p["prox_mu"], rng=rng,
+                         deadline=deadline)
         delta, clipped = clip(w - w0, p["clip"])
         weight = float(min(y.size, p["weight_cap"]))
+        # privacy noise from private, non-reproducible entropy (never from public round metadata)
+        noise_rng = np.random.default_rng(secrets.randbits(128))
         noisy = weight * delta + agent_noise(delta.size, weight * p["clip"], p["noise_multiplier"],
-                                             pkg["planned"], rng)
+                                             pkg["planned"], noise_rng)
         hx, hy = self.env._holdout[alg.schema]
         m = metrics(hy, logistic_predict(standardise(hx, mu, sd), w0)) if hy.size >= 30 else {}
         return np.r_[noisy, weight], {"global_model_holdout": m, "clipped": clipped}
