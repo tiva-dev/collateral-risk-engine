@@ -385,6 +385,14 @@ def inputs_digest(rows_by_symbol: dict[str, list[dict[str, Any]]], decision: dat
                                      for s, v in sorted(rows_by_symbol.items())})).hexdigest()
 
 
+def last_completed_session_day(now_utc: datetime) -> date:
+    """Latest calendar day whose US daily bar is final and older than the 15-minute SIP
+    embargo: today after 16:20 New York time, otherwise yesterday."""
+    from zoneinfo import ZoneInfo
+    ny = now_utc.astimezone(ZoneInfo("America/New_York"))
+    return ny.date() if (ny.hour, ny.minute) >= (16, 20) else ny.date() - timedelta(days=1)
+
+
 def cmd_forecast(a: argparse.Namespace) -> None:
     from app.historical_data.alpaca import AlpacaTradingHistoricalProvider
     base = _base(a.out)
@@ -392,7 +400,7 @@ def cmd_forecast(a: argparse.Namespace) -> None:
     if got is None:
         raise SystemExit("no frozen artifact")
     art = load_artifact(got[0])
-    today = date.fromisoformat(a.asof) if a.asof else datetime.now(UTC).date()
+    today = date.fromisoformat(a.asof) if a.asof else last_completed_session_day(datetime.now(UTC))
     prov = AlpacaTradingHistoricalProvider()
     rows_by_symbol = {}
     for s in art["universe"]:

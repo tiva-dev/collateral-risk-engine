@@ -160,3 +160,10 @@ def test_inputs_digest_covers_every_feature_field(frozen) -> None:
     for k, v in (("open", 1.01), ("high", 1.3), ("low", 0.8), ("range_reported", False), ("volume_reported", False)):
         changed = {"AAA": [{**rows["AAA"][0], k: v}]}
         assert ch.inputs_digest(changed, date(2026, 1, 2)) != d0, k
+
+
+def test_default_decision_day_respects_the_close_and_sip_embargo() -> None:
+    from datetime import UTC, date, datetime
+    assert ch.last_completed_session_day(datetime(2026, 11, 30, 18, 0, tzinfo=UTC)) == date(2026, 11, 29)  # 13:00 NY
+    assert ch.last_completed_session_day(datetime(2026, 11, 30, 21, 25, tzinfo=UTC)) == date(2026, 11, 30)  # 16:25 NY
+    assert ch.last_completed_session_day(datetime(2026, 7, 1, 20, 10, tzinfo=UTC)) == date(2026, 6, 30)     # 16:10 EDT
