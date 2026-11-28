@@ -1,1 +1,1 @@
-{"note": "RC1 acceptance measurements NGX, frozen 2000 paths, partitioned", "source_run_id": "45681534542", "variant_set": "rc1", "shards": 8, "paths": 2000, "parts": ["hist-NGX", "sim-NGX", "repay-NGX", "frontier-NGX"]}
+{"source_run_id": "45873299276", "parts": ["frontier-US"], "shards": 8, "paths": 400, "variant_set": "rc1", "scales": [0.75, 1.0, 1.25, 1.5, 1.75, 2.0], "note": "M4 full-lifecycle frontier (US): RC1 at multiples of its own approved credit; examined data only"}
