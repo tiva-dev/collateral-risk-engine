@@ -800,6 +800,14 @@ def test_paydown_is_sized_jointly_and_never_chases_capacity() -> None:
             c = run_cohort(holdings=hs, bars=bars, origination=dates[o], term_sessions=63, seed=3,
                            maturity="refinance", config=CandidateConfig(n_paths=200), workout_sessions=40,
                            principal_scale=sc, workout_policy="selective", refinance_policy="paydown")
+            for pol in ("sell_all", "planner"):
+                alt = run_cohort(holdings=hs, bars=bars, origination=dates[o], term_sessions=63, seed=3,
+                                 maturity="refinance", config=CandidateConfig(n_paths=200), workout_sessions=40,
+                                 principal_scale=sc, workout_policy=pol, refinance_policy="paydown")
+                for v in alt["variants"].values():
+                    if v["maturity_outcome"] == "paydown_failed_full_workout":
+                        assert v["censored"] or v["status"] in ("recovered", "loss")
+                        assert v["residual_collateral_estimate"] == 0 or v["censored"]   # remaining holdings sold
             for v in c["variants"].values():
                 assert v["maturity_outcome"] in ("refinanced", "paydown_refinance", "paydown_infeasible_full_workout",
                                                  "paydown_failed_full_workout", "in_recovery", "")

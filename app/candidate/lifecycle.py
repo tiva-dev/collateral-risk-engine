@@ -687,6 +687,13 @@ def run_cohort(
                         refinance_limit = workout_target = 0.0
                         out.maturity_outcome = "paydown_failed_full_workout"
                         out.defaulted_at_maturity = True
+                        if workout_policy == "sell_all":
+                            orders = {k: q for k, q in qty.items() if k not in cash_keys and q > 0}
+                        elif workout_policy == "planner":
+                            orders, _ = plan(v, qty, loan, d, md, MarginState.LIQUIDATION, ltv0, False,
+                                             full_repayment=True)
+                            orders = orders or {k: q for k, q in qty.items() if k not in cash_keys and q > 0}
+                        submit_from = i + 1         # selective re-plans below every session
                 if workout_target > 0 and not pending and loan.balance - cash_now <= refinance_limit:
                     loan = repay(loan, cash_now)
                     for k in cash_keys:
