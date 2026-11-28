@@ -472,6 +472,41 @@ resource "google_storage_bucket" "research" {
   }
 }
 
+# Curated research datasets (CRI Intelligence and Federation benchmarks).
+# Information boundary by access control: research and training jobs can read
+# only objects under examined/ (data on or before the RC1 examined-through
+# date); nothing else in this bucket is readable by them. The publishing
+# workflow (cri-deployer via Workload Identity) can create objects but not
+# overwrite or delete them, so a published dataset version is immutable.
+resource "google_storage_bucket" "research_data" {
+  project                     = var.project_id
+  name                        = "${var.project_id}-research-data"
+  location                    = var.region
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  labels                      = merge(local.labels, { workstream = "intelligence" })
+  versioning {
+    enabled = true
+  }
+}
+
+resource "google_storage_bucket_iam_member" "research_data_publisher" {
+  bucket = google_storage_bucket.research_data.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+resource "google_storage_bucket_iam_member" "research_data_examined_reader" {
+  bucket = google_storage_bucket.research_data.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.jobs.email}"
+  condition {
+    title       = "examined-tier-only"
+    description = "Research jobs read only the examined tier; the RC1 locked period is never exposed."
+    expression  = "resource.name.startsWith(\"projects/_/buckets/${var.project_id}-research-data/objects/examined/\")"
+  }
+}
+
 # Daily logical exports of the database to a second region (disaster recovery,
 # independent of Cloud SQL's own backups).
 resource "google_storage_bucket" "db_exports" {
@@ -889,6 +924,7 @@ resource "google_cloud_run_v2_job" "jobs" {
           for_each = merge(local.common_env, {
             CRI_SERVICE_ROLE          = "job"
             CRI_RESEARCH_BUCKET       = google_storage_bucket.research.name
+            CRI_RESEARCH_DATA_BUCKET  = google_storage_bucket.research_data.name
             HISTORICAL_DATA_CACHE_DIR = "/tmp/cri-cache"
             SIMULATION_OUTPUT_DIR     = "/tmp/cri-out"
           })

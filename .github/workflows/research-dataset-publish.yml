@@ -1,0 +1,125 @@
+name: Research Dataset Publish
+
+# Publishes the previously examined US and NGX provider data (RC1 release
+# manifest, docs/governance/DATA_TIERS.md) as private, checksummed research
+# datasets in the staging research-data bucket, under examined/. The data are
+# verified against the provider snapshot, physically cut at the examined-through
+# boundary, and published to versioned, non-overwritable paths. Nothing from the
+# RC1 locked evaluation period is published.
+
+on:
+  workflow_dispatch:
+    inputs:
+      market:
+        description: "US, NGX or both"
+        default: both
+        type: choice
+        options: [both, US, NGX]
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: research-dataset-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - market: US
+            source_run: "45873299276"
+            snapshot_id: cfa1e9c2f3a34b326a2422481f0e9d261e1a63098a2a4a9b7635ca76cdf6ccdd
+          - market: NGX
+            source_run: "45681534542"
+            snapshot_id: 3410aba88472a047143e2c392f50071c387ba1914b033fba28c2e8de629c5205
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Select market
+        id: sel
+        run: |
+          if [ "${{ inputs.market }}" = both ] || [ "${{ inputs.market }}" = "${{ matrix.market }}" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.sel.outputs.run == 'true'
+      - uses: actions/setup-python@v5
+        if: steps.sel.outputs.run == 'true'
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        if: steps.sel.outputs.run == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Download evidence artifact
+        if: steps.sel.outputs.run == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: official-provider-validation-evidence
+          run-id: ${{ matrix.source_run }}
+          github-token: ${{ github.token }}
+          path: data
+      - name: Download snapshot artifact
+        if: steps.sel.outputs.run == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: historical-data-snapshot
+          run-id: ${{ matrix.source_run }}
+          github-token: ${{ github.token }}
+          path: snapshots
+      - name: Verify snapshot identity and replay inputs
+        if: steps.sel.outputs.run == 'true'
+        run: |
+          snap=$(dirname "$(find snapshots -name SNAPSHOT.json | head -n 1)")
+          python -m app.historical_data.snapshot verify "$snap"
+          python - "$snap" "${{ matrix.snapshot_id }}" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          snap = json.loads((Path(sys.argv[1]) / "SNAPSHOT.json").read_text())
+          if snap["snapshot_id"] != sys.argv[2]:
+              sys.exit(f"snapshot id {snap['snapshot_id']} is not the RC1-recorded {sys.argv[2]}")
+          manifest = next(Path("data/simulation_results").glob("*.manifest.json"))
+          m = json.loads(manifest.read_text())
+          want = {e["original_path"]: e["sha256"] for e in snap["entries"] if not e.get("missing")}
+          bad = [p for p in m["cache_paths"] + m.get("alternate_fx_cache_paths", [])
+                 if want.get(p) != hashlib.sha256(Path(p).read_bytes()).hexdigest()]
+          print(f"snapshot {snap['snapshot_id']}: {len(m['cache_paths'])} replay inputs, {len(bad)} mismatches")
+          sys.exit(1 if bad else 0)
+          PY
+      - name: Build dataset (cut at the examined-through boundary)
+        if: steps.sel.outputs.run == 'true'
+        id: build
+        run: |
+          manifest=$(find data/simulation_results -name '*.manifest.json' | head -n 1)
+          python -m app.learning.datasets build "$manifest" --market ${{ matrix.market }} \
+            --source-run ${{ matrix.source_run }} --snapshot-id ${{ matrix.snapshot_id }} --out ds | tee build.json
+          python -m app.learning.datasets verify ds
+          echo "id=$(python -c 'import json;print(json.load(open("ds/DATASET.json"))["dataset_id"])')" >> "$GITHUB_OUTPUT"
+      - id: cfg
+        if: steps.sel.outputs.run == 'true'
+        run: echo "ops_number=$(cat infra/terraform/OPS_PROJECT_NUMBER)" >> "$GITHUB_OUTPUT"
+      - uses: google-github-actions/auth@v2
+        if: steps.sel.outputs.run == 'true'
+        with:
+          workload_identity_provider: projects/${{ steps.cfg.outputs.ops_number }}/locations/global/workloadIdentityPools/github/providers/cri-repo
+          service_account: cri-deployer@tiva-cri-stg-cda9.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+        if: steps.sel.outputs.run == 'true'
+      - name: Publish (create-only; existing versions are never overwritten)
+        if: steps.sel.outputs.run == 'true'
+        run: |
+          dest="gs://tiva-cri-stg-cda9-research-data/examined/${{ matrix.market }}/${{ steps.build.outputs.id }}"
+          for f in bars.csv.gz fx.csv.gz DATASET.json; do
+            gcloud storage cp --no-clobber "ds/$f" "$dest/$f"
+          done
+          echo "published $dest"
+          echo "### ${{ matrix.market }} research dataset" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat build.json >> "$GITHUB_STEP_SUMMARY"; echo "$dest" >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"

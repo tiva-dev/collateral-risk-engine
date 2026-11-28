@@ -1,0 +1,80 @@
+"""CRI Intelligence: research dataset boundary and integrity; benchmark pipeline."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import date, timedelta
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from app.learning.datasets import BAR_FIELDS, DatasetError, _gz_csv, _sha256, load_research_dataset
+
+
+def write_dataset(out: Path, market: str = "US", n_sym: int = 10, start: date = date(2018, 1, 2),
+                  end: date = date(2026, 11, 25), tier: str = "examined", boundary: str = "2026-11-25",
+                  seed: int = 3) -> Path:
+    rng = np.random.default_rng(seed)
+    rows = []
+    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    days = [d for d in days if d.weekday() < 5]
+    for k in range(n_sym):
+        p = 50.0 + 10 * k
+        vol = 0.01 + 0.004 * k
+        regime = 1.0
+        for d in days:
+            if rng.random() < 0.01:
+                regime = 2.5 if regime == 1.0 else 1.0          # persistent vol regimes (predictable)
+            r = rng.standard_t(4) * vol * regime / np.sqrt(2)
+            o = p
+            p *= float(np.exp(r))
+            rows.append([f"S{k}", d.isoformat(), o, max(o, p) * 1.003, min(o, p) * 0.997, p, p,
+                         1e6 * (1 + k), "", "USD", "traded", 1, 1, 1.0])
+    out.mkdir(parents=True, exist_ok=True)
+    _gz_csv(out / "bars.csv.gz", BAR_FIELDS, rows)
+    _gz_csv(out / "fx.csv.gz", ["from", "to", "date", "rate"], [])
+    files = [{"name": n, "sha256": _sha256(out / n), "bytes": (out / n).stat().st_size}
+             for n in ("bars.csv.gz", "fx.csv.gz")]
+    meta = {"dataset_id": f"{market.lower()}-" + hashlib.sha256(files[0]["sha256"].encode()).hexdigest()[:8],
+            "market": market, "tier": tier, "boundary": boundary, "first_date": start.isoformat(),
+            "last_date": end.isoformat(), "rows": len(rows), "files": files}
+    (out / "DATASET.json").write_text(json.dumps(meta))
+    return out
+
+
+def test_loader_enforces_boundary_tier_and_checksums(tmp_path) -> None:
+    ok = write_dataset(tmp_path / "ok", n_sym=2, start=date(2026, 1, 2))
+    assert len(load_research_dataset(ok).bars) == 2
+    with pytest.raises(DatasetError):
+        load_research_dataset(write_dataset(tmp_path / "late", n_sym=1, start=date(2026, 11, 1),
+                                            end=date(2026, 11, 27)))
+    with pytest.raises(DatasetError):
+        load_research_dataset(write_dataset(tmp_path / "b", n_sym=1, start=date(2026, 11, 1),
+                                            boundary="2026-11-27"))
+    with pytest.raises(DatasetError):
+        load_research_dataset(write_dataset(tmp_path / "t", n_sym=1, start=date(2026, 11, 1), tier="locked"))
+    bad = write_dataset(tmp_path / "x", n_sym=1, start=date(2026, 11, 1))
+    (bad / "fx.csv.gz").write_bytes(b"tampered")
+    with pytest.raises(DatasetError):
+        load_research_dataset(bad)
+
+
+def test_benchmark_pipeline_runs_and_is_point_in_time(tmp_path) -> None:
+    from app.intelligence.benchmark import _splits, build_panel, evaluate, fit_predict
+    ds = load_research_dataset(write_dataset(tmp_path / "d", n_sym=10))
+    p = build_panel([ds], step=20, rc1=True)
+    sp = _splits(p)
+    assert sp["train"].any() and sp["val"].any() and sp["test"].any() and sp["test_unseen"].any()
+    # embargo: no training target window reaches into validation
+    assert p.day[sp["train"]].max() + 15 < p.day[sp["val"]].min()
+    preds = fit_predict(p, sp)
+    ev = evaluate(p, sp, preds)
+    t = ev["test"]
+    assert set(t) >= {"rc1", "har", "ridge", "gbt", "hier", "gbt_q"}
+    for name in ("rc1", "har", "gbt"):
+        assert 0.0 <= t[name]["exceedance_rate"] <= 0.25
+        assert 0.0 < t[name]["mean_ltv_ex_ante"] < 1.0
+    # learned models exploit persistent regimes that a long-memory estimator smooths over
+    assert t["gbt"]["qlike"] < t["rc1"]["qlike"] * 1.5
