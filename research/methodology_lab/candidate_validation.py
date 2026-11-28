@@ -543,7 +543,8 @@ def main() -> None:
     for r in results:
         parts = r["group"].split("|")
         key = "|".join(parts[:2]) if parts[0] in ("sim", "simpolicy", "repay", "frontier", "f2", "fs") else \
-            f"{parts[0]}|{parts[-1]}" if parts[0] in ("hist", "histpolicy") else parts[0]
+            f"{parts[0]}|{parts[-1]}" if parts[0] in ("hist", "histpolicy") else \
+            "|".join(parts[:5]) if parts[0] == "wo" else parts[0]   # wo|case|refinance|workout|scale
         pools.setdefault(key, []).append(r)
     # Compact per-cohort records (no event logs), gzip+base64, so partitioned jobs can be
     # pooled exactly in analysis: one COHORTS line per 200 cohorts.

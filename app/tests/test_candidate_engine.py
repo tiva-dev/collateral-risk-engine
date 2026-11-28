@@ -784,6 +784,8 @@ def test_workout_policies_on_common_paths() -> None:
     assert a["maturity_outcome"] == "refinance_refused" and b["maturity_outcome"] == "paydown_refinance"
     assert b["status"] == "recovered" and b["lender_loss"] == 0.0
     assert b["refinanced_amount"] > 0 and b["executed_gross_workout"] < a["executed_gross_workout"]
+    # Refinanced only within the capacity of the collateral left after the paydown sales.
+    assert b["refinanced_amount"] <= b["refinance_capacity"] + 1e-6
     assert not b["defaulted_at_maturity"]
     with pytest.raises(ValueError):
         run_cohort(**kw, workout_policy="fire_sale")

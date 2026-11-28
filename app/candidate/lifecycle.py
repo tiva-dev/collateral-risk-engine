@@ -158,6 +158,7 @@ class Outcome:
     workout_end: int = -1
     workout_policy: str = ""
     refinanced_amount: float = 0.0           # debt moved to a new facility at maturity (still owed by the borrower)
+    refinance_capacity: float = 0.0          # capacity of the remaining collateral when the paydown refinanced
     executed_gross_intervention: float = 0.0
     executed_gross_workout: float = 0.0
     maturity_outcome: str = ""              # repaid | partial_then_default | refinanced | refinance_refused | default | in_recovery | ""
@@ -465,7 +466,7 @@ def run_cohort(
             hs_ = _half_spread(b, prof.spread_floor, prof.spread_fallback) if (b and prof) else 0.02
             sig = vol20[dk].get(d, 0.02)
             cost = hs_ + cfg.impact_coefficient * sig * math.sqrt(part) + execution.execution_cost_rate
-            days = (q / (part * adv) if adv > 0 else 60.0) + settle
+            days = (q / (part * adv) if adv > 0 else 60.0) + settle_at(d)
             buf = max(0.02, 1.645 * sig * math.sqrt(max(1.0, days)))
             return px * max(0.0, 1 - cost) * (1 - buf), cost
         covered = sum(expect(k, q)[0] * q for k, q in existing.items() if q > 0)
@@ -656,6 +657,21 @@ def run_cohort(
                                    "balance": loan.balance})
             if episode == "workout":
                 cash_now = sum(q for k, q in qty.items() if k in cash_keys)
+                if workout_target > 0 and not pending and loan.balance - cash_now <= refinance_limit:
+                    # Sales reduced the collateral behind the capacity: re-evaluate on what is left
+                    # before refinancing; if the residual capacity is lower, keep selling down.
+                    if v.kind == "adaptive":
+                        th_r = evaluate(v.engine, qty, loan, d, md).thresholds
+                        cap_r = min(th_r["initial_capacity_uncapped"], th_r["client_ceiling"])
+                    else:
+                        cap_r = ltv0 * value
+                    out.refinance_capacity = cap_r
+                    if loan.balance - cash_now > cap_r:
+                        refinance_limit = cap_r
+                        workout_target = 0.98 * cap_r
+                        if workout_target <= 0:
+                            out.maturity_outcome = "paydown_failed_full_workout"
+                            out.defaulted_at_maturity = True
                 if workout_target > 0 and not pending and loan.balance - cash_now <= refinance_limit:
                     loan = repay(loan, cash_now)
                     for k in cash_keys:
