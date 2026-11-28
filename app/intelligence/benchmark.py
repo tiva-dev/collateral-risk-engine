@@ -267,13 +267,16 @@ def fit_predict(p: Panel, sp: dict[str, np.ndarray], seed: int = 7) -> dict[str,
     out["gbt_q"] = {"q": gq.predict(p.X)}
     for d in out.values():
         if "sigma" in d:
-            z = np.full(p.rv.size, np.nan)
-            for m in np.unique(p.market):           # calibrated per market on training rows
-                ok = tr & (p.market == m) & np.isfinite(d["sigma"]) & (d["sigma"] > 0)
-                if ok.any():
-                    z[p.market == m] = float(np.quantile(p.ret[ok] / d["sigma"][ok], Q))
+            pooled = tr & np.isfinite(d["sigma"]) & (d["sigma"] > 0)
+            z_all = float(np.quantile(p.ret[pooled] / d["sigma"][pooled], Q))
+            z = np.full(p.rv.size, z_all)
+            zm: dict[str, float] = {}
+            for m in np.unique(p.market):           # per market; pooled fallback without training rows
+                ok = pooled & (p.market == m)
+                zm[str(m)] = float(np.quantile(p.ret[ok] / d["sigma"][ok], Q)) if ok.any() else z_all
+                z[p.market == m] = zm[str(m)]
             d["q"] = d["sigma"] * z
-            d["z"] = np.array([float(np.nanmean(np.unique(z[np.isfinite(z)])))])
+            d["z_by_market"] = zm  # type: ignore[assignment]
     return out
 
 
@@ -410,7 +413,7 @@ def main() -> None:
               "panel": {"rows": int(panel.X.shape[0]), "instruments": len(set(panel.sym)),
                         **{k: int(v.sum()) for k, v in sp.items()}},
               "hier_shrinkage_k": float(preds["hier"]["k"][0]),
-              "z_q05": {k: float(v["z"][0]) for k, v in preds.items() if "z" in v},
+              "z_q05_by_market": {k: v["z_by_market"] for k, v in preds.items() if "z_by_market" in v},
               "vol_floor_by_market": {m: float(preds["_floor"]["floor"][panel.market == m][0])
                                       for m in sorted(set(panel.market))},
               "results": ev, "qlike_minus_rc1_block_bootstrap": boot, "seconds": round(time.time() - t0, 1)}

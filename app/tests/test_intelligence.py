@@ -112,3 +112,18 @@ def test_stale_price_windows_do_not_degenerate_forecasts(tmp_path) -> None:
         assert t[name]["qlike"] < 5.0                             # v1: thousands
         assert t[name]["mean_ltv_ex_ante"] > 0.5                  # v1: ~0
         assert 0.0 <= t[name]["exceedance_rate"] <= 0.2
+
+
+def test_market_without_training_rows_uses_pooled_calibration(tmp_path) -> None:
+    from app.intelligence.benchmark import _splits, build_panel, evaluate, fit_predict
+    us = load_research_dataset(write_dataset(tmp_path / "u", n_sym=8))
+    ng = load_research_dataset(write_dataset(tmp_path / "n", market="NGX", n_sym=4, start=date(2023, 1, 2), seed=9))
+    p = build_panel([us, ng], step=20)
+    sp = _splits(p)
+    assert not (sp["train"] & (p.market == "NGX")).any()        # NGX history starts after TRAIN_END
+    preds = fit_predict(p, sp)
+    for name in ("har", "ridge", "gbt", "hier", "rc1"):
+        assert np.all(np.isfinite(preds[name]["q"]))
+        assert set(preds[name]["z_by_market"]) == {"US", "NGX"}
+    t = evaluate(p, sp, preds)["test"]
+    assert np.isfinite(t["ridge"]["pinball_q05"])
