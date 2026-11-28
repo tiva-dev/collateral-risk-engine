@@ -81,6 +81,29 @@ class Tool:
     mutates: bool = False   # every registered tool must be read-only
 
 
+# Every capacity figure the Analyst returns carries its category, so approved RC1 credit is
+# never presented as, or next to without distinction from, experimental or research estimates.
+CAPACITY_CLASSIFICATION: dict[str, dict[str, str]] = {
+    "rc1_approved_credit_limit": {
+        "category": "approved_rc1_credit",
+        "meaning": "credit limit under the approved RC1 methodology (contractual ceiling applied)"},
+    "risk_supported_capacity": {
+        "category": "experimental_capacity",
+        "meaning": "research capacity supported by an illustrative appetite preset; not approved for lending"},
+    "risk_supported_ltv": {
+        "category": "experimental_capacity",
+        "meaning": "the experimental capacity as a fraction of collateral value; not approved for lending"},
+    "points": {
+        "category": "recovery_conditional_estimate",
+        "meaning": "shortfall probability and tail given that a recovery is triggered at that balance; "
+                   "not a lifetime loss probability"},
+    "lifetime_estimates": {
+        "category": "lifetime_risk_estimate",
+        "meaning": "not produced for a single account: lifetime loss, ES99 and economics come from the "
+                   "portfolio-level lifecycle frontier (RC2 research)"},
+}
+
+
 class Toolset:
     def __init__(self, book: BookSource, n_paths: int = 800):
         self.book = book
@@ -186,6 +209,7 @@ class Toolset:
                 "appetite": appetite, "risk_supported_capacity": round(cap["risk_supported_capacity"], 2),
                 "risk_supported_ltv": round(cap["risk_supported_ltv"], 4) if cap["risk_supported_ltv"] else None,
                 "rc1_approved_credit_limit": round(cap["rc1_approved_credit_limit"], 2),
+                "classification": CAPACITY_CLASSIFICATION,
                 "caution": "recovery-conditional view; appetite presets are illustrative research settings, "
                            "not Tiva's production risk appetite"}
 
