@@ -111,10 +111,15 @@ def ols_from_suffstats(s: np.ndarray, k: int) -> dict[str, Any]:
     xtx[iu] = s[:m]
     xtx = xtx + xtx.T - np.diag(np.diag(xtx))
     xty, yty, n = s[m:m + p], s[m + p], s[m + p + 1]
-    inv = np.linalg.inv(xtx + 1e-9 * np.eye(p))
+    # Noisy (differentially private) statistics need not be positive definite: floor the
+    # spectrum before inverting (no effect on exact statistics of full-rank data).
+    ev, vec = np.linalg.eigh(xtx)
+    floor = max(1e-9, 1e-6 * float(max(ev.max(), 1.0)))
+    xtx = (vec * np.maximum(ev, floor)) @ vec.T
+    inv = np.linalg.inv(xtx)
     beta = inv @ xty
     resid_ss = max(yty - 2 * beta @ xty + beta @ xtx @ beta, 0.0)
-    sigma = math.sqrt(resid_ss / max(n - p, 1))
+    sigma = math.sqrt(resid_ss / max(n - p, 1)) if n > p else math.nan
     return {"beta": beta, "sigma": sigma, "n": n, "se": sigma * np.sqrt(np.diag(inv))}
 
 
@@ -132,7 +137,9 @@ REGISTRY: dict[str, Algorithm] = {
                                   frozenset({"epochs", "lr", "l2", "prox_mu", "clip", "noise_multiplier",
                                              "weight_cap"})),
     "slippage_ols_v1": Algorithm("slippage_ols_v1", "liquidation_execution", "statistics",
-                                 lambda k: (k + 1) * (k + 2) // 2 + (k + 1) + 2, frozenset({"min_rows"})),
+                                 lambda k: (k + 1) * (k + 2) // 2 + (k + 1) + 2,
+                                 frozenset({"min_rows", "noise_multiplier"})),
     "duration_ols_v1": Algorithm("duration_ols_v1", "recovery_episode", "statistics",
-                                 lambda k: (k + 1) * (k + 2) // 2 + (k + 1) + 2, frozenset({"min_rows"})),
+                                 lambda k: (k + 1) * (k + 2) // 2 + (k + 1) + 2,
+                                 frozenset({"min_rows", "noise_multiplier"})),
 }

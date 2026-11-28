@@ -14,7 +14,12 @@ from app.federation.simulate import run
 
 @pytest.fixture(scope="module")
 def demo():
-    return run(seed=7, rounds=5, noise_multiplier=1.0, eps_limit=40.0)
+    return run(seed=7, rounds=5, noise_multiplier=1.0, eps_limit=40.0, weight_cap=1)
+
+
+@pytest.fixture(scope="module")
+def exact():
+    return run(seed=7, rounds=2, noise_multiplier=0.0)
 
 
 def test_registration_rounds_dropout_and_privacy(demo) -> None:
@@ -40,9 +45,13 @@ def test_registry_release_personalisation_and_withdrawal(demo) -> None:
     assert len(demo["9_withdrawal"]["participants_after"]) == 5
 
 
-def test_federated_statistics_equal_pooled_estimate(demo) -> None:
+def test_federated_statistics_equal_pooled_estimate(exact, demo) -> None:
     for alg in ("slippage_ols_v1", "duration_ols_v1"):
-        s = demo["statistics"][alg]
+        dp = demo["statistics"][alg]
+        assert dp["privacy"] == "record-level DP" and dp["epsilon_spent"] > 0
+        assert 0 < dp["max_abs_diff_vs_pooled"] < 0.5                 # noisy but usable at this size
+        s = exact["statistics"][alg]
+        assert s["privacy"].startswith("secure aggregation only")
         assert s["max_abs_diff_vs_pooled"] < 1e-6
         gains = s["participation_slope_se"]["precision_gain_vs_local"]
         assert min(gains.values()) >= 1.0 and gains["wealth_NGX"] > gains["retail_broker_US"]
@@ -161,4 +170,76 @@ def test_simulation_refuses_when_budget_permits_no_round() -> None:
     from app.federation.coordinator import RoundError
     from app.federation.simulate import run
     with pytest.raises(RoundError, match="privacy budget"):
-        run(seed=7, rounds=2, noise_multiplier=1.0, eps_limit=0.0)
+        run(seed=7, rounds=2, noise_multiplier=1.0, eps_limit=0.5)
+
+
+def test_noise_is_calibrated_to_the_unit_sensitivity_not_own_weight() -> None:
+    from app.federation.privacy import agent_noise, ml_sensitivity, record_sensitivity
+    rng = np.random.default_rng(0)
+    s = ml_sensitivity(1.0, 1500)
+    assert s == pytest.approx(1500 * 2 ** 0.5)
+    n = np.stack([agent_noise(8, s, 1.0, 6, rng) for _ in range(6 * 4000)]).reshape(4000, 6, 8).sum(axis=1)
+    assert n.std() == pytest.approx(s, rel=0.03)                     # the sum carries z * S
+    assert record_sensitivity(3) > record_sensitivity(1) > 1
+
+
+def test_ledger_persists_composes_and_detects_tampering(tmp_path) -> None:
+    from app.federation.privacy import PrivacyLedger, rdp_epsilon
+    p = tmp_path / "l.jsonl"
+    led = PrivacyLedger(10.0, path=p)
+    led.charge("a|institution", 2.0, round=1)
+    led.charge("a|institution", 2.0, round=2)
+    again = PrivacyLedger(10.0, path=p)                               # restart: replayed, not reset
+    assert again.spent("a|institution") == pytest.approx(rdp_epsilon([2.0, 2.0], 1e-6))
+    assert again.spent("b|record") == 0.0
+    with pytest.raises(PermissionError):
+        PrivacyLedger(1.0, path=tmp_path / "x.jsonl").charge("a|institution", 0.5)
+    lines = p.read_text().splitlines()
+    p.write_text(lines[0].replace('"z_eff": 2.0', '"z_eff": 20.0') + "\n" + lines[1] + "\n")
+    with pytest.raises(ValueError):
+        PrivacyLedger(10.0, path=p)
+
+
+def test_no_per_institution_metric_leaves_an_agent(demo) -> None:
+    assert all("local_metrics" not in r for r in demo["2_4_rounds"])
+
+
+def test_adversarial_properties() -> None:
+    from app.federation.simulate import adversarial
+    a = adversarial(7)
+    assert a["malicious_update_rejected"] is True
+    assert a["inconsistent_dropout_refused"] is True
+    assert a["threshold_shares_reconstruct"] is True and a["below_threshold_reconstructs"] is False
+    assert a["rounds_before_budget_exhausted"] >= 1
+    assert a["restarted_coordinator_epsilon"] > 0                     # survives a restart
+    assert a["replacement_coordinator_round_accepted"] is False       # agents enforce their own budget
+    assert a["agent_epsilon_after"] <= 4.0
+
+
+def test_dp_required_by_consent_refuses_noiseless_rounds(demo) -> None:
+    from app.federation.agent import (
+        AgentRefusal,
+        Consent,
+        DataEnvironment,
+        LearningAgent,
+    )
+    assert demo["privacy"]["agent_epsilon_worst_case"] >= demo["privacy"]["coordinator_epsilon"]
+    coord = crypto.Identity.generate()
+    env = DataEnvironment({"margin_call_outcome": (np.zeros((40, 7)), np.zeros(40))}, {})
+    agent = LearningAgent("x", env, Consent(frozenset({"cure_logistic_v1"}), frozenset({"margin_call_outcome"}),
+                                            epsilon_limit=5.0), coord.public)
+    pkg = {"round": 1, "algorithm": "cure_logistic_v1", "params": {"noise_multiplier": 0.0, "clip": 1.0},
+           "global_model": [0.0] * 8, "feature_mean": [0.0] * 7, "feature_sd": [1.0] * 7, "planned": 3}
+    with pytest.raises(AgentRefusal, match="requires differential privacy"):
+        agent.advertise(pkg, coord.sign(pkg))
+
+
+def test_agents_in_isolated_processes_without_network() -> None:
+    from app.federation.isolated import isolated_federation, isolation_available
+    if not isolation_available():
+        pytest.skip("network namespaces are not available on this host")
+    iso = isolated_federation(seed=7, rounds=2, isolate=True)
+    assert iso["agent_interfaces"] == ["lo"] and iso["network_reachable_from_any_agent"] is False
+    assert [r["survivors"] for r in iso["rounds"]] == [6, 6]
+    plain = isolated_federation(seed=7, rounds=2, isolate=False)
+    np.testing.assert_allclose(iso["model"], plain["model"], atol=1e-12)   # same protocol result

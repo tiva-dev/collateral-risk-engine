@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -91,10 +92,26 @@ def generate(inst: Institution, rng: np.random.Generator, n: int) -> dict[str, t
             "recovery_episode": (np.c_[part, stress, np.full(n, float(inst.settle))], dur)}
 
 
-def build(seed: int) -> tuple[dict[str, DataEnvironment], dict[str, dict[str, tuple[np.ndarray, np.ndarray]]]]:
+def institutions(count: int = 6, heterogeneity: float = 1.0, seed: int = 0) -> tuple[Institution, ...]:
+    """The six reference institutions, a subset, or more participants drawn around them;
+    ``heterogeneity`` scales the spread of institution-specific cure propensities."""
+    base = list(INSTITUTIONS)
+    rng = np.random.default_rng(1000 + seed)
+    out = []
+    for j in range(count):
+        b = base[j % len(base)]
+        extra = j >= len(base)
+        n = int(b.n * (rng.uniform(0.3, 1.0) if extra else 1.0))
+        out.append(replace(b, name=b.name if not extra else f"{b.name}_{j}", n=max(120, n),
+                           intercept=b.intercept * heterogeneity + (rng.normal(0, 0.3) if extra else 0.0)))
+    return tuple(out)
+
+
+def build(seed: int, insts: tuple[Institution, ...] = INSTITUTIONS
+          ) -> tuple[dict[str, DataEnvironment], dict[str, dict[str, tuple[np.ndarray, np.ndarray]]]]:
     rng = np.random.default_rng(seed)
     envs, tests = {}, {}
-    for inst in INSTITUTIONS:
+    for inst in insts:
         tr = generate(inst, rng, inst.n)
         ho = generate(inst, rng, max(400, inst.n // 3))
         envs[inst.name] = DataEnvironment(tr, ho)
@@ -102,40 +119,51 @@ def build(seed: int) -> tuple[dict[str, DataEnvironment], dict[str, dict[str, tu
     return envs, tests
 
 
-def run(seed: int = 7, rounds: int = 15, noise_multiplier: float = 0.8, eps_limit: float = 20.0) -> dict[str, Any]:
-    envs, tests = build(seed)
-    registry = ModelRegistry(Path(tempfile.mkdtemp()) / f"cri-federation-{seed}.jsonl")
-    coord = Coordinator(registry, min_participants=3)
+def run(seed: int = 7, rounds: int = 15, noise_multiplier: float = 0.8, eps_limit: float = 20.0,
+        weight_cap: int = 1500, colluders: int = 0, insts: tuple[Institution, ...] = INSTITUTIONS,
+        demos: bool = True) -> dict[str, Any]:
+    """With noise_multiplier > 0 every institution requires DP: its agent keeps a persistent
+    ledger (epsilon_limit, delta 1e-6, assumed colluders) and the coordinator keeps its own."""
+    envs, tests = build(seed, insts)
+    tmp = Path(tempfile.mkdtemp())
+    registry = ModelRegistry(tmp / f"cri-federation-{seed}.jsonl")
+    dp = noise_multiplier > 0
+    from app.federation.privacy import PrivacyLedger
+    coord = Coordinator(registry, min_participants=3, max_colluders=colluders,
+                        ledger=PrivacyLedger(eps_limit, path=tmp / "coordinator-ledger.jsonl") if dp else None)
     consent = Consent(frozenset({"cure_logistic_v1", "slippage_ols_v1", "duration_ols_v1"}),
-                      frozenset({"margin_call_outcome", "liquidation_execution", "recovery_episode"}))
+                      frozenset({"margin_call_outcome", "liquidation_execution", "recovery_episode"}),
+                      epsilon_limit=eps_limit if dp else None, max_colluders=colluders)
     # each institution holds its own consent (pause / withdraw affect only itself)
-    agents = {n: LearningAgent(n, e, replace(consent), coord.identity.public) for n, e in envs.items()}
+    agents = {n: LearningAgent(n, e, replace(consent, ledger_path=tmp / f"agent-{n}.jsonl" if dp else None),
+                               coord.identity.public) for n, e in envs.items()}
     demo: dict[str, Any] = {}
     for n, a in agents.items():                       # onboarding: identities enrolled out of band
         coord.enroll(n, a.identity.public)
     # 1. automated registration (signed); a forged registration is refused
     demo["1_registration"] = {n: coord.register(a.registration()) for n, a in agents.items()}
-    forged = agents["fintech_US"].registration()
+    names = sorted(agents)
+    forged = agents[names[-1]].registration()
     forged["payload"]["institution"] = "impostor"
     demo["1_forged_registration_accepted"] = coord.register(forged)
     from app.federation import crypto as _c
     hijacker = _c.Identity.generate()                 # fresh key claiming an enrolled institution
-    hp = {**agents["bank_NGX"].registration()["payload"], "identity": hijacker.public.hex()}
+    hp = {**agents[names[0]].registration()["payload"], "identity": hijacker.public.hex()}
     demo["1_hijack_registration_accepted"] = coord.register({"payload": hp, "signature": hijacker.sign(hp).hex()})
     # feature standardisation: a public, schema-level reference (no institution data)
     ref = np.r_[[0.1, 4.0, 11.0, 5.0, 0.6, 0.25, 0.65]]
     refsd = np.r_[[0.07, 2.0, 1.6, 3.5, 0.8, 0.43, 0.18]]
     params = {"epochs": 3, "lr": 0.2, "l2": 1e-3, "prox_mu": 0.1, "clip": 1.0,
-              "noise_multiplier": noise_multiplier, "weight_cap": 1500}
+              "noise_multiplier": noise_multiplier, "weight_cap": weight_cap}
     # 2-4. centrally scheduled rounds; local learning; secure aggregation; DP budget
     history = []
     for r in range(rounds):
-        drop = {"fintech_US"} if r == 3 else set()           # 9. dropout mid-round
+        drop = {names[2]} if r == 3 and len(names) > 3 else set()   # 9. dropout mid-round
         try:
             res = coord.run_round(agents, "cure_logistic_v1", params, ref.tolist(), refsd.tolist(),
                                   drop_after_keys=drop, privacy_limit=eps_limit if noise_multiplier > 0 else None)
         except RoundError as e:                              # privacy budget exhausted: training stops
-            if "privacy budget" not in str(e) or r == 0:
+            if not ("privacy budget" in str(e) or "below the threshold" in str(e)) or r == 0:
                 raise                                        # nothing trained: not a demonstrable result
             demo["2_4_stopped"] = {"after_rounds": r, "reason": str(e), "epsilon_limit": eps_limit}
             break
@@ -150,20 +178,49 @@ def run(seed: int = 7, rounds: int = 15, noise_multiplier: float = 0.8, eps_limi
     rel, sig = coord.release("cure_logistic_v1", ref.tolist(), refsd.tolist())
     demo["8_release_accepted"] = {n: a.accept_release(rel, sig) for n, a in agents.items()}
     tampered = {**rel, "model": [0.0] * len(rel["model"])}
-    demo["8_tampered_release_accepted"] = agents["bank_NGX"].accept_release(tampered, sig)
+    demo["8_tampered_release_accepted"] = agents[min(agents)].accept_release(tampered, sig)
+    if dp:
+        demo["privacy"] = {"unit": "institution (ML); record (statistics)", "delta": 1e-6,
+                           "assumed_colluders": colluders,
+                           "coordinator_epsilon": coord.ledger.spent("cure_logistic_v1|institution")
+                           if coord.ledger else None,
+                           "agent_epsilon_worst_case": max(a.ledger.spent("cure_logistic_v1|institution")
+                                                           for a in agents.values() if a.ledger)}
     # 5-6. global improvement and personalisation vs local-only and central
     comparison = compare(envs, tests, np.array(rel["model"]), agents, ref, refsd)
     demo["5_6_comparison"] = comparison
-    # federated statistics: exact equality with the pooled estimate
-    demo["statistics"] = statistics(coord, agents, envs)
+    if not demos:
+        return demo
+    # federated statistics: exact pooled estimate (secure aggregation only) or record-level DP
+    demo["statistics"] = statistics(coord, agents, envs, noise_multiplier, eps_limit if dp else None)
     # 9. withdrawal: the institution leaves; it is no longer scheduled
-    agents["wealth_NGX"].consent.withdrawn = True
-    coord.withdraw("wealth_NGX")
-    after = coord.run_round(agents, "slippage_ols_v1", {"min_rows": 30}, [-3.0, 20.0, 0.25], [1.2, 15.0, 0.43])
+    leaver = max(agents)
+    agents[leaver].consent.withdrawn = True
+    coord.withdraw(leaver)
+    sp = {"min_rows": 30, **({"noise_multiplier": noise_multiplier} if dp else {})}
+    after = coord.run_round(agents, "slippage_ols_v1", sp, [-3.0, 20.0, 0.25], [1.2, 15.0, 0.43],
+                            privacy_limit=eps_limit if dp else None)
     demo["9_withdrawal"] = {"participants_after": after["participants"]}
     # 10. unauthorised access and data transfer are refused
     demo["10_security"] = security(agents, coord, ref, refsd)
     return demo
+
+
+L2_GRID = (1e-4, 1e-3, 1e-2, 1e-1, 1.0)
+
+
+def tuned_fit(x: np.ndarray, y: np.ndarray, epochs: int) -> tuple[np.ndarray, float]:
+    """Logistic regression with L2 chosen by 5-fold cross-validation (a well-tuned baseline)."""
+    rng = np.random.default_rng(4)
+    folds = np.array_split(rng.permutation(y.size), 5)
+    best = (math.inf, L2_GRID[0])
+    for l2 in L2_GRID:
+        ll = np.mean([metrics(y[va], logistic_predict(x[va], logistic_fit(
+            x[np.concatenate([f for j, f in enumerate(folds) if j != k])],
+            y[np.concatenate([f for j, f in enumerate(folds) if j != k])], np.zeros(x.shape[1] + 1),
+            epochs=epochs, lr=0.2, l2=l2)))["log_loss"] for k, va in enumerate(folds)])
+        best = min(best, (float(ll), l2))
+    return logistic_fit(x, y, np.zeros(x.shape[1] + 1), epochs=epochs, lr=0.2, l2=best[1]), best[1]
 
 
 def compare(envs: dict[str, DataEnvironment], tests: dict[str, Any], fed: np.ndarray,
@@ -171,14 +228,14 @@ def compare(envs: dict[str, DataEnvironment], tests: dict[str, Any], fed: np.nda
     sch = "margin_call_outcome"
     px = np.vstack([e._train[sch][0] for e in envs.values()])
     py = np.concatenate([e._train[sch][1] for e in envs.values()])
-    central = logistic_fit(standardise(px, ref, refsd), py, np.zeros(K + 1), epochs=20, lr=0.2, l2=1e-3)
-    out: dict[str, Any] = {}
+    central, central_l2 = tuned_fit(standardise(px, ref, refsd), py, 20)
+    out: dict[str, Any] = {"_central_l2": central_l2}
     for name, env in envs.items():
         x, y = env._train[sch]
-        local = logistic_fit(standardise(x, ref, refsd), y, np.zeros(K + 1), epochs=40, lr=0.2, l2=1e-2)
+        local, local_l2 = tuned_fit(standardise(x, ref, refsd), y, 40)
         hx, hy = tests[name][sch]
         hs = standardise(hx, ref, refsd)
-        row = {"train_rows": int(y.size),
+        row = {"train_rows": int(y.size), "local_l2": local_l2,
                "local": metrics(hy, logistic_predict(hs, local)),
                "central": metrics(hy, logistic_predict(hs, central)),
                "federated": metrics(hy, logistic_predict(hs, fed))}
@@ -187,18 +244,23 @@ def compare(envs: dict[str, DataEnvironment], tests: dict[str, Any], fed: np.nda
             row["personal_choice"] = agents[name].personal_choice
         out[name] = row
     for m in ("local", "central", "federated", "personal"):
-        vals = [r[m]["log_loss"] for r in out.values() if m in r]
+        vals = [r[m]["log_loss"] for r in out.values() if isinstance(r, dict) and m in r]
         out.setdefault("_mean_log_loss", {})[m] = float(np.mean(vals))
     return out
 
 
-def statistics(coord: Coordinator, agents: dict[str, LearningAgent], envs: dict[str, DataEnvironment]) -> dict[str, Any]:
+def statistics(coord: Coordinator, agents: dict[str, LearningAgent], envs: dict[str, DataEnvironment],
+               noise_multiplier: float = 0.0, eps_limit: float | None = None) -> dict[str, Any]:
     from app.federation.algorithms import ols_from_suffstats
+    from app.federation.privacy import FEATURE_BOUND, OUTCOME_BOUND
     out = {}
     for alg, sch, mean, sd in (("slippage_ols_v1", "liquidation_execution", [-3.0, 20.0, 0.25], [1.2, 15.0, 0.43]),
                                ("duration_ols_v1", "recovery_episode", [-3.0, 0.25, 1.5], [1.2, 0.43, 0.5])):
-        res = coord.run_round(agents, alg, {"min_rows": 30}, mean, sd)
-        pooled = np.sum([suffstats(standardise(e._train[sch][0], np.array(mean), np.array(sd)), e._train[sch][1])
+        params = {"min_rows": 30, **({"noise_multiplier": noise_multiplier} if noise_multiplier > 0 else {})}
+        res = coord.run_round(agents, alg, params, mean, sd, privacy_limit=eps_limit)
+        pooled = np.sum([suffstats(np.clip(standardise(e._train[sch][0], np.array(mean), np.array(sd)),
+                                           -FEATURE_BOUND, FEATURE_BOUND),
+                                   np.clip(e._train[sch][1], -OUTCOME_BOUND, OUTCOME_BOUND))
                          for e in envs.values()], axis=0)
         exact = ols_from_suffstats(pooled, 3)["beta"]
         fed = np.array(coord.models[alg][-1]["model"])
@@ -206,6 +268,8 @@ def statistics(coord: Coordinator, agents: dict[str, LearningAgent], envs: dict[
         local_se = {n: float(ols_from_suffstats(suffstats(standardise(e._train[sch][0], np.array(mean), np.array(sd)),
                                                           e._train[sch][1]), 3)["se"][1]) for n, e in envs.items()}
         out[alg] = {"rows": res["rows"], "max_abs_diff_vs_pooled": float(np.max(np.abs(fed - exact))),
+                    "privacy": "record-level DP" if noise_multiplier > 0 else "secure aggregation only (exact)",
+                    "epsilon_spent": res.get("epsilon_spent"),
                     "beta": [round(float(b), 4) for b in fed], "residual_sd": res["sigma"],
                     "participation_slope_se": {"federated": float(fed_se), "local": local_se,
                                                "precision_gain_vs_local": {n: v / float(fed_se)
@@ -215,7 +279,7 @@ def statistics(coord: Coordinator, agents: dict[str, LearningAgent], envs: dict[
 
 def security(agents: dict[str, LearningAgent], coord: Coordinator, ref: np.ndarray, refsd: np.ndarray) -> dict[str, Any]:
     from app.federation import crypto
-    a = agents["bank_NGX"]
+    a = agents[min(agents)]
     out: dict[str, Any] = {}
     pkg = {"round": 999, "algorithm": "cure_logistic_v1", "params": {}, "global_model": [0.0] * (K + 1),
            "feature_mean": ref.tolist(), "feature_sd": refsd.tolist(), "planned": 3}
@@ -248,6 +312,97 @@ def security(agents: dict[str, LearningAgent], coord: Coordinator, ref: np.ndarr
     return out
 
 
+def adversarial(seed: int = 7) -> dict[str, Any]:
+    """Malicious participant, inconsistent dropout declaration, collusion threshold, and
+    budget persistence across a coordinator restart and replacement."""
+    from app.federation import crypto
+    from app.federation.privacy import PrivacyLedger
+    envs, _ = build(seed)
+    tmp = Path(tempfile.mkdtemp())
+    out: dict[str, Any] = {}
+    names = sorted(envs)
+
+    def federation(coord_ledger: PrivacyLedger | None, eps: float | None,
+                   reuse: dict[str, LearningAgent] | None = None) -> tuple[Coordinator, dict[str, LearningAgent]]:
+        coord = Coordinator(ModelRegistry(tmp / f"reg-{len(list(tmp.iterdir()))}.jsonl"), min_participants=3,
+                            ledger=coord_ledger)
+        consent = Consent(frozenset({"cure_logistic_v1"}), frozenset({"margin_call_outcome"}), epsilon_limit=eps)
+        ags = reuse or {n: LearningAgent(n, envs[n], replace(consent, ledger_path=tmp / f"agent-{n}.jsonl"
+                                                             if eps else None), coord.identity.public)
+                        for n in names}
+        for n, a in ags.items():
+            a.coordinator_public = coord.identity.public
+            coord.enroll(n, a.identity.public)
+            coord.register(a.registration())
+        return coord, ags
+    ref = [0.1, 4.0, 11.0, 5.0, 0.6, 0.25, 0.65]
+    refsd = [0.07, 2.0, 1.6, 3.5, 0.8, 0.43, 0.18]
+    p = {"epochs": 2, "lr": 0.2, "l2": 1e-3, "prox_mu": 0.1, "clip": 1.0, "noise_multiplier": 0.0, "weight_cap": 1}
+    # 1. A malicious participant bypasses clipping and sends a 50x update: the aggregate bound rejects it.
+    coord, ags = federation(None, None)
+    honest = coord.run_round(ags, "cure_logistic_v1", p, ref, refsd)
+    bad = ags[names[0]]
+    orig = bad._compute
+
+    def poisoned(pkg: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+        v, m = orig(pkg)
+        return np.r_[v[:-1] * 50.0 + 5.0, v[-1]], m
+    bad._compute = poisoned                                       # type: ignore[method-assign]
+    try:
+        coord.run_round(ags, "cure_logistic_v1", p, ref, refsd)
+        out["malicious_update_rejected"] = False
+    except RoundError as e:
+        out["malicious_update_rejected"] = "rejected" in str(e)
+    out["honest_update_norm"] = honest["update_norm"]
+    bad._compute = orig                                           # type: ignore[method-assign]
+    # 2. Inconsistent dropout declaration: an agent never reveals both roles for one peer.
+    a = ags[names[1]]
+    pkg = {"round": 900, "algorithm": "cure_logistic_v1", "params": p, "global_model": [0.0] * (K + 1),
+           "feature_mean": ref, "feature_sd": refsd, "planned": len(names), "issued": "x"}
+    sig = coord.identity.sign(pkg)
+    roster = [ags[n].advertise(pkg, sig) for n in names]
+    ids = {n: ags[n].identity.public for n in names}
+    boxes = {n: ags[n].share_keys(roster, ids, 4) for n in names}
+    for snd, msgs in boxes.items():
+        for rcp, blob in msgs.items():
+            ags[rcp].receive_shares(snd, blob)
+    a.unmask(names, [])
+    try:
+        a.unmask([n for n in names if n != names[2]], [names[2]])
+        out["inconsistent_dropout_refused"] = False
+    except AgentRefusal:
+        out["inconsistent_dropout_refused"] = True
+    # 3. Collusion: fewer than t shares of a self-mask seed do not reconstruct it.
+    secret = crypto.seed_to_int(crypto.secrets.token_bytes(16))
+    shares = crypto.shamir_split(secret, 6, 4)
+    out["threshold_shares_reconstruct"] = crypto.shamir_combine({x: shares[x] for x in (1, 2, 3, 4)}) == secret
+    out["below_threshold_reconstructs"] = crypto.shamir_combine({x: shares[x] for x in (1, 2, 3)}) == secret
+    # 4. Budget persistence: restart and replacement of the coordinator cannot reset budgets.
+    pd = {**p, "noise_multiplier": 3.0}
+    led = PrivacyLedger(4.0, path=tmp / "coord.jsonl")
+    coord, ags = federation(led, 4.0)
+    done = 0
+    for _ in range(50):
+        try:
+            coord.run_round(ags, "cure_logistic_v1", pd, ref, refsd, privacy_limit=4.0)
+            done += 1
+        except RoundError:
+            break
+    restarted = Coordinator(ModelRegistry(tmp / "reg-restart.jsonl"), ledger=PrivacyLedger(4.0, path=tmp / "coord.jsonl"))
+    out["rounds_before_budget_exhausted"] = done
+    out["restarted_coordinator_epsilon"] = restarted.ledger.spent("cure_logistic_v1|institution")  # type: ignore[union-attr]
+    fresh, ags2 = federation(None, 4.0, reuse=ags)                # replacement coordinator, no ledger
+    try:
+        fresh.run_round(ags2, "cure_logistic_v1", pd, ref, refsd, privacy_limit=100.0)
+        out["replacement_coordinator_round_accepted"] = True
+    except RoundError as e:
+        out["replacement_coordinator_round_accepted"] = False
+        out["replacement_refusal"] = str(e)[:120]
+    out["agent_epsilon_after"] = max(x.ledger.spent("cure_logistic_v1|institution")  # type: ignore[union-attr]
+                                     for x in ags.values())
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=7)
@@ -255,6 +410,7 @@ def main() -> None:
     ap.add_argument("--noise", type=float, default=0.8)
     a = ap.parse_args()
     res = run(a.seed, a.rounds, a.noise)
+    res["adversarial"] = adversarial(a.seed)
     print("CRI_FEDERATION_DEMO " + json.dumps(res, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o)))
 
 

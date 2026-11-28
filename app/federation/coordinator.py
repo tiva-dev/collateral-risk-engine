@@ -6,6 +6,14 @@ global model updates, evaluation from participants' local metrics, versioning
 in the model registry (always at the research stage), signed releases, rollback
 and an audit trail. Institutions never initiate rounds or choose algorithms.
 
+Privacy (``privacy``): secure aggregation hides individual contributions; the
+differential-privacy accountant bounds what the released aggregate reveals, at
+the algorithm's privacy unit, charging only the honest survivors' noise
+(``max_colluders``). The coordinator's ledger can be persisted, and every agent
+keeps its own, so restarting or replacing the coordinator cannot reset a budget.
+No per-institution metric is received. The aggregate is rejected if it exceeds
+what clipped contributions plus noise can produce (oversized or malicious input).
+
 Secure aggregation (double masking, after Bonawitz et al. 2017; honest-but-
 curious coordinator): the coordinator receives only masked vectors and can
 remove the masks only from the *sum* of surviving contributions. A dropped
@@ -27,7 +35,7 @@ import numpy as np
 from app.federation import crypto
 from app.federation.agent import AgentRefusal, LearningAgent
 from app.federation.algorithms import REGISTRY, ols_from_suffstats
-from app.federation.privacy import PrivacyBudget
+from app.federation.privacy import PrivacyLedger, effective_multiplier, ml_sensitivity
 from app.learning.governance import ModelRecord, ModelRegistry
 
 
@@ -45,7 +53,9 @@ class Coordinator:
     # Trust anchor: institution identities enrolled out of band at onboarding (contract,
     # key ceremony); registration must prove possession of exactly the enrolled key.
     enrolled: dict[str, bytes] = field(default_factory=dict)
-    budgets: dict[str, PrivacyBudget] = field(default_factory=dict)
+    ledger: PrivacyLedger | None = None          # persistent when constructed with a path
+    max_colluders: int = 0
+    rejected_rounds: int = 0
     models: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     audit: list[dict[str, Any]] = field(default_factory=list)
     round_no: int = 0
@@ -110,11 +120,15 @@ class Coordinator:
         t = max(2, int(np.ceil(self.threshold_fraction * len(u1))))
         if len(u1) < self.min_participants:
             raise RoundError(f"only {len(u1)} agents accepted the round")
-        if alg.kind == "ml" and privacy_limit is not None:
+        scope = f"{algorithm}|{'institution' if alg.kind == 'ml' else 'record'}"
+        if privacy_limit is not None:
+            if self.ledger is None:
+                self.ledger = PrivacyLedger(privacy_limit)
+            if z <= 0:
+                raise RoundError("a privacy budget is set but the round adds no noise")
             # reserve budget for the worst case the round can still complete with
-            budget = self.budgets.setdefault(algorithm, PrivacyBudget(privacy_limit))
             worst = max(t, self.min_participants)
-            if not budget.can_run(z * (worst / len(u1)) ** 0.5):
+            if not self.ledger.can_charge(scope, effective_multiplier(z, len(u1), worst, self.max_colluders)):
                 raise RoundError("privacy budget would be exceeded if the round completes at its minimum size")
         ids = {i: self.participants[i]["identity"] for i in u1}
         outbox = {i: agents[i].share_keys(roster, ids, t) for i in u1}
@@ -156,14 +170,32 @@ class Coordinator:
         agg = crypto.decode(total)
         result: dict[str, Any] = {"round": self.round_no, "algorithm": algorithm, "participants": u1,
                                   "survivors": u2, "dropped": dropped, "refused": refused, "threshold": t}
+        if privacy_limit is not None:
+            assert self.ledger is not None
+            # charged even if the aggregate is rejected below: it has been released to the coordinator
+            result["epsilon_spent"] = self.ledger.charge(scope, effective_multiplier(z, len(u1), len(u2),
+                                                                                     self.max_colluders),
+                                                         round=self.round_no)
         if alg.kind == "ml":
-            weight = agg[-1]
-            new = np.array(global_model) + agg[:-1] / max(weight, 1e-9)
-            result["update_norm"] = float(np.linalg.norm(agg[:-1] / max(weight, 1e-9)))
-            if privacy_limit is not None:
-                self.budgets[algorithm].charge(len(u1), len(u2), z)
-                result["epsilon_spent"] = self.budgets[algorithm].spent()
-            result["local_metrics"] = {i: masked[i]["metrics"].get("global_model_holdout") for i in u2}
+            uniform = float(params.get("weight_cap", 1)) <= 1
+            den = float(len(u2)) if uniform else float(agg[-1])   # uniform: public denominator
+            if den < 0.5:
+                self.rejected_rounds += 1
+                self._log("round_rejected", round=self.round_no, reason="aggregate weight too small after noise")
+                raise RoundError("aggregate weight too small after noise; round rejected")
+            step = agg[:-1] / den
+            # Clipped contributions bound the weighted mean update by the clip norm; allow for noise.
+            sens = ml_sensitivity(float(params["clip"]), float(params.get("weight_cap", 1)))
+            noise_norm = z * sens * np.sqrt(step.size * len(u2) / max(len(u1), 1)) / den
+            bound = float(params["clip"]) * 1.05 + 4.0 * noise_norm
+            result["update_norm"] = float(np.linalg.norm(step))
+            result["update_bound"] = bound
+            if result["update_norm"] > bound:
+                self.rejected_rounds += 1
+                self._log("round_rejected", round=self.round_no, reason="aggregate exceeds the clipped-update bound",
+                          norm=result["update_norm"], bound=bound)
+                raise RoundError("aggregate update exceeds what clipped contributions can produce; round rejected")
+            new = np.array(global_model) + step
         else:
             est = ols_from_suffstats(agg, k)
             new = est["beta"]
