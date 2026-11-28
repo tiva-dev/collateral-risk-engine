@@ -49,7 +49,8 @@ def _evaluate(v: AccountView, n_paths: int, seed: int = SEED) -> Any:
 def _summary(e: Any) -> dict[str, Any]:
     mv = e.portfolio_market_value or 0.0
     bal = e.current_outstanding_balance
-    return {"collateral_value": round(mv, 2), "loan_balance": round(bal, 2),
+    return {"currency": e.loan_currency, "as_of": e.as_of,
+            "collateral_value": round(mv, 2), "loan_balance": round(bal, 2),
             "current_ltv": round(bal / mv, 4) if mv else None,
             "approved_credit_limit": round(e.approved_credit_limit, 2),
             "available_credit": round(e.current_available_credit, 2),
@@ -57,6 +58,18 @@ def _summary(e: Any) -> dict[str, Any]:
             "threshold_ltv": {k: (round(x, 4) if x is not None else None) for k, x in e.threshold_ltv.items()},
             "p_recovery_shortfall_if_recovery_after_grace": round(e.p_infeasible_after_grace(bal), 4),
             "data_status": e.data_status, "restriction": e.restriction, "deterioration": e.deterioration}
+
+
+def _snapshot(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Account snapshot times behind a book-level answer (finding 8)."""
+    from datetime import datetime as _dt
+    ts = sorted(_dt.fromisoformat(str(r["as_of"])) for r in rows if r.get("as_of"))
+    if not ts:
+        return {"snapshot": None}
+    spread = (ts[-1] - ts[0]).total_seconds() / 3600
+    return {"snapshot": {"earliest": ts[0].isoformat(), "latest": ts[-1].isoformat(),
+                         "spread_hours": round(spread, 1),
+                         "consistent": spread <= 24.0}}
 
 
 @dataclass(frozen=True)
@@ -87,13 +100,24 @@ class Toolset:
         for ref in self.book.account_refs():
             e = self._eval(self.book.account(ref))
             s = _summary(e)
-            rows.append({"account_ref": ref, **{k: s[k] for k in ("collateral_value", "loan_balance", "current_ltv",
-                                                                  "available_credit", "margin_state")}})
-        tot_c = sum(r["collateral_value"] for r in rows)
-        tot_b = sum(r["loan_balance"] for r in rows)
-        return {"accounts": rows, "totals": {"accounts": len(rows), "collateral_value": round(tot_c, 2),
-                                             "loan_balance": round(tot_b, 2),
-                                             "book_ltv": round(tot_b / tot_c, 4) if tot_c else None}}
+            rows.append({"account_ref": ref, **{k: s[k] for k in ("currency", "as_of", "collateral_value", "loan_balance",
+                                                                  "current_ltv", "available_credit", "margin_state")}})
+        by_ccy: dict[str, dict[str, Any]] = {}
+        for r in rows:          # amounts are never summed across currencies
+            t = by_ccy.setdefault(r["currency"], {"accounts": 0, "collateral_value": 0.0, "loan_balance": 0.0})
+            t["accounts"] += 1
+            t["collateral_value"] += r["collateral_value"]
+            t["loan_balance"] += r["loan_balance"]
+        for t in by_ccy.values():
+            t["book_ltv"] = round(t["loan_balance"] / t["collateral_value"], 4) if t["collateral_value"] else None
+            t["collateral_value"] = round(t["collateral_value"], 2)
+            t["loan_balance"] = round(t["loan_balance"], 2)
+        out: dict[str, Any] = {"accounts": rows, "totals_by_currency": by_ccy, **_snapshot(rows)}
+        if len(by_ccy) == 1:
+            out["totals"] = {**next(iter(by_ccy.values())), "currency": next(iter(by_ccy))}
+        else:
+            out["note"] = "several loan currencies: totals are reported per currency"
+        return out
 
     def account_risk(self, account_ref: str) -> dict[str, Any]:
         e = self._eval(self.book.account(account_ref))
@@ -108,38 +132,45 @@ class Toolset:
         sc = Scenario.from_dict(scenario)
         sectors = self.book.sector_of()
         refs = list(dict.fromkeys(account_refs)) if account_refs else self.book.account_refs()
+        keys = ("collateral_value", "current_ltv", "available_credit", "margin_state", "cure_amount",
+                "p_recovery_shortfall_if_recovery_after_grace")
         rows: list[dict[str, Any]] = []
-        tot: dict[str, float] = {"base_collateral": 0.0, "stressed_collateral": 0.0, "balance": 0.0,
-                         "base_available": 0.0, "stressed_available": 0.0, "base_cure": 0.0, "stressed_cure": 0.0}
+        totals: dict[str, dict[str, float]] = {}
         for ref in refs:
             v = self.book.account(ref)
             b = _summary(self._eval(v))
             sv, hit = apply(v, sc, sectors)
             s = _summary(_evaluate(sv, self.n_paths))
-            rows.append({"account_ref": ref, "shocked_holdings": hit,
-                         "base": {k: b[k] for k in ("collateral_value", "current_ltv", "available_credit",
-                                                    "margin_state", "cure_amount",
-                                                    "p_recovery_shortfall_if_recovery_after_grace")},
-                         "stressed": {k: s[k] for k in ("collateral_value", "current_ltv", "available_credit",
-                                                        "margin_state", "cure_amount",
-                                                        "p_recovery_shortfall_if_recovery_after_grace")}})
-            tot["base_collateral"] += b["collateral_value"]
-            tot["stressed_collateral"] += s["collateral_value"]
-            tot["balance"] += b["loan_balance"]
-            tot["base_available"] += b["available_credit"]
-            tot["stressed_available"] += s["available_credit"]
-            tot["base_cure"] += b["cure_amount"]
-            tot["stressed_cure"] += s["cure_amount"]
-        states = [r["stressed"]["margin_state"] for r in rows]
-        return {"scenario": sc.describe(), "accounts": rows,
-                "book": {**{k: round(x, 2) for k, x in tot.items()},
-                         "base_book_ltv": round(tot["balance"] / tot["base_collateral"], 4) if tot["base_collateral"] else None,
-                         "stressed_book_ltv": round(tot["balance"] / tot["stressed_collateral"], 4) if tot["stressed_collateral"] else None,
-                         "accounts_not_safe_after_stress": sum(1 for x in states if x != "safe"),
-                         "stressed_margin_states": {st: states.count(st) for st in sorted(set(states))}},
-                "limitations": ["instantaneous shock; no path between now and the shocked state",
-                                "sector membership from the book's instrument reference data",
-                                "volume and settlement stress act through RC1's liquidity and timing model"]}
+            rows.append({"account_ref": ref, "currency": b["currency"], "as_of": b["as_of"], "shocked_holdings": hit,
+                         "base": {k: b[k] for k in keys}, "stressed": {k: s[k] for k in keys}})
+            t = totals.setdefault(b["currency"], {"base_collateral": 0.0, "stressed_collateral": 0.0, "balance": 0.0,
+                                                  "base_available": 0.0, "stressed_available": 0.0,
+                                                  "base_cure": 0.0, "stressed_cure": 0.0})
+            for k, x in (("base_collateral", b["collateral_value"]), ("stressed_collateral", s["collateral_value"]),
+                         ("balance", b["loan_balance"]), ("base_available", b["available_credit"]),
+                         ("stressed_available", s["available_credit"]), ("base_cure", b["cure_amount"]),
+                         ("stressed_cure", s["cure_amount"])):
+                t[k] += x
+        books: dict[str, dict[str, Any]] = {}
+        for ccy, t in totals.items():       # never summed across currencies
+            states = [r["stressed"]["margin_state"] for r in rows if r["currency"] == ccy]
+            books[ccy] = {**{k: round(x, 2) for k, x in t.items()},
+                          "base_book_ltv": round(t["balance"] / t["base_collateral"], 4) if t["base_collateral"] else None,
+                          "stressed_book_ltv": round(t["balance"] / t["stressed_collateral"], 4)
+                          if t["stressed_collateral"] else None,
+                          "accounts_not_safe_after_stress": sum(1 for x in states if x != "safe"),
+                          "stressed_margin_states": {st: states.count(st) for st in sorted(set(states))}}
+        out: dict[str, Any] = {"scenario": sc.describe(), "accounts": rows, "book_by_currency": books,
+                               **_snapshot(rows),
+                               "limitations": ["instantaneous shock; no path between now and the shocked state",
+                                               "sector membership from the book's instrument reference data",
+                                               ("volume and settlement stress act through RC1's liquidity and "
+                                                "timing model"),
+                                               ("amounts are in each account's loan currency and are not "
+                                                "converted or summed across currencies")]}
+        if len(books) == 1:
+            out["book"] = {**next(iter(books.values())), "currency": next(iter(books))}
+        return out
 
     def capacity_frontier(self, account_ref: str, appetite: str = "balanced") -> dict[str, Any]:
         from app.optimizer import PRESETS, capacity_for_appetite, frontier
@@ -163,18 +194,24 @@ class Toolset:
         for ref in self.book.account_refs():
             e = self._eval(self.book.account(ref))
             for a in e.asset_results:
-                if a.asset_id == "USD" or a.market_value <= 0:
+                if a.instrument_key.upper().endswith(":CASH") or a.market_value <= 0:
                     continue
-                r = agg.setdefault(a.asset_id, {"instrument": a.asset_id, "exposure": 0.0, "accounts": 0,
-                                                "risk_score": a.risk_score, "data_status": a.data_status})
-                r["exposure"] += a.market_value
+                # stable identity (exchange:symbol), not the bare ticker; exposure per currency
+                r = agg.setdefault(a.instrument_key, {"instrument_key": a.instrument_key, "instrument": a.asset_id,
+                                                      "exposure_by_currency": {}, "accounts": 0,
+                                                      "risk_score": a.risk_score, "data_status": a.data_status})
+                ccy = e.loan_currency
+                r["exposure_by_currency"][ccy] = r["exposure_by_currency"].get(ccy, 0.0) + a.market_value
                 r["accounts"] += 1
                 r["risk_score"] = max(r["risk_score"], a.risk_score)
         rows = sorted(agg.values(), key=lambda r: -r["risk_score"])[:max(1, min(top, 50))]
         for r in rows:
-            r["exposure"] = round(r["exposure"], 2)
+            r["exposure_by_currency"] = {k: round(v, 2) for k, v in r["exposure_by_currency"].items()}
+            if len(r["exposure_by_currency"]) == 1:
+                r["exposure"] = next(iter(r["exposure_by_currency"].values()))
             r["risk_score"] = round(r["risk_score"], 4)
-        return {"ranking": "RC1 per-instrument risk score (higher = riskier), exposure across the book",
+        return {"ranking": "RC1 per-instrument risk score (higher = riskier); exposure in the loan currency of "
+                           "the accounts holding it, per currency",
                 "instruments": rows}
 
     def instrument_reference(self) -> dict[str, Any]:

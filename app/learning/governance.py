@@ -91,8 +91,11 @@ class ModelRecord:
 
 
 class ModelRegistry:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, approvers: Any = None):
+        """``approvers``: an ``app.learning.approvals.ApproverRegistry``. Without one,
+        no model can be approved or rolled back (there is no authenticated authority)."""
         self.path = Path(path)
+        self.approvers = approvers
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
 
@@ -166,12 +169,9 @@ class ModelRegistry:
         if to not in _ALLOWED[rec.stage]:
             raise ValueError(f"{key}: {rec.stage.value} -> {to.value} is not an allowed transition")
         if to is Stage.APPROVED:
-            if not approval or not approval.get("approver") or not approval.get("evidence"):
-                raise ApprovalRequired("approval needs a named human approver and evidence references")
-            if approval.get("automated"):
-                raise ApprovalRequired("automated approvals are never accepted")
             if actor.startswith(("federation:", "pipeline:", "agent:", "analyst:")):
                 raise ApprovalRequired(f"{actor} cannot approve models")
+            approval = self._verified(approval, key, "approve")
             # one approved version per model id: the previous champion is retired
             for other in self.records().values():
                 if other.model_id == rec.model_id and other.stage is Stage.APPROVED:
@@ -181,18 +181,36 @@ class ModelRegistry:
                       "actor": actor, "reason": reason, "approval": approval})
         return self._get(key)
 
-    def rollback(self, model_id: str, *, actor: str, reason: str) -> ModelRecord | None:
-        """Retire the approved version and restore its approved parent, if any."""
-        with self._exclusive():
-            return self._rollback(model_id, actor=actor, reason=reason)
+    def _verified(self, approval: dict[str, Any] | None, key: str, decision: str) -> dict[str, Any]:
+        """Authenticated human authorisation: a signed token from a registered approver."""
+        if self.approvers is None:
+            raise ApprovalRequired("no approver registry configured: approvals and rollbacks are disabled")
+        if not approval or "token" not in approval or "signature" not in approval:
+            raise ApprovalRequired("approval requires a signed approver token")
+        from app.learning.approvals import ApprovalInvalid
+        try:
+            who = self.approvers.verify(approval["token"], bytes.fromhex(approval["signature"]),
+                                        model_key=key, decision=decision)
+        except (ApprovalInvalid, ValueError) as e:
+            raise ApprovalRequired(str(e)) from e
+        return {**approval["token"], "verified_approver": who, "signature": approval["signature"]}
 
-    def _rollback(self, model_id: str, *, actor: str, reason: str) -> ModelRecord | None:
+    def rollback(self, model_id: str, *, actor: str, reason: str,
+                 approval: dict[str, Any] | None = None) -> ModelRecord | None:
+        """Retire the approved version and restore its approved parent, if any.
+        Requires a signed rollback token for the version being retired."""
+        with self._exclusive():
+            return self._rollback(model_id, actor=actor, reason=reason, approval=approval)
+
+    def _rollback(self, model_id: str, *, actor: str, reason: str,
+                  approval: dict[str, Any] | None) -> ModelRecord | None:
         recs = self.records()
         cur = next((r for r in recs.values() if r.model_id == model_id and r.stage is Stage.APPROVED), None)
         if cur is None:
             raise ValueError(f"no approved version of {model_id}")
+        verified = self._verified(approval, cur.key, "rollback")
         self._append({"event": "transition", "key": cur.key, "from": "approved", "to": "retired",
-                      "actor": actor, "reason": f"rollback: {reason}"})
+                      "actor": actor, "reason": f"rollback: {reason}", "approval": verified})
         parent = recs.get(f"{model_id}@{cur.parent}") if cur.parent else None
         if parent and parent.approvals:
             self._append({"event": "transition", "key": parent.key, "from": "retired", "to": "approved",

@@ -16,9 +16,18 @@ from app.learning import (
     config_hash,
     dataset_hash,
 )
+from app.learning.approvals import ApproverKey, ApproverRegistry, sign_token
 from app.learning.tracking import population_stability
 
-APPROVAL = {"approver": "risk.committee@tiva", "evidence": ["report-16#4.2"], "decision": "approved for shadow use"}
+_CHAIR = ApproverKey.generate()
+APPROVERS = ApproverRegistry()
+APPROVERS.add("risk.committee.chair", _CHAIR.public, {"model_approval", "model_rollback"})
+
+
+def appr(key: str, decision: str = "approve", identity: ApproverKey = _CHAIR,
+         approver: str = "risk.committee.chair") -> dict:
+    tok, sig = sign_token(identity, approver, key, decision, ["report-17#3"])
+    return {"token": tok, "signature": sig.hex()}
 
 
 def rec(v: str, parent: str | None = None, through: str = "2026-11-20", origin: str = "central") -> ModelRecord:
@@ -34,30 +43,31 @@ def test_locked_period_is_never_readable() -> None:
 
 
 def test_registry_gates_and_human_approval(tmp_path) -> None:
-    reg = ModelRegistry(tmp_path / "r.jsonl")
+    reg = ModelRegistry(tmp_path / "r.jsonl", APPROVERS)
     reg.register(rec("1"))
     with pytest.raises(LockedDataError):
         reg.register(rec("x", through="2026-11-27"))
     with pytest.raises(ValueError):
-        reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="me", reason="skip", approval=APPROVAL)
+        reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="me", reason="skip", approval=appr("intelligence.forward_vol@1"))
     reg.promote("intelligence.forward_vol@1", Stage.SHADOW, actor="pipeline:nightly", reason="benchmarks pass")
     reg.promote("intelligence.forward_vol@1", Stage.CANDIDATE, actor="pipeline:nightly", reason="shadow ok")
     for actor in ("federation:coordinator", "analyst:session-1", "pipeline:nightly"):
         with pytest.raises(ApprovalRequired):
-            reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor=actor, reason="auto", approval=APPROVAL)
-    with pytest.raises(ApprovalRequired):
-        reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="g.e", reason="x", approval={"approver": "g.e"})
-    reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="g.e", reason="committee", approval=APPROVAL)
+            reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor=actor, reason="auto", approval=appr("intelligence.forward_vol@1"))
+    with pytest.raises(ApprovalRequired):        # self-declared identity, no signature
+        reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="g.e", reason="x",
+                    approval={"approver": "g.e", "evidence": ["x"]})
+    reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="g.e", reason="committee", approval=appr("intelligence.forward_vol@1"))
     assert reg.champion("intelligence.forward_vol").version == "1"
 
 
 def test_federated_results_enter_as_research_and_rollback_restores(tmp_path) -> None:
-    reg = ModelRegistry(tmp_path / "r.jsonl")
+    reg = ModelRegistry(tmp_path / "r.jsonl", APPROVERS)
     for v, parent in (("1", None), ("2", "1")):
         reg.register(rec(v, parent, origin="federated" if v == "2" else "central"))
         for st in (Stage.SHADOW, Stage.CANDIDATE):
             reg.promote(f"intelligence.forward_vol@{v}", st, actor="pipeline:x", reason="ok")
-        reg.promote(f"intelligence.forward_vol@{v}", Stage.APPROVED, actor="g.e", reason="ok", approval=APPROVAL)
+        reg.promote(f"intelligence.forward_vol@{v}", Stage.APPROVED, actor="g.e", reason="ok", approval=appr(f"intelligence.forward_vol@{v}"))
     assert reg.champion("intelligence.forward_vol").version == "2"
     assert reg.records()["intelligence.forward_vol@1"].stage is Stage.RETIRED
     assert reg.lineage("intelligence.forward_vol@2") == ["intelligence.forward_vol@2", "intelligence.forward_vol@1"]
@@ -65,7 +75,7 @@ def test_federated_results_enter_as_research_and_rollback_restores(tmp_path) -> 
         bad = rec("3")
         bad.stage = Stage.APPROVED
         reg.register(bad)
-    restored = reg.rollback("intelligence.forward_vol", actor="g.e", reason="drift")
+    restored = reg.rollback("intelligence.forward_vol", actor="g.e", reason="drift", approval=appr("intelligence.forward_vol@2", "rollback"))
     assert restored.version == "1" and reg.champion("intelligence.forward_vol").version == "1"
 
 
@@ -92,18 +102,35 @@ def test_drift_index_detects_shift() -> None:
 
 
 def test_automated_approvals_are_rejected_for_any_actor(tmp_path) -> None:
-    reg = ModelRegistry(tmp_path / "r.jsonl")
+    reg = ModelRegistry(tmp_path / "r.jsonl", APPROVERS)
     reg.register(rec("1"))
     for st in (Stage.SHADOW, Stage.CANDIDATE):
         reg.promote("intelligence.forward_vol@1", st, actor="pipeline:x", reason="ok")
     with pytest.raises(ApprovalRequired):
         reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="scheduler", reason="x",
                     approval={"approver": "alice", "evidence": ["x"], "automated": True})
+    rogue = ApproverKey.generate()                   # unregistered key claiming the chair's name
+    with pytest.raises(ApprovalRequired):
+        reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="x", reason="x",
+                    approval=appr("intelligence.forward_vol@1", identity=rogue))
+    with pytest.raises(ApprovalRequired):                 # token for another version
+        reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="x", reason="x",
+                    approval=appr("intelligence.forward_vol@9"))
+    with pytest.raises(ApprovalRequired):                 # approval token used for rollback
+        reg.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="x", reason="x",
+                    approval=appr("intelligence.forward_vol@1", "rollback"))
+    bare = ModelRegistry(tmp_path / "none.jsonl")         # no approver registry: approvals impossible
+    bare.register(rec("1"))
+    for st in (Stage.SHADOW, Stage.CANDIDATE):
+        bare.promote("intelligence.forward_vol@1", st, actor="pipeline:x", reason="ok")
+    with pytest.raises(ApprovalRequired):
+        bare.promote("intelligence.forward_vol@1", Stage.APPROVED, actor="x", reason="x",
+                     approval=appr("intelligence.forward_vol@1"))
 
 
 def test_concurrent_promotions_leave_one_champion(tmp_path) -> None:
     import threading
-    reg = ModelRegistry(tmp_path / "r.jsonl")
+    reg = ModelRegistry(tmp_path / "r.jsonl", APPROVERS)
     for v in ("1", "2", "3"):
         reg.register(rec(v))
         for st in (Stage.SHADOW, Stage.CANDIDATE):
@@ -112,7 +139,7 @@ def test_concurrent_promotions_leave_one_champion(tmp_path) -> None:
 
     def go(v: str) -> None:
         barrier.wait()
-        reg.promote(f"intelligence.forward_vol@{v}", Stage.APPROVED, actor="g.e", reason="ok", approval=APPROVAL)
+        reg.promote(f"intelligence.forward_vol@{v}", Stage.APPROVED, actor="g.e", reason="ok", approval=appr(f"intelligence.forward_vol@{v}"))
     ts = [threading.Thread(target=go, args=(v,)) for v in ("1", "2", "3")]
     for t in ts:
         t.start()
