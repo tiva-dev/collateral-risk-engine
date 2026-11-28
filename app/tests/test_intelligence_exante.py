@@ -4,6 +4,7 @@ complete-framework comparison."""
 from __future__ import annotations
 
 import json
+import math
 import sys
 from dataclasses import replace
 
@@ -106,3 +107,18 @@ def test_end_to_end(tmp_path, monkeypatch) -> None:
         assert 0.0 <= rep["spa"][m]["qlike"]["p_value"] <= 1.0
     assert rep["selector"]["tau"] in ex.TAU_GRID
     assert rep["results"]["test"]["rc1_full_subsample"]["US"]["rc1_full"]["mean_ltv"] == pytest.approx(0.6)
+
+
+def test_held_out_instruments_never_calibrate(panel) -> None:
+    _, p, sp = panel
+    sigma = np.full(p.rv.size, 0.05)
+    z = ex.exante_z(p, sigma, "US", n_min=50, pool_mask=~sp["unseen"])
+    p2 = replace(p, ret=np.where(sp["unseen"], -10.0, p.ret))   # held-out outcomes change
+    z2 = ex.exante_z(p2, sigma, "US", n_min=50, pool_mask=~sp["unseen"])
+    np.testing.assert_array_equal(z, z2)
+    assert np.isfinite(z[sp["unseen"]]).any()                     # but they receive a calibration
+
+
+def test_ltv_is_exponential_of_log_threshold() -> None:
+    np.testing.assert_allclose(ex.ltv_of(np.array([-0.2, 0.0, 0.1, -50.0])), [math.exp(-0.2), 1.0, 1.0, 0.0],
+                               atol=1e-12)

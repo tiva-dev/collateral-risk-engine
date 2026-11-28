@@ -2,7 +2,8 @@
 comparison against RC1 (Report 17 review, section 2).
 
 What is decided ex ante
-    A haircut for instrument i at decision date t is ``-z_t * sigma_t`` where
+    A haircut threshold for instrument i at decision date t is the log return
+    ``z_t * sigma_t`` (LTV ``exp(z_t * sigma_t)``) where
     ``sigma_t`` is the model's 10-session volatility forecast and ``z_t`` is
     the 1% lower quantile of standardised outcomes ``ret / sigma`` that were
     fully observed by t (``end_day <= t``) in a trailing three-year window of
@@ -135,15 +136,18 @@ def market_forecasts(p: Panel, sp: dict[str, np.ndarray], market: str, seed: int
 # ------------------------------------------------------------- calibration
 
 def exante_z(p: Panel, sigma: np.ndarray, market: str, breach: float = BREACH,
-             years: int = CAL_YEARS, n_min: int = CAL_MIN, conf: float = CAL_CONF) -> np.ndarray:
-    """z_t per row (nan where fewer than n_min outcomes were observable at t)."""
+             years: int = CAL_YEARS, n_min: int = CAL_MIN, conf: float = CAL_CONF,
+             pool_mask: np.ndarray | None = None) -> np.ndarray:
+    """z_t per row (nan where fewer than n_min outcomes were observable at t).
+    ``pool_mask`` restricts which rows' outcomes may calibrate (held-out instruments
+    never do); z_t is assigned to every row of the market."""
     from scipy.stats import binom
     m = (p.market == market) & np.isfinite(sigma) & (sigma > 0)
     z = np.full(p.rv.size, np.nan)
     if not m.any():
         return z
     u_all = p.ret / np.where(m, sigma, np.nan)
-    pool = np.where(m)[0]
+    pool = np.where(m & (pool_mask if pool_mask is not None else True))[0]
     order = pool[np.argsort(p.end_day[pool], kind="stable")]
     ends = p.end_day[order]
     days_pool = p.day[order]
@@ -159,7 +163,7 @@ def exante_z(p: Panel, sigma: np.ndarray, market: str, breach: float = BREACH,
         if n < n_min:
             continue
         j = max(1, int(binom.ppf(1 - conf, n, breach)))     # conservative order statistic (1-indexed)
-        z[(p.day == d) & m] = float(np.partition(u, j - 1)[j - 1])
+        z[(p.day == d) & (p.market == market)] = float(np.partition(u, j - 1)[j - 1])
     return z
 
 
@@ -331,11 +335,16 @@ def haircuts(p: Panel, sp: dict[str, np.ndarray], markets: list[str], seed: int 
     for k in STANDALONE:
         z = np.full(p.rv.size, np.nan)
         for m in markets:
-            zm = exante_z(p, sig[k], m)
+            zm = exante_z(p, sig[k], m, pool_mask=~sp["unseen"])
             z[p.market == m] = zm[p.market == m]
         q = z * sig[k]
-        out[k] = {"sigma": sig[k], "z": z, "q": q, "ltv": np.clip(1 + q, 0, 1)}
+        out[k] = {"sigma": sig[k], "z": z, "q": q, "ltv": ltv_of(q)}
     return out
+
+
+def ltv_of(q: np.ndarray) -> np.ndarray:
+    """LTV equivalent to a log-return haircut threshold q (breach: ret < q)."""
+    return np.clip(np.exp(q), 0.0, 1.0)
 
 
 def choose_tau(p: Panel, sp: dict[str, np.ndarray], hc: dict[str, dict[str, np.ndarray]],
@@ -348,7 +357,7 @@ def choose_tau(p: Panel, sp: dict[str, np.ndarray], hc: dict[str, dict[str, np.n
     for tau in TAU_GRID:
         q = np.where(p.X[:, STALE_COL] < tau, hc["ridge_ns"]["q"], hc["rc1"]["q"])
         br = float(np.mean(p.ret[v] < q[v])) if v.any() else math.nan
-        ltv = float(np.clip(1 + q[v], 0, 1).mean()) if v.any() else math.nan
+        ltv = float(ltv_of(q[v]).mean()) if v.any() else math.nan
         grid.append({"tau": tau, "val_breach": br, "val_mean_ltv": ltv})
         if br <= max_breach and ltv > best[1]:
             best = (tau, ltv)
@@ -454,7 +463,7 @@ def main() -> None:
     hc = haircuts(p, sp, markets, a.seed)
     sel = choose_tau(p, sp, hc)
     q_sel = np.where(p.X[:, STALE_COL] < sel["tau"], hc["ridge_ns"]["q"], hc["rc1"]["q"])
-    hc["selector"] = {"q": q_sel, "ltv": np.clip(1 + q_sel, 0, 1)}
+    hc["selector"] = {"q": q_sel, "ltv": ltv_of(q_sel)}
     ok = np.all([np.isfinite(hc[k]["q"]) for k in STANDALONE], axis=0)
     test_rows = {seg: sp[seg] & ok for seg in ("test", "test_unseen")}
     # RC1 complete framework on a fixed subsample of test rows (every k-th, by position)
