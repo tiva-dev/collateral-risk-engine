@@ -12,8 +12,14 @@ is automatic. Guarantees enforced here:
 * resource limits (row cap, wall-clock budget) per job;
 * outbound messages go only to the registered coordinator and are validated
   against the algorithm's contribution length before leaving;
-* contributions are clipped, noised (ML) or small-cell-suppressed (statistics),
-  then masked for secure aggregation and signed.
+* contributions are clipped and noised at the algorithm's privacy unit
+  (institution for ML, loan record for statistics; ``privacy``), small cells
+  are suppressed, then masked for secure aggregation and signed;
+* no per-institution evaluation metric or other auxiliary value leaves the agent;
+* the agent keeps its own persistent privacy ledger and refuses a round whose
+  worst case would exceed the institution's consented budget;
+* it reveals, per round, either a peer's self-mask share or the pairwise seed
+  shared with that peer, never both (inconsistent dropout declarations).
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ import secrets
 import time
 import zlib
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -32,10 +39,20 @@ from app.federation.algorithms import (
     logistic_fit,
     logistic_predict,
     metrics,
+    privacy_scope,
     standardise,
     suffstats,
 )
-from app.federation.privacy import agent_noise, clip
+from app.federation.privacy import (
+    FEATURE_BOUND,
+    OUTCOME_BOUND,
+    PrivacyLedger,
+    agent_noise,
+    clip,
+    effective_multiplier,
+    ml_sensitivity,
+    record_sensitivity,
+)
 
 
 class AgentRefusal(PermissionError):
@@ -71,6 +88,11 @@ class Consent:
     max_seconds: float = 120.0
     paused: bool = False
     withdrawn: bool = False
+    # Differential privacy the institution requires (None: secure aggregation only).
+    epsilon_limit: float | None = None
+    delta: float = 1e-6
+    max_colluders: int = 0                  # participants assumed able to collude with the coordinator
+    ledger_path: Path | None = None         # persistent ledger in the institution's environment
 
 
 @dataclass
@@ -86,6 +108,11 @@ class LearningAgent:
     accepted_releases: list[str] = field(default_factory=list)
     personal_choice: str = ""
     log: list[dict[str, Any]] = field(default_factory=list)
+    ledger: PrivacyLedger | None = None
+
+    def __post_init__(self) -> None:
+        if self.consent.epsilon_limit is not None and self.ledger is None:
+            self.ledger = PrivacyLedger(self.consent.epsilon_limit, self.consent.delta, self.consent.ledger_path)
 
     # ----------------------------------------------------- registration
 
@@ -124,6 +151,8 @@ class LearningAgent:
     def advertise(self, package: dict[str, Any], signature: bytes) -> dict[str, Any]:
         """Step 1: accept a signed package and publish a round exchange key."""
         self._check(package, signature)
+        if self.ledger is not None and float(package.get("params", {}).get("noise_multiplier", 0.0)) <= 0:
+            raise AgentRefusal("the institution requires differential privacy; the package adds no noise")
         xk = crypto.ExchangeKey.generate()
         self._round = {"package": package, "xk": xk, "t0": time.monotonic()}
         payload = {"round": package["round"], "institution": self.institution, "exchange": xk.public.hex()}
@@ -177,12 +206,23 @@ class LearningAgent:
         k = len(pkg["feature_mean"])
         if contribution.shape != (alg.dimension(k) + (1 if alg.kind == "ml" else 0),):
             raise AgentRefusal("contribution shape does not match the algorithm contract")
+        if self.ledger is not None:
+            # Worst case for this contribution: the round completes with only the threshold
+            # number of survivors, of whom the assumed maximum collude.
+            z = float(pkg["params"].get("noise_multiplier", 0.0))
+            z_worst = effective_multiplier(z, pkg["planned"], rnd["threshold"], self.consent.max_colluders)
+            scope = privacy_scope(alg.schema)
+            try:
+                self.ledger.charge(scope, z_worst, round=pkg["round"])
+            except PermissionError as e:
+                raise AgentRefusal(str(e)) from e
         y = crypto.encode(contribution) + crypto.prg(rnd["b"], contribution.size)
         for j, s in rnd["seed"].items():
             m = crypto.prg(s, contribution.size)
             y = y + m if self.institution < j else y - m
+        del local_metrics                            # auxiliary values never leave the agent
         payload = {"round": pkg["round"], "institution": self.institution, "masked": y.tobytes().hex(),
-                   "metrics": local_metrics}
+                   "metrics": {}}
         self.log.append({"round": pkg["round"], "algorithm": alg.id, "sent_to": self.coordinator_endpoint,
                          "elements": int(contribution.size)})
         return {"payload": payload, "signature": self.identity.sign(payload).hex()}
@@ -192,6 +232,19 @@ class LearningAgent:
         shared with dropped peers (never the self-mask of a dropped peer)."""
         rnd = self._round
         recv = rnd.get("received", {})
+        s_set, d_set = set(survivors), set(dropped)
+        if s_set & d_set:
+            raise AgentRefusal("a participant cannot be both a survivor and dropped")
+        if self.institution not in s_set:
+            raise AgentRefusal("this agent is not listed as a survivor")
+        if len(s_set) < rnd.get("threshold", 0):
+            raise AgentRefusal("fewer survivors than the round threshold")
+        if (s_set | d_set) - set(rnd.get("order", [])):
+            raise AgentRefusal("unknown participants in the dropout declaration")
+        prior = rnd.get("declared")
+        if prior is not None and prior != (tuple(sorted(s_set)), tuple(sorted(d_set))):
+            raise AgentRefusal("inconsistent dropout declaration within one round")
+        rnd["declared"] = (tuple(sorted(s_set)), tuple(sorted(d_set)))
         payload = {"institution": self.institution,
                    "b_shares": {i: recv[i] for i in survivors if i in recv},
                    "dropped_seeds": {d: rnd["seed"][d].hex() for d in dropped if d in rnd["seed"]}}
@@ -206,9 +259,19 @@ class LearningAgent:
         xs = standardise(x, mu, sd)
         p = pkg["params"]
         if alg.kind == "statistics":
-            s = suffstats(xs, y)
+            # record-level privacy unit: bounded per-record influence, then distributed noise
+            xc, yc = np.clip(xs, -FEATURE_BOUND, FEATURE_BOUND), np.clip(y, -OUTCOME_BOUND, OUTCOME_BOUND)
+            s = suffstats(xc, yc)
+            z = float(p.get("noise_multiplier", 0.0))
+            if z > 0:
+                # Under DP the release must not depend on a data-dependent branch: no small-cell
+                # suppression (its on/off jump is ~min_rows records, far above the calibrated
+                # one-record sensitivity) and no row-count metadata.
+                s = s + agent_noise(s.size, record_sensitivity(xs.shape[1]), z, pkg["planned"],
+                                    np.random.default_rng(secrets.randbits(128)))
+                return s, {}
             if y.size < p.get("min_rows", 30):
-                s = np.zeros_like(s)                 # small-cell suppression
+                s = np.zeros_like(s)                 # disclosure control only; no DP claim without noise
             return s, {"rows_used": int(y.size >= p.get("min_rows", 30))}
         w0 = np.array(pkg["global_model"])
         rng = np.random.default_rng(pkg["round"] * 1009 + zlib.crc32(self.institution.encode()) % 1000)
@@ -217,13 +280,14 @@ class LearningAgent:
                          deadline=deadline)
         delta, clipped = clip(w - w0, p["clip"])
         weight = float(min(y.size, p["weight_cap"]))
-        # privacy noise from private, non-reproducible entropy (never from public round metadata)
+        # Institution-level unit: [w * delta, w] has L2 norm <= weight_cap * sqrt(clip^2 + 1); every
+        # agent adds the same noise scale to every coordinate, including the weight (the aggregate
+        # denominator). Noise comes from private entropy, never from public round metadata.
         noise_rng = np.random.default_rng(secrets.randbits(128))
-        noisy = weight * delta + agent_noise(delta.size, weight * p["clip"], p["noise_multiplier"],
-                                             pkg["planned"], noise_rng)
-        hx, hy = self.env._holdout[alg.schema]
-        m = metrics(hy, logistic_predict(standardise(hx, mu, sd), w0)) if hy.size >= 30 else {}
-        return np.r_[noisy, weight], {"global_model_holdout": m, "clipped": clipped}
+        v = np.r_[weight * delta, weight]
+        noisy = v + agent_noise(v.size, ml_sensitivity(p["clip"], p["weight_cap"]), p["noise_multiplier"],
+                                pkg["planned"], noise_rng)
+        return noisy, {"clipped": clipped}
 
     # ------------------------------------------------- redistribution
 
