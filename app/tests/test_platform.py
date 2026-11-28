@@ -190,6 +190,7 @@ class AuditTests(_DbCase):
             result = verify_chain("alpha", batch=2)
         self.assertFalse(result["valid"])
         self.assertEqual(result["first_invalid_index"], 4)
+        self.assertEqual((result["records"], result["records_checked"]), (7, 5))
 
 
 class ControlTests(_DbCase):

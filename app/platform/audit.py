@@ -90,7 +90,9 @@ def verify_chain(tenant_id: str, batch: int = VERIFY_BATCH) -> dict[str, Any]:
             expected = _record_hash(prev, r["audit_id"], r["tenant_id"], r["actor"], r["action"],
                                     ts_str(r["created_at"]), r["payload"])
             if r["prev_hash"] != prev or r["record_hash"] != expected:
-                return {"tenant_id": tenant_id, "valid": False, "records_checked": i + 1,
+                total = conn.fetchall("SELECT COUNT(*) AS n FROM audit_log WHERE tenant_id = %s", (tenant_id,))
+                return {"tenant_id": tenant_id, "valid": False, "records": int(total[0]["n"]),
+                        "records_checked": i + 1,
                         "first_invalid_index": i, "audit_id": r["audit_id"]}
             prev = r["record_hash"]
             i += 1
