@@ -20,7 +20,9 @@ Status: research only. No institutional data is accessed. This is not a claim of
   - **Adjacency:** add or remove one loan record in one institution.
   - **Clipping:** standardised features to ±4 and the outcome to ±10.
   - **Sensitivity:** S = √((1+kB²)² + (1+kB²)Y² + Y⁴ + 1).
-  - **Small cells:** cells below the minimum are also suppressed.
+  - **Small cells:** without noise, cells below the minimum are suppressed. This is disclosure control, not DP. Under DP there is no data-dependent suppression and no row-count metadata, because switching suppression on or off moves the release by about the minimum cell size in records, far above the one-record sensitivity.
+- **Shared population and joint accounting:** the three schemas (margin-call outcome, liquidation execution, recovery episode) are attributes of the same loan records. Every mechanism over them is charged to one ledger scope (`loan_records`), so cure-model training, slippage statistics and duration statistics compose against the institution's single budget.
+  - An institution-level guarantee implies the record-level one, so the composed figure is a conservative record-level bound.
 
 ## Noise and accounting
 
@@ -37,7 +39,7 @@ Status: research only. No institutional data is accessed. This is not a claim of
 - **Inconsistent dropout declarations:** an agent refuses conflicting survivor/dropout lists within a round, and never reveals both a peer's self-mask share and its pairwise seed.
 - **Collusion:** fewer than t shares do not reconstruct a self-mask seed. DP accounting can assume c colluders.
 - **Auxiliary information:** no per-institution evaluation metric leaves an agent. The previous version sent holdout metrics in clear.
-- **Isolation:** agents ran as separate processes in empty network namespaces (loopback only, no route out; `app/federation/isolated.py`). They produced exactly the result of non-isolated agents.
+- **Isolation:** agents ran as separate processes in empty network namespaces (loopback only, no route out; `app/federation/isolated.py`). Each process generates only its own institution's data, which is seeded independently of the others. Isolated agents produced exactly the result of non-isolated agents.
 
 ## Reading epsilon
 

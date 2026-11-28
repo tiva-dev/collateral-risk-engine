@@ -243,3 +243,39 @@ def test_agents_in_isolated_processes_without_network() -> None:
     assert [r["survivors"] for r in iso["rounds"]] == [6, 6]
     plain = isolated_federation(seed=7, rounds=2, isolate=False)
     np.testing.assert_allclose(iso["model"], plain["model"], atol=1e-12)   # same protocol result
+
+
+def test_mechanisms_over_the_same_records_share_one_ledger_scope() -> None:
+    from app.federation.algorithms import REGISTRY, privacy_scope
+    scopes = {privacy_scope(a.schema) for a in REGISTRY.values()}
+    assert scopes == {"loan_records"}                     # cure, slippage and duration compose jointly
+
+
+def test_dp_statistics_have_no_data_dependent_suppression() -> None:
+    """Under noise, an institution just below min_rows releases noisy statistics of its rows,
+    not zeros: the on/off jump would exceed the calibrated one-record sensitivity."""
+    from app.federation.agent import Consent, LearningAgent
+    from app.federation.simulate import INSTITUTIONS, build_one
+    inst = INSTITUTIONS[0]
+    env, _ = build_one(3, inst)
+    ag = LearningAgent(inst.name, env, Consent(frozenset({"slippage_ols_v1"}), frozenset({"liquidation_execution"})),
+                       b"\0" * 32)
+    k = env._train["liquidation_execution"][0].shape[1]
+    pkg = {"algorithm": "slippage_ols_v1", "feature_mean": [0.0] * k, "feature_sd": [1.0] * k, "planned": 3,
+           "params": {"min_rows": 10 ** 9, "noise_multiplier": 1.0}}
+    s, meta = ag._compute(pkg)
+    assert meta == {} and np.abs(s).sum() > 0
+    pkg["params"]["noise_multiplier"] = 0.0
+    s0, meta0 = ag._compute(pkg)
+    assert meta0 == {"rows_used": 0} and not s0.any()     # disclosure control only without DP
+
+
+def test_institution_data_is_seeded_independently() -> None:
+    from app.federation.simulate import INSTITUTIONS, build, build_one
+    envs, _ = build(5, INSTITUTIONS)
+    alone, _ = build_one(5, INSTITUTIONS[3])
+    x0, y0 = envs[INSTITUTIONS[3].name]._train["margin_call_outcome"]
+    x1, y1 = alone._train["margin_call_outcome"]
+    assert np.array_equal(x0, x1) and np.array_equal(y0, y1)
+    rev, _ = build(5, tuple(reversed(INSTITUTIONS)))
+    assert np.array_equal(rev[INSTITUTIONS[3].name]._train["margin_call_outcome"][0], x0)

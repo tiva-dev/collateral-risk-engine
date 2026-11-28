@@ -47,6 +47,21 @@ SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
+# Privacy population of each schema: schemas that are views of the same underlying
+# records share one population, and every mechanism touching it is composed in one
+# ledger scope. All three schemas here are attributes of the same loan records.
+PRIVACY_POPULATION: dict[str, str] = {"margin_call_outcome": "loan_records",
+                                      "liquidation_execution": "loan_records",
+                                      "recovery_episode": "loan_records"}
+
+
+def privacy_scope(schema: str) -> str:
+    """Ledger scope for a mechanism over ``schema``. Institution-level (ML) and record-level
+    (statistics) losses are composed in the same scope: an institution-level guarantee
+    implies the record-level one, so the composed figure is a conservative record-level bound."""
+    return PRIVACY_POPULATION[schema]
+
+
 def standardise(x: np.ndarray, mean: np.ndarray, sd: np.ndarray) -> np.ndarray:
     return (x - mean) / sd
 

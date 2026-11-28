@@ -27,6 +27,7 @@ import argparse
 import json
 import math
 import tempfile
+import zlib
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ from app.federation.algorithms import (
     logistic_fit,
     logistic_predict,
     metrics,
+    privacy_scope,
     standardise,
     suffstats,
 )
@@ -109,14 +111,19 @@ def institutions(count: int = 6, heterogeneity: float = 1.0, seed: int = 0) -> t
 
 def build(seed: int, insts: tuple[Institution, ...] = INSTITUTIONS
           ) -> tuple[dict[str, DataEnvironment], dict[str, dict[str, tuple[np.ndarray, np.ndarray]]]]:
-    rng = np.random.default_rng(seed)
     envs, tests = {}, {}
     for inst in insts:
-        tr = generate(inst, rng, inst.n)
-        ho = generate(inst, rng, max(400, inst.n // 3))
-        envs[inst.name] = DataEnvironment(tr, ho)
-        tests[inst.name] = ho
+        envs[inst.name], tests[inst.name] = build_one(seed, inst)
     return envs, tests
+
+
+def build_one(seed: int, inst: Institution) -> tuple[DataEnvironment, dict[str, tuple[np.ndarray, np.ndarray]]]:
+    """One institution's data, seeded independently of the others (an isolated agent
+    process generates only its own)."""
+    rng = np.random.default_rng(np.random.SeedSequence([seed, zlib.crc32(inst.name.encode())]))
+    tr = generate(inst, rng, inst.n)
+    ho = generate(inst, rng, max(400, inst.n // 3))
+    return DataEnvironment(tr, ho), ho
 
 
 def run(seed: int = 7, rounds: int = 15, noise_multiplier: float = 0.8, eps_limit: float = 20.0,
@@ -182,9 +189,9 @@ def run(seed: int = 7, rounds: int = 15, noise_multiplier: float = 0.8, eps_limi
     if dp:
         demo["privacy"] = {"unit": "institution (ML); record (statistics)", "delta": 1e-6,
                            "assumed_colluders": colluders,
-                           "coordinator_epsilon": coord.ledger.spent("cure_logistic_v1|institution")
+                           "coordinator_epsilon": coord.ledger.spent(privacy_scope("margin_call_outcome"))
                            if coord.ledger else None,
-                           "agent_epsilon_worst_case": max(a.ledger.spent("cure_logistic_v1|institution")
+                           "agent_epsilon_worst_case": max(a.ledger.spent(privacy_scope("margin_call_outcome"))
                                                            for a in agents.values() if a.ledger)}
     # 5-6. global improvement and personalisation vs local-only and central
     comparison = compare(envs, tests, np.array(rel["model"]), agents, ref, refsd)
@@ -390,7 +397,7 @@ def adversarial(seed: int = 7) -> dict[str, Any]:
             break
     restarted = Coordinator(ModelRegistry(tmp / "reg-restart.jsonl"), ledger=PrivacyLedger(4.0, path=tmp / "coord.jsonl"))
     out["rounds_before_budget_exhausted"] = done
-    out["restarted_coordinator_epsilon"] = restarted.ledger.spent("cure_logistic_v1|institution")  # type: ignore[union-attr]
+    out["restarted_coordinator_epsilon"] = restarted.ledger.spent(privacy_scope("margin_call_outcome"))  # type: ignore[union-attr]
     fresh, ags2 = federation(None, 4.0, reuse=ags)                # replacement coordinator, no ledger
     try:
         fresh.run_round(ags2, "cure_logistic_v1", pd, ref, refsd, privacy_limit=100.0)
@@ -398,7 +405,7 @@ def adversarial(seed: int = 7) -> dict[str, Any]:
     except RoundError as e:
         out["replacement_coordinator_round_accepted"] = False
         out["replacement_refusal"] = str(e)[:120]
-    out["agent_epsilon_after"] = max(x.ledger.spent("cure_logistic_v1|institution")  # type: ignore[union-attr]
+    out["agent_epsilon_after"] = max(x.ledger.spent(privacy_scope("margin_call_outcome"))  # type: ignore[union-attr]
                                      for x in ags.values())
     return out
 

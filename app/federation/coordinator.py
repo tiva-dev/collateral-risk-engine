@@ -34,7 +34,7 @@ import numpy as np
 
 from app.federation import crypto
 from app.federation.agent import AgentRefusal, LearningAgent
-from app.federation.algorithms import REGISTRY, ols_from_suffstats
+from app.federation.algorithms import REGISTRY, ols_from_suffstats, privacy_scope
 from app.federation.privacy import PrivacyLedger, effective_multiplier, ml_sensitivity
 from app.learning.governance import ModelRecord, ModelRegistry
 
@@ -120,7 +120,7 @@ class Coordinator:
         t = max(2, int(np.ceil(self.threshold_fraction * len(u1))))
         if len(u1) < self.min_participants:
             raise RoundError(f"only {len(u1)} agents accepted the round")
-        scope = f"{algorithm}|{'institution' if alg.kind == 'ml' else 'record'}"
+        scope = privacy_scope(alg.schema)
         if privacy_limit is not None:
             if self.ledger is None:
                 self.ledger = PrivacyLedger(privacy_limit)

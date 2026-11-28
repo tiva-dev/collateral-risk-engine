@@ -39,6 +39,7 @@ from app.federation.algorithms import (
     logistic_fit,
     logistic_predict,
     metrics,
+    privacy_scope,
     standardise,
     suffstats,
 )
@@ -210,7 +211,7 @@ class LearningAgent:
             # number of survivors, of whom the assumed maximum collude.
             z = float(pkg["params"].get("noise_multiplier", 0.0))
             z_worst = effective_multiplier(z, pkg["planned"], rnd["threshold"], self.consent.max_colluders)
-            scope = f"{alg.id}|{'institution' if alg.kind == 'ml' else 'record'}"
+            scope = privacy_scope(alg.schema)
             try:
                 self.ledger.charge(scope, z_worst, round=pkg["round"])
             except PermissionError as e:
@@ -261,12 +262,16 @@ class LearningAgent:
             # record-level privacy unit: bounded per-record influence, then distributed noise
             xc, yc = np.clip(xs, -FEATURE_BOUND, FEATURE_BOUND), np.clip(y, -OUTCOME_BOUND, OUTCOME_BOUND)
             s = suffstats(xc, yc)
-            if y.size < p.get("min_rows", 30):
-                s = np.zeros_like(s)                 # small-cell suppression
             z = float(p.get("noise_multiplier", 0.0))
             if z > 0:
+                # Under DP the release must not depend on a data-dependent branch: no small-cell
+                # suppression (its on/off jump is ~min_rows records, far above the calibrated
+                # one-record sensitivity) and no row-count metadata.
                 s = s + agent_noise(s.size, record_sensitivity(xs.shape[1]), z, pkg["planned"],
                                     np.random.default_rng(secrets.randbits(128)))
+                return s, {}
+            if y.size < p.get("min_rows", 30):
+                s = np.zeros_like(s)                 # disclosure control only; no DP claim without noise
             return s, {"rows_used": int(y.size >= p.get("min_rows", 30))}
         w0 = np.array(pkg["global_model"])
         rng = np.random.default_rng(pkg["round"] * 1009 + zlib.crc32(self.institution.encode()) % 1000)

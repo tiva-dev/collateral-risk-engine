@@ -68,7 +68,7 @@ def _network_reachable() -> bool:
 def serve() -> None:
     """Agent process: one JSON request per line on stdin, one response per line on stdout."""
     from app.federation.agent import AgentRefusal, Consent, LearningAgent
-    from app.federation.simulate import build, institutions
+    from app.federation.simulate import build_one, institutions
     resource.setrlimit(resource.RLIMIT_AS, (2 * 1024 ** 3, 2 * 1024 ** 3))
     resource.setrlimit(resource.RLIMIT_CPU, (600, 600))
     agent: LearningAgent | None = None
@@ -77,10 +77,11 @@ def serve() -> None:
         try:
             if req["method"] == "init":
                 a = req["args"]
-                insts = institutions(a["count"], a["heterogeneity"], a["seed"])
-                envs, _ = build(a["seed"], insts)          # this institution's data exists only here
+                inst = next(x for x in institutions(a["count"], a["heterogeneity"], a["seed"])
+                            if x.name == a["institution"])
+                env, _ = build_one(a["seed"], inst)       # only this institution's data exists here
                 consent = Consent(frozenset(a["algorithms"]), frozenset(a["schemas"]))
-                agent = LearningAgent(a["institution"], envs[a["institution"]], replace(consent),
+                agent = LearningAgent(a["institution"], env, replace(consent),
                                       bytes.fromhex(a["coordinator_public"]))
                 res: Any = {"identity": agent.identity.public.hex(), "network_reachable": _network_reachable(),
                             "interfaces": sorted(n for _, n in socket.if_nameindex()),
