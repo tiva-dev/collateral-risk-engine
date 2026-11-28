@@ -789,3 +789,28 @@ def test_workout_policies_on_common_paths() -> None:
     assert not b["defaulted_at_maturity"]
     with pytest.raises(ValueError):
         run_cohort(**kw, workout_policy="fire_sale")
+
+
+def test_paydown_is_sized_jointly_and_never_chases_capacity() -> None:
+    """Paydown sells once, sized so the remaining collateral supports the refinanced balance;
+    if it does not, the loan goes to a full workout instead of selling repeatedly."""
+    hs, bars, dates = _cohort_inputs()
+    for o in (300, 350):
+        for sc in (1.4, 2.0):
+            c = run_cohort(holdings=hs, bars=bars, origination=dates[o], term_sessions=63, seed=3,
+                           maturity="refinance", config=CandidateConfig(n_paths=200), workout_sessions=40,
+                           principal_scale=sc, workout_policy="selective", refinance_policy="paydown")
+            for pol in ("sell_all", "planner"):
+                alt = run_cohort(holdings=hs, bars=bars, origination=dates[o], term_sessions=63, seed=3,
+                                 maturity="refinance", config=CandidateConfig(n_paths=200), workout_sessions=40,
+                                 principal_scale=sc, workout_policy=pol, refinance_policy="paydown")
+                for v in alt["variants"].values():
+                    if v["maturity_outcome"] == "paydown_failed_full_workout":
+                        assert v["censored"] or v["status"] in ("recovered", "loss")
+                        assert v["residual_collateral_estimate"] == 0 or v["censored"]   # remaining holdings sold
+            for v in c["variants"].values():
+                assert v["maturity_outcome"] in ("refinanced", "paydown_refinance", "paydown_infeasible_full_workout",
+                                                 "paydown_failed_full_workout", "in_recovery", "")
+                if v["maturity_outcome"] == "paydown_refinance":
+                    assert v["refinanced_amount"] <= v["refinance_capacity"] + 1e-6
+                    assert not v["censored"]
