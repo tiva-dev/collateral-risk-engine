@@ -139,6 +139,50 @@ def _rc1_sigma(rows: list[dict[str, Any]], i: int) -> float:
     return float(est.sigma_used) if est.sigma_used and math.isfinite(est.sigma_used) else math.nan
 
 
+def instrument_series(rows: list[dict[str, Any]]) -> dict[str, np.ndarray] | None:
+    """Per-session inputs for one instrument's rows (shared by training and live
+    forecasting so both compute identical features). None if prices are invalid."""
+    px = np.array([r["adj_close"] for r in rows])
+    if np.any(px <= 0):
+        return None
+    r = np.diff(np.log(px), prepend=np.nan)
+    r[0] = 0.0
+    o = np.array([r_["open"] for r_ in rows])
+    hi = np.array([r_["high"] for r_ in rows])
+    lo = np.array([r_["low"] for r_ in rows])
+    cl = np.array([r_["close"] for r_ in rows])
+    vol = np.array([r_["volume"] for r_ in rows])
+    gap = np.abs(np.log(np.maximum(o, 1e-12) / np.maximum(np.roll(cl, 1), 1e-12)))
+    gap[0] = 0.0
+    park = np.where((hi > 0) & (lo > 0), np.log(np.maximum(hi, 1e-12) / np.maximum(lo, 1e-12)) ** 2 / (4 * math.log(2)), 0.0)
+    ew = np.empty(r.size)
+    var = float(np.var(r[1:61])) + 1e-10
+    for t, x in enumerate(r):
+        var = 0.94 * var + 0.06 * x * x
+        ew[t] = math.sqrt(var)
+    down = np.minimum(r, 0.0)
+    stale = (np.abs(r) < 1e-12).astype(float)
+    return {"r": r, "rv1": np.abs(r), "rv5": _roll_std(r, 5), "rv22": _roll_std(r, 22),
+            "rv66": _roll_std(r, 66), "ew": ew, "down22": np.sqrt(_roll_mean(down * down, 22)),
+            "park22": np.sqrt(_roll_mean(park, 22)), "gap22": _roll_mean(gap, 22),
+            "mom22": np.concatenate([np.full(22, np.nan), np.log(px[22:] / px[:-22])]),
+            "dd66": np.array([px[i] / px[max(0, i - 65):i + 1].max() - 1 for i in range(px.size)]),
+            "vval": vol * cl, "adv20": _roll_mean(vol * cl, 20), "adv5": _roll_mean(vol * cl, 5),
+            "zero22": _roll_mean(stale, 22),
+            "range_ok": np.array([float(x["range_reported"]) for x in rows]),
+            "volume_ok": np.array([float(x["volume_reported"]) for x in rows])}
+
+
+def row_features(pre: dict[str, np.ndarray], i: int, market_median_rv22: float) -> list[float]:
+    """The 17 benchmark features at session i (FEATURES order, then zero22)."""
+    return [math.log(pre["rv1"][i] + 1e-5), math.log(pre["rv5"][i] + 1e-5), math.log(pre["rv22"][i] + 1e-5),
+            math.log(pre["rv66"][i] + 1e-5), math.log(pre["ew"][i] + 1e-5), math.log(pre["down22"][i] + 1e-5),
+            math.log(pre["park22"][i] + 1e-5), pre["gap22"][i], pre["mom22"][i], pre["dd66"][i],
+            math.log(pre["adv20"][i] + 1.0), math.log((pre["adv5"][i] + 1.0) / (pre["adv20"][i] + 1.0)),
+            math.log(market_median_rv22 + 1e-5), pre["range_ok"][i - 21:i + 1].mean(),
+            pre["volume_ok"][i - 21:i + 1].mean(), math.log(i), pre["zero22"][i]]
+
+
 def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 260,
                 rc1: bool = True) -> Panel:
     feats, rv, ret, rcs, syms, days, ends, mkts, advs = [], [], [], [], [], [], [], [], []
@@ -151,35 +195,9 @@ def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 
         for s, rows in ds.bars.items():
             if len(rows) < min_hist + h + 5:
                 continue
-            px = np.array([r["adj_close"] for r in rows])
-            if np.any(px <= 0):
+            pre = instrument_series(rows)
+            if pre is None:
                 continue
-            r = np.diff(np.log(px), prepend=np.nan)
-            r[0] = 0.0
-            o = np.array([r_["open"] for r_ in rows])
-            hi = np.array([r_["high"] for r_ in rows])
-            lo = np.array([r_["low"] for r_ in rows])
-            cl = np.array([r_["close"] for r_ in rows])
-            vol = np.array([r_["volume"] for r_ in rows])
-            gap = np.abs(np.log(np.maximum(o, 1e-12) / np.maximum(np.roll(cl, 1), 1e-12)))
-            gap[0] = 0.0
-            park = np.where((hi > 0) & (lo > 0), np.log(np.maximum(hi, 1e-12) / np.maximum(lo, 1e-12)) ** 2 / (4 * math.log(2)), 0.0)
-            ew = np.empty(r.size)
-            var = float(np.var(r[1:61])) + 1e-10
-            for t, x in enumerate(r):
-                var = 0.94 * var + 0.06 * x * x
-                ew[t] = math.sqrt(var)
-            down = np.minimum(r, 0.0)
-            stale = (np.abs(r) < 1e-12).astype(float)
-            pre = {"r": r, "rv1": np.abs(r), "rv5": _roll_std(r, 5), "rv22": _roll_std(r, 22),
-                   "rv66": _roll_std(r, 66), "ew": ew, "down22": np.sqrt(_roll_mean(down * down, 22)),
-                   "park22": np.sqrt(_roll_mean(park, 22)), "gap22": _roll_mean(gap, 22),
-                   "mom22": np.concatenate([np.full(22, np.nan), np.log(px[22:] / px[:-22])]),
-                   "dd66": np.array([px[i] / px[max(0, i - 65):i + 1].max() - 1 for i in range(px.size)]),
-                   "vval": vol * cl, "adv20": _roll_mean(vol * cl, 20), "adv5": _roll_mean(vol * cl, 5),
-                   "zero22": _roll_mean(stale, 22),
-                   "range_ok": np.array([float(x["range_reported"]) for x in rows]),
-                   "volume_ok": np.array([float(x["volume_reported"]) for x in rows])}
             per.append((m, s, rows, pre))
             for i in range(min_hist, len(rows) - h, step):
                 market_rv.setdefault((m, rows[i]["date"].toordinal()), []).append(pre["rv22"][i])
@@ -189,12 +207,7 @@ def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 
         for i in range(min_hist, len(rows) - h, step):
             fut = r[i + 1:i + 1 + h]
             d = rows[i]["date"].toordinal()
-            x = [math.log(pre["rv1"][i] + 1e-5), math.log(pre["rv5"][i] + 1e-5), math.log(pre["rv22"][i] + 1e-5),
-                 math.log(pre["rv66"][i] + 1e-5), math.log(pre["ew"][i] + 1e-5), math.log(pre["down22"][i] + 1e-5),
-                 math.log(pre["park22"][i] + 1e-5), pre["gap22"][i], pre["mom22"][i], pre["dd66"][i],
-                 math.log(pre["adv20"][i] + 1.0), math.log((pre["adv5"][i] + 1.0) / (pre["adv20"][i] + 1.0)),
-                 math.log(mkt_med.get((m, d), np.nan) + 1e-5), pre["range_ok"][i - 21:i + 1].mean(),
-                 pre["volume_ok"][i - 21:i + 1].mean(), math.log(i), pre["zero22"][i]]
+            x = row_features(pre, i, mkt_med.get((m, d), np.nan))
             if not np.all(np.isfinite(x)):
                 continue
             feats.append(x)
