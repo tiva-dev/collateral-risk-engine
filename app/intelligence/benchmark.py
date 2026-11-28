@@ -56,6 +56,7 @@ Q = 0.05
 BREACH = 0.01
 TRAIN_END = date(2023, 12, 31)
 VAL_END = date(2024, 12, 31)
+LIQ_H = 20
 FEATURES = ["lrv1", "lrv5", "lrv22", "lrv66", "lewma", "ldown22", "lpark22", "gap22", "mom22", "dd66",
             "ladv20", "vtrend", "mkt_lrv22", "range_ok", "volume_ok", "sessions"]
 
@@ -101,6 +102,8 @@ class Panel:
     end_day: np.ndarray     # ordinal date of the target's last observation (t + h sessions)
     market: np.ndarray
     adv_bucket: np.ndarray  # 0 low, 1 mid, 2 high liquidity (market-specific terciles at t)
+    row_idx: np.ndarray | None = None   # index of t within the instrument's dataset rows
+    fadv: np.ndarray | None = None      # log mean traded value over the next LIQ_H sessions (nan if unknown)
 
 
 def _roll_std(x: np.ndarray, w: int) -> np.ndarray:
@@ -139,6 +142,8 @@ def _rc1_sigma(rows: list[dict[str, Any]], i: int) -> float:
 def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 260,
                 rc1: bool = True) -> Panel:
     feats, rv, ret, rcs, syms, days, ends, mkts, advs = [], [], [], [], [], [], [], [], []
+    idxs: list[int] = []
+    fadvs: list[float] = []
     market_rv: dict[tuple[str, int], list[float]] = {}
     per: list[tuple[str, str, list[dict[str, Any]], dict[str, np.ndarray]]] = []
     for ds in datasets:
@@ -171,7 +176,7 @@ def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 
                    "park22": np.sqrt(_roll_mean(park, 22)), "gap22": _roll_mean(gap, 22),
                    "mom22": np.concatenate([np.full(22, np.nan), np.log(px[22:] / px[:-22])]),
                    "dd66": np.array([px[i] / px[max(0, i - 65):i + 1].max() - 1 for i in range(px.size)]),
-                   "adv20": _roll_mean(vol * cl, 20), "adv5": _roll_mean(vol * cl, 5),
+                   "vval": vol * cl, "adv20": _roll_mean(vol * cl, 20), "adv5": _roll_mean(vol * cl, 5),
                    "zero22": _roll_mean(stale, 22),
                    "range_ok": np.array([float(x["range_reported"]) for x in rows]),
                    "volume_ok": np.array([float(x["volume_reported"]) for x in rows])}
@@ -201,6 +206,10 @@ def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 
             ends.append(rows[i + h]["date"].toordinal())
             mkts.append(m)
             advs.append(pre["adv20"][i])
+            idxs.append(i)
+            vf = pre["vval"][i + 1:i + 1 + LIQ_H]
+            ok_f = pre["volume_ok"][i + 1:i + 1 + LIQ_H]
+            fadvs.append(math.log(float(vf.mean()) + 1.0) if vf.size == LIQ_H and ok_f.all() else math.nan)
     adv = np.array(advs)
     mk = np.array(mkts)
     dy = np.array(days)
@@ -214,7 +223,7 @@ def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 
             q1, q2 = np.quantile(a, [1 / 3, 2 / 3])
             bucket[idx] = np.digitize(a, [q1, q2])
     return Panel(np.array(feats), np.array(rv), np.array(ret), np.array(rcs), np.array(syms), dy,
-                 np.array(ends), mk, bucket)
+                 np.array(ends), mk, bucket, np.array(idxs), np.array(fadvs))
 
 
 # ------------------------------------------------------------------ models
