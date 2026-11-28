@@ -160,6 +160,12 @@ class Outcome:
     recovery_sessions: list[int] = field(default_factory=list)
     residual_after_recovery: list[float] = field(default_factory=list)
     interest_accrued: float = 0.0
+    # Measurement only (Report 17 review): cash interest actually received (repayments are
+    # allocated fees -> interest -> principal), funded principal summed over every session the
+    # loan is open including the maturity workout, and those calendar sessions.
+    interest_received: float = 0.0
+    funded_principal_sessions: float = 0.0
+    calendar_sessions: int = 0
     capacity_sum: float = 0.0
     events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -232,8 +238,17 @@ def run_cohort(
     workout_sessions: int = 60,
     origination_mode: str = "matched",
     origination_engine: tuple[tuple[str, Any], ...] = (),
+    ceiling_cap: bool = False,
+    max_principal: float | None = None,
+    settlement: str = "fixed",
 ) -> dict[str, Any]:
-    """Run all variants on one matched cohort with common random numbers."""
+    """Run all variants on one matched cohort with common random numbers.
+
+    ``ceiling_cap``: the scaled principal never exceeds the contractual client ceiling
+    x utilisation (independent of the risk capacity being scaled); ``max_principal``:
+    an absolute institutional limit. Both default off (unchanged behaviour).
+    ``settlement="point_in_time"`` (RC2 research) settles each sale on the cycle in force
+    on its trade date instead of the profile's fixed cycle."""
     policy = policy or Policy.default()
     interest = interest or InterestPolicy(0.20, accrual_frequency="monthly", compounding="compound")
     execution = execution or LiquidationExecutionPolicy()
@@ -253,6 +268,15 @@ def run_cohort(
     engine_seed = int(rng.integers(0, 2**40))
     profiles = {h.stable_key: profile_for_exchange(h.exchange) for h in holdings if h.asset_type != AssetType.CASH}
     settle = max([execution.settlement_delay_observations] + [p.settlement_days for p in profiles.values() if p])
+    if settlement not in ("fixed", "point_in_time"):
+        raise ValueError(f"settlement must be fixed or point_in_time, got {settlement}")
+
+    def settle_at(d: date) -> int:
+        if settlement == "fixed":
+            return settle
+        from app.rc2.settlement import settlement_days
+        return max([execution.settlement_delay_observations]
+                   + [settlement_days(h.exchange, d) for h in holdings if h.asset_type != AssetType.CASH])
     vol20: dict[str, dict[date, float]] = {}
     prev_close: dict[str, dict[date, float]] = {}
     for dk, rows in sorted_bars.items():
@@ -345,7 +369,7 @@ def run_cohort(
                 rem[k] -= sell
                 if rem[k] <= 1e-9:
                     rem.pop(k)
-                last_settle = j + settle
+                last_settle = j + settle_at(path[j])
             j += 1
         if rem and j - start < cfg.max_exit_sessions:
             return None, j            # path ended before the sale finished: censored
@@ -370,6 +394,11 @@ def run_cohort(
                 "reasons": base.reasons[:6]}
     cap0 = min(base.thresholds["initial_capacity_uncapped"], base.thresholds["client_ceiling"])
     p0 = float(principal if principal is not None else cap0 * cfg.capacity_utilisation * principal_scale)
+    binding = "scale"
+    if principal is None and ceiling_cap and p0 > base.thresholds["client_ceiling"] * cfg.capacity_utilisation:
+        p0, binding = float(base.thresholds["client_ceiling"] * cfg.capacity_utilisation), "contractual_ceiling"
+    if principal is None and max_principal is not None and p0 > max_principal:
+        p0, binding = float(max_principal), "institutional_limit"
     if p0 <= 0:
         return {"origination": origination.isoformat(), "skipped": "no lending capacity at origination",
                 "reasons": base.reasons[:6]}
@@ -437,9 +466,12 @@ def run_cohort(
             prev_t = now
             for _, amt in [x for x in pending if x[0] <= i]:
                 b4 = loan.balance
-                loan, _ = apply_repayment(loan, amt)
+                loan, alloc = apply_repayment(loan, amt)
+                out.interest_received += alloc["interest_paid"]
                 out.realized_recovery += b4 - loan.balance
             pending = [x for x in pending if x[0] > i]
+            out.calendar_sessions += 1
+            out.funded_principal_sessions += loan.principal
             md = feed.market(d)
             # 1) Execute orders submitted at an earlier session against today's bar.
             if orders and i >= submit_from:
@@ -471,7 +503,7 @@ def run_cohort(
                     if sale_start >= 0 and not any(e["event"] == "first_fill" and e.get("episode") == sale_start
                                                    for e in out.events):
                         out.events.append({"session": i, "event": "first_fill", "episode": sale_start})
-                    pending.append((i + settle, proceeds))
+                    pending.append((i + settle_at(d), proceeds))
                     out.executed_gross += sell * px
                     out.execution_costs += sell * px - proceeds
                     if episode == "workout":
@@ -514,7 +546,8 @@ def run_cohort(
                     elif maturity.startswith("partial:"):
                         out.maturity_outcome = "partial_then_default"
                 if pay > 0:
-                    loan, _ = apply_repayment(loan, pay)
+                    loan, alloc = apply_repayment(loan, pay)
+                    out.interest_received += alloc["interest_paid"]
                     out.borrower_repayment += pay
                 if loan.balance <= 0.01:
                     out.repaid_at_maturity = True
@@ -610,7 +643,8 @@ def run_cohort(
                     grace_left -= 1
                     if cure_draws[i] < cure_p:
                         pay = max(0.0, net_bal - target)
-                        loan, _ = apply_repayment(loan, pay)
+                        loan, alloc = apply_repayment(loan, pay)
+                        out.interest_received += alloc["interest_paid"]
                         out.cures += 1
                         out.cure_payments += pay
                         out.events.append({"session": i, "date": d.isoformat(), "event": "cure", "amount": pay})
@@ -643,7 +677,8 @@ def run_cohort(
             out.status = "repaid"
         else:
             cash = sum(q for k, q in qty.items() if k in cash_keys)
-            loan, _ = apply_repayment(loan, cash)
+            loan, alloc = apply_repayment(loan, cash)
+            out.interest_received += alloc["interest_paid"]
             out.outstanding_debt = loan.balance
             remaining = {k: q for k, q in qty.items() if k not in cash_keys and q > 1e-9}
             out.residual_collateral_estimate = sum(q * feed.last_px.get(k, 0.0) for k, q in remaining.items())
@@ -663,7 +698,9 @@ def run_cohort(
     return {"origination": origination.isoformat(), "principal": p0, "collateral_value": v0,
             "initial_ltv": ltv0, "term_sessions": term_sessions, "cure_probability": cure_probability,
             "maturity": maturity, "principal_scale": principal_scale, "seed": seed,
-            "settlement_sessions": settle, "variants": results, "candidate_initial_reasons": base.reasons[:4]}
+            "principal_binding": binding, "risk_capacity": float(base.thresholds["initial_capacity_uncapped"]),
+            "client_ceiling": float(base.thresholds["client_ceiling"]),
+            "settlement_sessions": settle, "settlement": settlement, "variants": results, "candidate_initial_reasons": base.reasons[:4]}
 
 
 def variant_rows(cohorts: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:

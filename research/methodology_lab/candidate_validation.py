@@ -30,6 +30,7 @@ Usage (workflow): python -m research.methodology_lab.candidate_validation MANIFE
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -85,6 +86,16 @@ CFG = CandidateConfig(n_paths=400)
 # Principal scales (multiples of RC1's approved credit under --variant-set rc1) for the
 # full-lifecycle frontier; --scales overrides.
 FRONTIER_SCALES: tuple[float, ...] = (0.85, 0.925, 1.0, 1.15)
+# Frontier v2 (RC2 research, Report 17 review): fine grid around the promising region,
+# common random numbers across scales and cases, contractual ceiling enforced,
+# point-in-time settlement, retail and institutional positions.
+FRONTIER2_SCALES: tuple[float, ...] = (0.9, 1.0, 1.1, 1.2, 1.25, 1.3, 1.4, 1.5)
+FRONTIER2_TERM_SCALES: tuple[float, ...] = (1.0, 1.25)
+FRONTIER2_TERMS: tuple[int, ...] = (21, 126)
+FSTRESS_SCALES: tuple[float, ...] = (1.0, 1.1, 1.25, 1.5)
+FSTRESS_KINDS = ("base", "combined", "correlated_drawdown", "prolonged_suspension", "execution_failure",
+                 "settlement_delay")
+SETTLEMENT_DELAY_STRESS = 5          # extra sessions before proceeds settle
 EXCH = {"US": "NYSE", "NGX": "NGX"}
 CCY = {"US": "USD", "NGX": "NGN"}
 RATE = {"US": 0.10, "NGX": 0.25}
@@ -201,6 +212,17 @@ def stress_paths(hist: dict[str, list[dict[str, Any]]], keys: list[str], kind: s
         for k in keys:
             out[k][t0:t0 + 20] = out[k][t0:t0 + 20] * 2 + math.log(0.7) / 20
             vm[k][t0:t0 + 20] = 0.5
+    elif kind == "prolonged_suspension":
+        # The largest holding cannot trade for 30 sessions and reopens 3 sigma*sqrt(30) lower.
+        big = keys[0]
+        cum = float(out[big][t0:t0 + 30].sum()) - 3 * sig[big] * math.sqrt(30)
+        out[big][t0:t0 + 30] = np.nan
+        out[big][min(days - 1, t0 + 30)] += cum
+    elif kind == "execution_failure":
+        # No executable volume for 20 sessions while prices drift down 1.5 sigma per session for 5.
+        for k in keys:
+            vm[k][t0:t0 + 20] = 0.0
+            out[k][t0:t0 + 5] -= 1.5 * sig[k]
     elif kind == "combined":
         # Gap, then a correlated drawdown with collapsing liquidity, and a suspension
         # of the largest holding in the middle of it.
@@ -221,10 +243,15 @@ def stress_paths(hist: dict[str, list[dict[str, Any]]], keys: list[str], kind: s
 
 def run_task(t: dict[str, Any]) -> dict[str, Any]:
     try:
+        ex = LiquidationExecutionPolicy()
+        if t.get("settlement_delay"):
+            from dataclasses import replace as _replace
+            ex = _replace(ex, settlement_delay_observations=int(t["settlement_delay"]))
         res = run_cohort(holdings=t["holdings"], bars=t["bars"], origination=t["origination"],
                          term_sessions=t["term"], variants=t["variants"], policy=Policy.default(),
                          interest=InterestPolicy(t["rate"], accrual_frequency="monthly", compounding="compound"),
-                         execution=LiquidationExecutionPolicy(), cure_probability=t.get("cure", 0.5),
+                         execution=ex, cure_probability=t.get("cure", 0.5),
+                         ceiling_cap=t.get("ceiling_cap", False), settlement=t.get("settlement", "fixed"),
                          seed=t["seed"], config=CFG, priors=t["priors"], workout_sessions=40,
                          maturity=t.get("maturity", "repay"), principal_scale=t.get("scale", 1.0),
                          origination_mode=t.get("origination_mode", "matched"),
@@ -246,7 +273,7 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
     for pname, weights in PORTFOLIOS[market].items():
         if any(s in missing for s in weights):
             continue
-        sizes = ("retail", "institutional") if mode in ("hist", "sim") else ("retail",)
+        sizes = ("retail", "institutional") if mode in ("hist", "sim", "frontier2", "fstress") else ("retail",)
         for size in sizes:
             liq = 20 if market == "NGX" else None
             bars = {}
@@ -293,6 +320,22 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
                                       "maturity": "refinance", "scale": scale,
                                       "group": f"frontier|scale{scale}|{pname}|{size}",
                                       "labels": {**base_labels, "principal_scale": scale, "maturity": "refinance"}})
+                elif mode == "frontier2":
+                    cid = f"{market}|{pname}|{size}|{d.isoformat()}"
+                    cseed = 50_000_000 + int(hashlib.sha256(cid.encode()).hexdigest()[:7], 16)  # CRN per cohort
+                    common = {"holdings": hs, "bars": bars, "origination": d, "rate": RATE[market],
+                              "variants": RC_SET, "seed": cseed, "priors": pri, "ceiling_cap": True,
+                              "settlement": "point_in_time"}
+                    cases = [("base", 63, "refinance", 0.5, s_) for s_ in FRONTIER2_SCALES]
+                    cases += [("adverse_maturity_zero_cure", 63, "default", 0.0, s_) for s_ in FRONTIER2_SCALES]
+                    cases += [("term", tm, "refinance", 0.5, s_) for tm in FRONTIER2_TERMS
+                              for s_ in FRONTIER2_TERM_SCALES if oi + tm < len(dates)]
+                    for case, term, mat, cure, scale in cases:
+                        tasks.append({**common, "term": term, "maturity": mat, "cure": cure, "scale": scale,
+                                      "group": f"f2|{case}|term{term}|scale{scale}|{pname}|{size}",
+                                      "labels": {**base_labels, "principal_scale": scale, "case": case,
+                                                 "term": term, "maturity": mat, "cure": cure, "cohort_id": cid,
+                                                 "settlement": "point_in_time", "ceiling": "enforced"}})
                 elif mode == "sens" and pname in ("concentrated_TSLA", "diversified", "banks", "mixed"):
                     for rate, term in ((0.05, 63), (0.30, 63), (RATE[market], 21), (RATE[market], 126)):
                         if oi + term >= len(dates):
@@ -305,6 +348,41 @@ def build_tasks(part: str, bars_by_symbol: dict[str, list[Any]]) -> tuple[list[d
                     tasks.append({"holdings": hs, "bars": bars, "origination": d, "term": 63, "rate": RATE[market],
                                   "variants": cure_sensitivity(), "seed": seed, "priors": pri, "maturity": "refinance",
                                   "group": f"cure|{pname}|{period}", "labels": base_labels})
+            if mode == "fstress":
+                rng = np.random.default_rng(97 + 1000 * list(PORTFOLIOS[market]).index(pname)
+                                            + (0 if size == "retail" else 1))
+                held = [oi for oi in orig_idx if dates[oi] < DEV_START]
+                picks = [held[i] for i in np.linspace(0, len(held) - 1, min(10, len(held))).astype(int)] if held else []
+                for oi in picks:
+                    d = dates[oi]
+                    prices = {s: next(b["close"] for b in reversed(bars[refs[s]]) if b["bar_date"] <= d)
+                              for s in weights}
+                    hs = holdings_for(market, weights, prices, size)
+                    pri = priors_at(market, all_market, d)
+                    keys = [refs[s] for s in weights]
+                    for rep_ in range(2):
+                        path_seed = int(rng.integers(0, 2**31))
+                        cid = f"{market}|{pname}|{size}|{d.isoformat()}|rep{rep_}"
+                        cseed = 60_000_000 + path_seed % 10**7                   # CRN per stress cohort
+                        for kind in FSTRESS_KINDS:
+                            prng = np.random.default_rng(path_seed)               # same base path for every overlay
+                            r, vm = stress_paths(bars, keys, "base" if kind == "settlement_delay" else kind, 130, prng)
+                            sb = {k: simulated_bars(bars[k], r[k], d, vm[k]) for k in keys}
+                            for beh, mat, cure in (("refinance_cure50", "refinance", 0.5),
+                                                   ("default_zero_cure", "default", 0.0)):
+                                for scale in FSTRESS_SCALES:
+                                    lab = {**base_labels, "period": "held_out_origination",
+                                           "data": "observed history + synthetic future", "scenario": kind,
+                                           "behaviour": beh, "path_seed": path_seed, "principal_scale": scale,
+                                           "cohort_id": cid, "settlement": "point_in_time", "ceiling": "enforced"}
+                                    tasks.append({"holdings": hs, "bars": sb, "origination": d, "term": 63,
+                                                  "rate": RATE[market], "variants": RC_SET, "seed": cseed,
+                                                  "priors": pri, "maturity": mat, "cure": cure, "scale": scale,
+                                                  "ceiling_cap": True, "settlement": "point_in_time",
+                                                  "settlement_delay": SETTLEMENT_DELAY_STRESS
+                                                  if kind == "settlement_delay" else 0,
+                                                  "group": f"fs|{kind}|{beh}|scale{scale}|{pname}|{size}",
+                                                  "labels": lab})
             if mode == "sim":
                 rng = np.random.default_rng(7 + len(tasks))
                 held = [oi for oi in orig_idx if dates[oi] < DEV_START]
@@ -349,7 +427,9 @@ def main() -> None:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("manifest")
-    ap.add_argument("--part", required=True, choices=[f"{m}-{k}" for m in ("hist", "sens", "sim", "repay", "frontier") for k in ("US", "NGX")])
+    ap.add_argument("--part", required=True, choices=[f"{m}-{k}" for m in ("hist", "sens", "sim", "repay", "frontier",
+                                                                          "frontier2", "fstress")
+                                                       for k in ("US", "NGX")])
     ap.add_argument("--out", required=True)
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
     ap.add_argument("--limit", type=int, default=0)
@@ -369,7 +449,9 @@ def main() -> None:
         # one variant set, no policy-originated duplicates.
         util = dict(RC_OVERRIDES)["capacity_utilisation"]
         rc_engine = tuple((k, v) for k, v in RC_OVERRIDES if k != "capacity_utilisation")
-        tasks = [dict(t, variants=RC1_SET, scale=t.get("scale", 1.0) * util, origination_engine=rc_engine,
+        only_rc1 = a.part.startswith(("frontier2", "fstress"))        # v2: the RC1 variant alone
+        tasks = [dict(t, variants=(RC1_SET[-1],) if only_rc1 else RC1_SET, scale=t.get("scale", 1.0) * util,
+                      origination_engine=rc_engine,
                       labels={**t["labels"], "scale_of_rc_credit": t.get("scale", 1.0),
                               "effective_scale_of_capacity": t.get("scale", 1.0) * util})
                  for t in tasks if t.get("origination_mode", "matched") == "matched"]
@@ -397,7 +479,7 @@ def main() -> None:
     summary = {}
     for g, rows in sorted(groups.items()):
         rows.sort(key=lambda x: x["origination"])
-        spacing = 21 if g.startswith(("hist", "sens", "cure")) else 63
+        spacing = 21 if g.startswith(("hist", "sens", "cure", "f2")) else 63
         term = next((x["term_sessions"] for x in rows if "term_sessions" in x), 63)
         summary[g] = {"labels": rows[0]["labels"], **aggregate(rows, spacing_sessions=spacing, term_sessions=term),
                       "window": [rows[0]["origination"], rows[-1]["origination"]],
@@ -435,7 +517,7 @@ def main() -> None:
     pools: dict[str, list[dict[str, Any]]] = {}
     for r in results:
         parts = r["group"].split("|")
-        key = "|".join(parts[:2]) if parts[0] in ("sim", "simpolicy", "repay", "frontier") else \
+        key = "|".join(parts[:2]) if parts[0] in ("sim", "simpolicy", "repay", "frontier", "f2", "fs") else \
             f"{parts[0]}|{parts[-1]}" if parts[0] in ("hist", "histpolicy") else parts[0]
         pools.setdefault(key, []).append(r)
     # Compact per-cohort records (no event logs), gzip+base64, so partitioned jobs can be

@@ -716,3 +716,35 @@ def test_rc1_matched_origination_uses_rc1_capacity() -> None:
                      variants=(Variant("rc1", "adaptive", engine=eng),), origination_mode="policy")
     # Matched (scale 0.925 on RC1's engine) and policy-originated (RC1 utilisation) lend the same.
     assert base["principal"] == pytest.approx(pol["variants"]["rc1"]["principal"], rel=1e-9)
+
+
+def test_rc2_measurements_and_options_leave_defaults_unchanged() -> None:
+    """Report 17 review: realised interest, funded balance, ceiling and point-in-time
+    settlement are opt-in or measurement-only."""
+    from app.rc2.settlement import settlement_days
+    hs, bars, dates = _cohort_inputs()
+    kw: dict = {"holdings": hs, "bars": bars, "origination": dates[400], "term_sessions": 63, "seed": 3,
+                "config": CandidateConfig(n_paths=300), "workout_sessions": 40}
+    base = run_cohort(**kw)
+    explicit = run_cohort(**kw, ceiling_cap=False, settlement="fixed")
+    assert explicit == base
+    for v in base["variants"].values():
+        assert 0.0 <= v["interest_received"] <= v["interest_accrued"] + 1e-6
+        assert v["calendar_sessions"] >= v["sessions"]
+        assert v["funded_principal_sessions"] <= v["principal"] * v["calendar_sessions"] + 1e-6
+    # Contractual ceiling: a scaled principal never exceeds the client ceiling.
+    big = run_cohort(**{**kw, "principal_scale": 5.0}, ceiling_cap=True)
+    assert big["principal_binding"] == "contractual_ceiling"
+    assert big["variants"][next(iter(big["variants"]))]["principal"] == pytest.approx(big["client_ceiling"])
+    lim = run_cohort(**kw, max_principal=1000.0)
+    assert lim["principal_binding"] == "institutional_limit"
+    assert {v["principal"] for v in lim["variants"].values()} == {1000.0}
+    # Point-in-time settlement.
+    assert settlement_days("NGX", date(2025, 11, 27)) == 3
+    assert settlement_days("NGX", date(2025, 11, 28)) == 2
+    assert settlement_days("NGX", date(2026, 6, 1)) == 1
+    assert settlement_days("NYSE", date(2024, 5, 24)) == 2 and settlement_days("NYSE", date(2024, 5, 28)) == 1
+    pit = run_cohort(**kw, settlement="point_in_time")
+    assert pit["settlement"] == "point_in_time"
+    with pytest.raises(ValueError):
+        run_cohort(**kw, settlement="tomorrow")
