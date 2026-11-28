@@ -310,3 +310,22 @@ def test_post_raises_http_error_with_vertex_message(monkeypatch) -> None:
     with pytest.raises(urllib.error.HTTPError) as ei:
         llm._post("https://example.invalid/x", {"a": 1}, {})
     assert ei.value.code == 400 and "Invalid function declaration" in str(ei.value)
+
+
+def test_gemini_replays_thought_signatures_and_groups_parallel_responses(monkeypatch) -> None:
+    monkeypatch.setenv("CRI_GCP_ACCESS_TOKEN", "tok")
+    parts = [{"functionCall": {"name": "list_accounts", "args": {}}, "thoughtSignature": "sig-1"},
+             {"functionCall": {"name": "instrument_reference", "args": {}}}]
+    seen, post = _capture({"candidates": [{"content": {"parts": [{"text": "done"}]}}], "usageMetadata": {}})
+    g = VertexGemini(project="p", model="gemini-x", post=post)
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "provider": g.name, "provider_parts": parts,
+             "tool_calls": [{"id": "a", "name": "list_accounts", "args": {}},
+                            {"id": "b", "name": "instrument_reference", "args": {}}]},
+            {"role": "tool", "tool_call_id": "a", "name": "list_accounts", "content": {"data": {}}},
+            {"role": "tool", "tool_call_id": "b", "name": "instrument_reference", "content": {"data": {}}}]
+    r = g.complete("sys", msgs, TOOLS)
+    c = seen["body"]["contents"]
+    assert c[1] == {"role": "model", "parts": parts}                    # signature kept verbatim
+    assert len(c) == 3 and [list(p) for p in c[2]["parts"]] == [["functionResponse"], ["functionResponse"]]
+    assert r.provider_parts == [{"text": "done"}]
