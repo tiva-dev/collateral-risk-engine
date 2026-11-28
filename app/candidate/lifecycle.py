@@ -226,6 +226,9 @@ class _Feed:
         return out
 
 
+PAYDOWN_COST_ALLOWANCE = 0.05   # execution-cost allowance when sizing a paydown sale (conservative)
+
+
 def run_cohort(
     *,
     holdings: list[Holding],
@@ -467,7 +470,7 @@ def run_cohort(
             sig = vol20[dk].get(d, 0.02)
             cost = hs_ + cfg.impact_coefficient * sig * math.sqrt(part) + execution.execution_cost_rate
             days = (q / (part * adv) if adv > 0 else 60.0) + settle_at(d)
-            buf = max(0.02, 1.645 * sig * math.sqrt(max(1.0, days)))
+            buf = min(0.5, max(0.02, 1.645 * sig * math.sqrt(max(1.0, days))))
             return px * max(0.0, 1 - cost) * (1 - buf), cost
         covered = sum(expect(k, q)[0] * q for k, q in existing.items() if q > 0)
         short = need - covered
@@ -484,6 +487,9 @@ def run_cohort(
             short -= q * unit
             if short <= 1e-9:
                 break
+        if short > 1e-9:
+            # Expected proceeds cannot cover the need: sell everything that remains.
+            add = dict(avail)
         return add
 
     def fillable(k: str, d: date) -> dict[str, Any] | None:
@@ -622,9 +628,19 @@ def run_cohort(
                         pay = bal if net_bal <= cap_m else 0.0
                         out.maturity_outcome = "refinanced" if pay > 0 else "refinance_refused"
                         if pay == 0.0 and refinance_policy == "paydown" and cap_m > 0:
-                            workout_target = 0.98 * cap_m   # aim 2% below capacity (interest accrues meanwhile)
-                            refinance_limit = cap_m
-                            out.maturity_outcome = "paydown_refinance"
+                            # Joint target: selling collateral of value S also removes its share of the
+                            # capacity. With capacity ratio c = cap/value and proceeds S(1 - k), the
+                            # balance after paydown B - S(1 - k) must not exceed 0.98 c (value - S):
+                            # S = (B - 0.98 c value) / ((1 - k) - 0.98 c). Infeasible -> full workout.
+                            c_ratio, k_cost = cap_m / max(value, 1e-9), PAYDOWN_COST_ALLOWANCE
+                            den = (1 - k_cost) - 0.98 * c_ratio
+                            s_sale = (net_bal - 0.98 * c_ratio * value) / den if den > 0 else math.inf
+                            if 0 < s_sale < value:
+                                workout_target = max(1e-6, net_bal - s_sale * (1 - k_cost))
+                                refinance_limit = c_ratio * (value - s_sale)   # capacity of the collateral left after the sale
+                                out.maturity_outcome = "paydown_refinance"
+                            else:
+                                out.maturity_outcome = "paydown_infeasible_full_workout"
                     elif maturity == "default":
                         out.maturity_outcome = "default"
                     if maturity == "repay":
@@ -667,11 +683,10 @@ def run_cohort(
                         cap_r = ltv0 * value
                     out.refinance_capacity = cap_r
                     if loan.balance - cash_now > cap_r:
-                        refinance_limit = cap_r
-                        workout_target = 0.98 * cap_r
-                        if workout_target <= 0:
-                            out.maturity_outcome = "paydown_failed_full_workout"
-                            out.defaulted_at_maturity = True
+                        # No chasing a shrinking capacity: one joint-sized sale, then a full workout.
+                        refinance_limit = workout_target = 0.0
+                        out.maturity_outcome = "paydown_failed_full_workout"
+                        out.defaulted_at_maturity = True
                 if workout_target > 0 and not pending and loan.balance - cash_now <= refinance_limit:
                     loan = repay(loan, cash_now)
                     for k in cash_keys:
