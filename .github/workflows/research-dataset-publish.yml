@@ -118,7 +118,8 @@ jobs:
         run: |
           dest="gs://tiva-cri-stg-cda9-research-data/examined/${{ matrix.market }}/${{ steps.build.outputs.id }}"
           for f in bars.csv.gz fx.csv.gz DATASET.json; do
-            gcloud storage cp --no-clobber "ds/$f" "$dest/$f"
+            # server-side create-only precondition (the publisher cannot read objects)
+            gcloud storage cp --if-generation-match=0 "ds/$f" "$dest/$f"
           done
           echo "published $dest"
           echo "### ${{ matrix.market }} research dataset" >> "$GITHUB_STEP_SUMMARY"
