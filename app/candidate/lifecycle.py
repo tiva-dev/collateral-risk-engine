@@ -444,6 +444,18 @@ def run_cohort(
         loan = Loan(p_v, currency=ccy)
         qty = dict(q0)
         out = Outcome(v.name, p_v, p_v / v0)
+        funded = [p_v]          # measurement: original principal still outstanding (cash the lender funds)
+
+        def repay(loan_: Loan, amount: float, out_: Outcome = out, funded_: list[float] = funded) -> Loan:
+            """apply_repayment plus measurement: interest capitalised into principal by
+            compounding counts as interest when repaid (interest first), the rest reduces
+            the funded principal."""
+            new, alloc = apply_repayment(loan_, amount)
+            capitalised = max(0.0, loan_.principal - funded_[0])
+            cap_paid = min(alloc["principal_paid"], capitalised)
+            out_.interest_received += alloc["interest_paid"] + cap_paid
+            funded_[0] = max(0.0, funded_[0] - (alloc["principal_paid"] - cap_paid))
+            return new
         ltv_v = p_v / v0
         feed = _Feed(holdings, keys, series)
         feed.market(origination)
@@ -466,12 +478,11 @@ def run_cohort(
             prev_t = now
             for _, amt in [x for x in pending if x[0] <= i]:
                 b4 = loan.balance
-                loan, alloc = apply_repayment(loan, amt)
-                out.interest_received += alloc["interest_paid"]
+                loan = repay(loan, amt)
                 out.realized_recovery += b4 - loan.balance
             pending = [x for x in pending if x[0] > i]
             out.calendar_sessions += 1
-            out.funded_principal_sessions += loan.principal
+            out.funded_principal_sessions += funded[0]
             md = feed.market(d)
             # 1) Execute orders submitted at an earlier session against today's bar.
             if orders and i >= submit_from:
@@ -546,8 +557,7 @@ def run_cohort(
                     elif maturity.startswith("partial:"):
                         out.maturity_outcome = "partial_then_default"
                 if pay > 0:
-                    loan, alloc = apply_repayment(loan, pay)
-                    out.interest_received += alloc["interest_paid"]
+                    loan = repay(loan, pay)
                     out.borrower_repayment += pay
                 if loan.balance <= 0.01:
                     out.repaid_at_maturity = True
@@ -643,8 +653,7 @@ def run_cohort(
                     grace_left -= 1
                     if cure_draws[i] < cure_p:
                         pay = max(0.0, net_bal - target)
-                        loan, alloc = apply_repayment(loan, pay)
-                        out.interest_received += alloc["interest_paid"]
+                        loan = repay(loan, pay)
                         out.cures += 1
                         out.cure_payments += pay
                         out.events.append({"session": i, "date": d.isoformat(), "event": "cure", "amount": pay})
@@ -677,8 +686,7 @@ def run_cohort(
             out.status = "repaid"
         else:
             cash = sum(q for k, q in qty.items() if k in cash_keys)
-            loan, alloc = apply_repayment(loan, cash)
-            out.interest_received += alloc["interest_paid"]
+            loan = repay(loan, cash)
             out.outstanding_debt = loan.balance
             remaining = {k: q for k, q in qty.items() if k not in cash_keys and q > 1e-9}
             out.residual_collateral_estimate = sum(q * feed.last_px.get(k, 0.0) for k, q in remaining.items())

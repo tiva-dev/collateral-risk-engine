@@ -243,6 +243,18 @@ def paired_delta(rows: Sequence[dict[str, Any]], scale: float, base: float = 1.0
 
 # ------------------------------------------------------------------ frontier and capacity
 
+def exposure_ratio(rows: Sequence[dict[str, Any]], scale: float, base: float = 1.0) -> float | None:
+    """Actual principal at ``scale`` relative to the matched cohorts' principal at ``base``
+    (the contractual ceiling can make it smaller than the nominal scale)."""
+    by: dict[tuple[Any, ...], dict[float, float]] = {}
+    for r in rows:
+        by.setdefault((r["cohort_id"], r["case"], r["behaviour"], r["term"]), {})[r["scale"]] = r["principal"]
+    pairs = [(v[base], v[scale]) for v in by.values() if base in v and scale in v]
+    if not pairs:
+        return None
+    return sum(p[1] for p in pairs) / sum(p[0] for p in pairs)
+
+
 def frontier(rows: Sequence[dict[str, Any]], econ: Economics, stress: Sequence[dict[str, Any]] = (),
              reps: int = 400) -> list[dict[str, Any]]:
     out = []
@@ -257,7 +269,10 @@ def frontier(rows: Sequence[dict[str, Any]], econ: Economics, stress: Sequence[d
             rs, lambda x: sum(r["loss"] for r in x) / sum(r["principal"] for r in x), reps)
         p["expected_loss_upper"] = max(p["expected_loss_pw_ci95"][1], p["rare_loss"]["expected_loss_upper"])
         pw = p["principal_weighted"]
-        p["risk_adjusted_profit_per_rc1_credit"] = s * pw["risk_adjusted_profit"] if rs else None
+        ratio = exposure_ratio(rows, s)
+        p["nominal_scale"] = s
+        p["exposure_per_rc1_credit"] = ratio if ratio is not None else s
+        p["risk_adjusted_profit_per_rc1_credit"] = p["exposure_per_rc1_credit"] * pw["risk_adjusted_profit"]
         if st:
             p["stress_loss_probability"] = float(np.mean([r["loss"] / r["principal"] > 1e-6 for r in st]))
         out.append({"scale": s, **p})
@@ -289,7 +304,7 @@ def capacity(rows: Sequence[dict[str, Any]], econ: Economics, appetite: Research
         sel = max(good) if good else None
         per["|".join(map(str, g))] = {
             "supported_scale": sel,
-            "binding_constraint": None if sel is None else _binding(fronts[g], sel, ok),
+            "binding_constraint": None if sel is None else _binding(fronts[g], sel, appetite),
             "tested_scales": sorted(fronts[g]),
             "at_selected": None if sel is None else _summary(fronts[g][sel]),
             "at_rc1": _summary(fronts[g][1.0]) if 1.0 in fronts[g] else None}
@@ -302,9 +317,9 @@ def capacity(rows: Sequence[dict[str, Any]], econ: Economics, appetite: Research
             if s is None:
                 continue
             p = fronts[g][s]
-            exp += s
+            exp += p["exposure_per_rc1_credit"]
             rap += p["risk_adjusted_profit_per_rc1_credit"]
-            el += s * p["expected_loss_upper"]
+            el += p["exposure_per_rc1_credit"] * p["expected_loss_upper"]
         n = len(choice)
         return {"exposure_per_rc1_credit": exp / n, "risk_adjusted_profit_per_rc1_credit": rap / n,
                 "expected_loss_upper_per_rc1_credit": el / n, "groups_lending": sum(v is not None for v in choice.values())}
@@ -317,16 +332,24 @@ def capacity(rows: Sequence[dict[str, Any]], econ: Economics, appetite: Research
             "note": "research appetite settings, not approved risk appetite; tested grid only"}
 
 
-def _binding(front: dict[float, dict[str, Any]], sel: float, ok: Any) -> str:
+def _binding(front: dict[float, dict[str, Any]], sel: float, appetite: ResearchAppetite) -> str:
+    """The constraints that actually fail at the next tested scale."""
     higher = [s for s in sorted(front) if s > sel]
     if not higher:
         return "largest tested scale"
-    p = front[higher[0]]
+    s = higher[0]
+    p = front[s]
     reasons = []
-    if p["expected_loss_upper"] > 0:
-        reasons.append(f"EL bound {p['expected_loss_upper']:.4f} at {higher[0]}")
-    reasons.append(f"liquidation upper {p['liquidation_frequency_ci95'][1]:.3f} at {higher[0]}")
-    return "; ".join(reasons)
+    if p["expected_loss_upper"] > appetite.max_expected_loss:
+        reasons.append(f"EL bound {p['expected_loss_upper']:.4f} > {appetite.max_expected_loss} at {s}")
+    if p["liquidation_frequency_ci95"][1] > appetite.max_liquidation_frequency:
+        reasons.append(f"liquidation upper {p['liquidation_frequency_ci95'][1]:.3f} > "
+                       f"{appetite.max_liquidation_frequency} at {s}")
+    slp = p.get("stress_loss_probability")
+    if appetite.max_stress_loss_probability is not None and slp is not None \
+            and slp > appetite.max_stress_loss_probability:
+        reasons.append(f"stress loss probability {slp:.3f} > {appetite.max_stress_loss_probability} at {s}")
+    return "; ".join(reasons) or "next scale passes (non-monotone frontier)"
 
 
 def _summary(p: dict[str, Any]) -> dict[str, Any]:
@@ -338,4 +361,5 @@ def _summary(p: dict[str, Any]) -> dict[str, Any]:
             "interest_accrued_pw": pw["interest_accrued"], "interest_received_pw": pw["interest_received"],
             "funded_years_pw": pw["funded_years_per_unit"],
             "rap_per_rc1_credit": p["risk_adjusted_profit_per_rc1_credit"],
+            "exposure_per_rc1_credit": p["exposure_per_rc1_credit"],
             "ceiling_binding_share": p["ceiling_binding_share"]}

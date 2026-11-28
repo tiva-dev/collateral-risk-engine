@@ -114,3 +114,22 @@ def test_frontier_reports_unique_cohorts_and_scale_runs() -> None:
     f = frontier(rows, Economics(0.05), reps=50)
     assert [p["scale"] for p in f] == [1.0, 1.1, 1.2]
     assert all(p["unique_cohorts"] == 72 and p["loans"] == 72 for p in f)
+
+
+def test_exposure_uses_actual_capped_principal() -> None:
+    d = date(2020, 1, 1)
+    rows = loan_rows([cohort("a", d, 1.0, 10_000.0), cohort("a", d, 1.5, 11_000.0),     # ceiling binds
+                      cohort("b", d, 1.0, 10_000.0), cohort("b", d, 1.5, 15_000.0)])
+    f = {p["scale"]: p for p in frontier(rows, Economics(0.05), reps=20)}
+    assert f[1.5]["exposure_per_rc1_credit"] == pytest.approx(26_000 / 20_000)
+    assert f[1.5]["risk_adjusted_profit_per_rc1_credit"] == pytest.approx(
+        1.3 * f[1.5]["principal_weighted"]["risk_adjusted_profit"])
+
+
+def test_binding_constraint_names_only_failing_limits() -> None:
+    from app.optimizer.frontier_v2 import _binding
+    front = {1.0: {}, 1.25: {"expected_loss_upper": 0.0005, "liquidation_frequency_ci95": [0.0, 0.05],
+                             "stress_loss_probability": 0.3}}
+    msg = _binding(front, 1.0, ResearchAppetite(max_expected_loss=0.001, max_liquidation_frequency=0.1,
+                                                max_stress_loss_probability=0.1))
+    assert msg.startswith("stress loss probability") and "EL" not in msg and "liquidation" not in msg

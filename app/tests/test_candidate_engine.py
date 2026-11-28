@@ -730,6 +730,13 @@ def test_rc2_measurements_and_options_leave_defaults_unchanged() -> None:
     assert explicit == base
     for v in base["variants"].values():
         assert 0.0 <= v["interest_received"] <= v["interest_accrued"] + 1e-6
+    # Compounding capitalises interest into principal; repaying it still counts as interest.
+    repaid = run_cohort(**{**kw, "maturity": "repay", "term_sessions": 126,
+                           "interest": InterestPolicy(0.25, accrual_frequency="monthly", compounding="compound")})
+    for v in repaid["variants"].values():
+        if v["status"] == "repaid":
+            assert v["interest_received"] == pytest.approx(v["interest_accrued"], rel=1e-9, abs=1e-6)
+            assert v["funded_principal_sessions"] < v["principal"] * v["calendar_sessions"] + 1e-6
         assert v["calendar_sessions"] >= v["sessions"]
         assert v["funded_principal_sessions"] <= v["principal"] * v["calendar_sessions"] + 1e-6
     # Contractual ceiling: a scaled principal never exceeds the client ceiling.
