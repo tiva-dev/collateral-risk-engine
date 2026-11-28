@@ -385,6 +385,24 @@ def inputs_digest(rows_by_symbol: dict[str, list[dict[str, Any]]], decision: dat
                                      for s, v in sorted(rows_by_symbol.items())})).hexdigest()
 
 
+def last_completed_session_day(now_utc: datetime) -> date:
+    """Latest calendar day whose US daily bar is final and older than the 15-minute SIP
+    embargo: today after 16:20 New York time, otherwise yesterday."""
+    from zoneinfo import ZoneInfo
+    ny = now_utc.astimezone(ZoneInfo("America/New_York"))
+    close = (13, 20) if us_early_close(ny.date()) else (16, 20)
+    return ny.date() if (ny.hour, ny.minute) >= close else ny.date() - timedelta(days=1)
+
+
+def us_early_close(d: date) -> bool:
+    """NYSE 13:00 closes: the day after Thanksgiving, Christmas Eve and 3 July, when trading days."""
+    if d.weekday() >= 5:
+        return False
+    first_thu = 1 + (3 - date(d.year, 11, 1).weekday()) % 7
+    thanksgiving = date(d.year, 11, first_thu + 21)
+    return d in (thanksgiving + timedelta(days=1), date(d.year, 12, 24), date(d.year, 7, 3))
+
+
 def cmd_forecast(a: argparse.Namespace) -> None:
     from app.historical_data.alpaca import AlpacaTradingHistoricalProvider
     base = _base(a.out)
@@ -392,7 +410,7 @@ def cmd_forecast(a: argparse.Namespace) -> None:
     if got is None:
         raise SystemExit("no frozen artifact")
     art = load_artifact(got[0])
-    today = date.fromisoformat(a.asof) if a.asof else datetime.now(UTC).date()
+    today = date.fromisoformat(a.asof) if a.asof else last_completed_session_day(datetime.now(UTC))
     prov = AlpacaTradingHistoricalProvider()
     rows_by_symbol = {}
     for s in art["universe"]:

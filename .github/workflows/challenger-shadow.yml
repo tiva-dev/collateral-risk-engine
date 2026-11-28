@@ -40,5 +40,17 @@ jobs:
             [[ "$ASOF" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "bad asof"; exit 1; }
             args="$args,--asof,$ASOF"
           fi
+          set +e
           gcloud run jobs execute cri-research --project ${{ steps.cfg.outputs.project }} \
-            --region europe-west1 --wait --args="$args"
+            --region europe-west1 --wait --args="$args" 2>&1 | tee exec.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" != 0 ]; then
+            # Failure diagnostics: error-severity entries of this execution only (tracebacks),
+            # never INFO output, because Actions logs of this public repository are public.
+            ex=$(grep -oE "cri-research-[a-z0-9]{5}" exec.log | head -n 1)
+            if [ -n "$ex" ]; then
+              gcloud logging read "resource.type=\"cloud_run_job\" AND labels.\"run.googleapis.com/execution_name\"=\"$ex\" AND severity>=ERROR" \
+                --project ${{ steps.cfg.outputs.project }} --limit 60 --order asc --format='value(textPayload)' | cut -c1-400 || true
+            fi
+          fi
+          exit $rc
