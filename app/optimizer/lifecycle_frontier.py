@@ -78,6 +78,12 @@ def _loss_rows(rows: Sequence[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray, 
     return loss, years, income, liq
 
 
+def _share(rows: Sequence[dict[str, Any]], key: str) -> float | None:
+    if any(key not in r for r in rows):
+        return None
+    return float(sum(r[key] for r in rows) / sum(r["principal"] for r in rows))
+
+
 def _es(x: np.ndarray, q: float) -> float:
     k = max(1, math.ceil((1 - q) * x.size))
     return float(np.sort(x)[-k:].mean())
@@ -87,6 +93,7 @@ def point(rows: Sequence[dict[str, Any]], econ: LifecycleEconomics) -> dict[str,
     if not rows:
         return {"loans": 0}
     loss, years, income, liq = _loss_rows(rows)
+    principal = np.array([r["principal"] for r in rows], float)
     t = float(years.mean())
     el = float(loss.mean())
     es = _es(loss, econ.tail)
@@ -99,7 +106,12 @@ def point(rows: Sequence[dict[str, Any]], econ: LifecycleEconomics) -> dict[str,
             "mean_years": t, "expected_loss": el, f"es{int(econ.tail * 100)}_loss": es,
             "loss_probability": float(np.mean(loss > 1e-6)), "liquidation_frequency": float(liq.mean()),
             "margin_calls_per_loan": float(np.mean([r.get("margin_calls", 0) for r in rows])),
-            "borrower_execution_cost": float(np.mean([r.get("execution_costs", 0.0) / r["principal"] for r in rows])),
+            # Ratios of sums (principal-weighted), as in the lifecycle validation tables: a mean of
+            # per-loan ratios is dominated by loans whose RC1 credit is tiny relative to collateral.
+            "borrower_execution_cost": _share(rows, "execution_costs"),
+            "execution_cost_intervention": _share(rows, "execution_costs_intervention"),
+            "execution_cost_maturity_workout": _share(rows, "execution_costs_workout"),
+            "expected_loss_principal_weighted": float((loss * principal).sum() / principal.sum()),
             "interest_income": inc, "funding_cost": fund, "operating_cost": opex,
             "economic_capital": capital, "net_margin_after_el": net,
             "raroc": net / (capital * t) if capital > 0 and t > 0 else None,

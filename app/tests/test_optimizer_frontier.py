@@ -220,3 +220,22 @@ def test_quantile_view_matches_raw_samples(monkeypatch) -> None:
         RiskAppetite(alpha=0.99)
     with pytest.raises(ValueError):
         frontier([e], alpha=0.99)
+
+
+def test_execution_cost_is_principal_weighted_and_split() -> None:
+    """A loan with tiny credit whose collateral is worked out must not dominate the cost share."""
+    from app.optimizer.lifecycle_frontier import LifecycleEconomics, point
+    rows = [{"principal": 1_000_000.0, "lender_loss": 0.0, "sessions": 63, "interest_accrued": 10_000.0,
+             "execution_costs": 10_000.0, "execution_costs_intervention": 4_000.0,
+             "execution_costs_workout": 6_000.0, "liquidation_episodes": 1},
+            {"principal": 1_000.0, "lender_loss": 100.0, "sessions": 63, "interest_accrued": 10.0,
+             "execution_costs": 5_000.0, "execution_costs_intervention": 0.0,
+             "execution_costs_workout": 5_000.0, "liquidation_episodes": 0}]
+    p = point(rows, LifecycleEconomics(funding_rate=0.05))
+    assert abs(p["borrower_execution_cost"] - 15_000 / 1_001_000) < 1e-12     # not mean(1%, 500%)
+    assert abs(p["execution_cost_intervention"] + p["execution_cost_maturity_workout"]
+               - p["borrower_execution_cost"]) < 1e-12
+    assert abs(p["expected_loss_principal_weighted"] - 100 / 1_001_000) < 1e-12
+    assert abs(p["expected_loss"] - 0.05) < 1e-12                               # per-loan mean kept
+    legacy = [{k: v for k, v in r.items() if k != "execution_costs_workout"} for r in rows]
+    assert point(legacy, LifecycleEconomics(funding_rate=0.05))["execution_cost_maturity_workout"] is None
