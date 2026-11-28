@@ -147,6 +147,8 @@ class ModelRegistry:
         assert_research_window(rec.data_through)
         if rec.key in self.records():
             raise ValueError(f"{rec.key} already registered (versions are immutable)")
+        if rec.parent == rec.version:
+            raise ValueError(f"{rec.key} cannot be its own parent")
         if rec.stage is not Stage.RESEARCH:
             raise ApprovalRequired("new models always enter at the research stage")
         self._append({"event": "register", "key": rec.key, "record": {**asdict(rec), "stage": rec.stage.value}})
@@ -227,7 +229,7 @@ class ModelRegistry:
     def lineage(self, key: str) -> list[str]:
         recs, out = self.records(), []
         cur = recs.get(key)
-        while cur is not None:
+        while cur is not None and cur.key not in out:          # cycle-safe
             out.append(cur.key)
             cur = recs.get(f"{cur.model_id}@{cur.parent}") if cur.parent else None
         return out
