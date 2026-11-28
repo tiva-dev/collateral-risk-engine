@@ -31,3 +31,14 @@ def test_overlays_share_the_base_path() -> None:
     assert np.isnan(r["a"]).sum() == 10
     r, vm = stress_paths(hist, ["a", "b"], "liquidity_collapse", 60, np.random.default_rng(5))
     assert (vm["a"] == 0.1).sum() == 30
+
+
+def test_frontier_v2_stress_kinds() -> None:
+    hist = {"a": _hist(1), "b": _hist(2)}
+    base, _ = stress_paths(hist, ["a", "b"], "base", 80, np.random.default_rng(5))
+    r, vm = stress_paths(hist, ["a", "b"], "prolonged_suspension", 80, np.random.default_rng(5))
+    assert np.isnan(r["a"]).sum() == 30 and not np.isnan(r["b"]).any()
+    assert np.allclose(r["b"], base["b"])                     # only the suspended holding changes
+    r, vm = stress_paths(hist, ["a", "b"], "execution_failure", 80, np.random.default_rng(5))
+    assert (vm["a"] == 0.0).sum() == 20 and (vm["b"] == 0.0).sum() == 20
+    assert (r["a"] < base["a"] - 1e-12).sum() == 5
