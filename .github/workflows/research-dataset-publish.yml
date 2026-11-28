@@ -117,9 +117,19 @@ jobs:
         if: steps.sel.outputs.run == 'true'
         run: |
           dest="gs://tiva-cri-stg-cda9-research-data/examined/${{ matrix.market }}/${{ steps.build.outputs.id }}"
+          # The path is content-addressed (dataset_id = hash of the file hashes) and object
+          # writes are atomic, so an existing object at this path holds these exact bytes:
+          # "already exists" means already published, which makes a partial publish
+          # resumable. DATASET.json goes last and is the completion marker (loaders refuse
+          # a dataset without it and verify every checksum).
           for f in bars.csv.gz fx.csv.gz DATASET.json; do
-            # server-side create-only precondition (the publisher cannot read objects)
-            gcloud storage cp --if-generation-match=0 "ds/$f" "$dest/$f"
+            if ! out=$(gcloud storage cp --if-generation-match=0 "ds/$f" "$dest/$f" 2>&1); then
+              if echo "$out" | grep -qiE "412|precondition"; then
+                echo "$f already published (content-addressed path)"
+              else
+                echo "$out"; exit 1
+              fi
+            fi
           done
           echo "published $dest"
           echo "### ${{ matrix.market }} research dataset" >> "$GITHUB_STEP_SUMMARY"
