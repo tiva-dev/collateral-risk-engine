@@ -165,7 +165,9 @@ class Analyst:
                 cost += c
                 self.gw.charge_llm(r.input_tokens + r.output_tokens, c)
                 if r.tool_calls:
-                    msgs.append({"role": "assistant", "content": r.text, "tool_calls": r.tool_calls})
+                    msgs.append({"role": "assistant", "content": r.text, "tool_calls": r.tool_calls,
+                                 "provider": getattr(getattr(self.provider, "chosen", None), "name", None)
+                                 or self.provider.name, "provider_parts": r.provider_parts})
                     for call in r.tool_calls:
                         env = self.gw.call(call["name"], call.get("args") or {})
                         calls_log.append({"tool": call["name"], "args": call.get("args") or {},

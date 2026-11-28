@@ -38,6 +38,7 @@ class LLMResponse:
     output_tokens: int = 0
     model: str = ""
     raw_stop: str = ""
+    provider_parts: Any = None      # provider-native assistant turn, replayed verbatim (e.g. thought signatures)
 
 
 class LLMProvider(Protocol):
@@ -120,12 +121,21 @@ class VertexGemini(_Priced):
             if m["role"] == "user":
                 contents.append({"role": "user", "parts": [{"text": m["content"]}]})
             elif m["role"] == "assistant":
+                if m.get("provider") == self.name and m.get("provider_parts"):
+                    # Replay the model's own parts verbatim: Gemini requires each
+                    # functionCall's thought_signature to come back unchanged.
+                    contents.append({"role": "model", "parts": m["provider_parts"]})
+                    continue
                 parts: list[dict[str, Any]] = [{"text": m["content"]}] if m.get("content") else []
                 parts += [{"functionCall": {"name": c["name"], "args": c["args"]}} for c in m.get("tool_calls", [])]
                 contents.append({"role": "model", "parts": parts})
             elif m["role"] == "tool":
-                contents.append({"role": "user", "parts": [{"functionResponse": {
-                    "name": m["name"], "response": {"content": m["content"]}}}]})
+                part = {"functionResponse": {"name": m["name"], "response": {"content": m["content"]}}}
+                prev = contents[-1] if contents else None
+                if prev and prev["role"] == "user" and all("functionResponse" in p for p in prev["parts"]):
+                    prev["parts"].append(part)      # all responses to one call turn go in one content
+                else:
+                    contents.append({"role": "user", "parts": [part]})
         body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": contents,
                 "tools": [{"functionDeclarations": [{"name": t["name"], "description": t["description"],
                                                      "parameters": _gemini_schema(t["parameters"])} for t in tools]}],
@@ -141,7 +151,7 @@ class VertexGemini(_Priced):
                  for p in parts if "functionCall" in p]
         u = d.get("usageMetadata", {})
         return LLMResponse(text, calls, int(u.get("promptTokenCount", 0)), int(u.get("candidatesTokenCount", 0)),
-                           self.model, cand.get("finishReason", ""))
+                           self.model, cand.get("finishReason", ""), provider_parts=parts)
 
 
 def _anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -326,7 +336,7 @@ def _rank_gemini(names: list[tuple[str, str]]) -> list[str]:
             continue
         if stage in ("PRIVATE_PREVIEW", "EXPERIMENTAL"):   # need allowlisting; never take a candidate slot
             continue
-        ga = 0 if stage in ("GA", "") else 1
+        ga = 0 if stage == "GA" else 1          # unknown stage ranks with previews
         tier = 0 if "flash" in m and "lite" not in m else (1 if "lite" in m else 2)
         rows.append(((ga, tuple(-x for x in version(m)), tier), m))
     return [m for _, m in sorted(set(rows))]
