@@ -405,3 +405,17 @@ def test_book_totals_are_per_currency_and_instruments_use_stable_keys(book) -> N
     keys = {d["instrument_key"] for d in det}
     assert keys == {"NASDAQ:TECA:USD:LISTED_EQUITY", "NGX:TECA:NGN:LISTED_EQUITY"}     # same ticker, two instruments
     assert all(len(d["exposure_by_currency"]) == 1 for d in det)
+
+
+def test_capacity_figures_carry_distinct_categories(book) -> None:
+    """Report 17 review, section 6: approved RC1 credit, experimental capacity,
+    recovery-conditional and lifetime estimates are presented distinctly."""
+    from app.analyst.agent import SYSTEM
+    d = gw(book).call("capacity_frontier", {"account_ref": "ACC-001"})["data"]
+    cls = d["classification"]
+    assert cls["rc1_approved_credit_limit"]["category"] == "approved_rc1_credit"
+    assert cls["risk_supported_capacity"]["category"] == cls["risk_supported_ltv"]["category"] == "experimental_capacity"
+    assert cls["points"]["category"] == "recovery_conditional_estimate"
+    assert cls["lifetime_estimates"]["category"] == "lifetime_risk_estimate"
+    assert {k for k in cls if k != "lifetime_estimates"} <= set(d)
+    assert "Never present experimental capacity as available or approved credit" in SYSTEM
