@@ -167,3 +167,8 @@ def test_default_decision_day_respects_the_close_and_sip_embargo() -> None:
     assert ch.last_completed_session_day(datetime(2026, 11, 30, 18, 0, tzinfo=UTC)) == date(2026, 11, 29)  # 13:00 NY
     assert ch.last_completed_session_day(datetime(2026, 11, 30, 21, 25, tzinfo=UTC)) == date(2026, 11, 30)  # 16:25 NY
     assert ch.last_completed_session_day(datetime(2026, 7, 1, 20, 10, tzinfo=UTC)) == date(2026, 6, 30)     # 16:10 EDT
+    # Early closes (13:00 NY): Black Friday 2026 is 27 Nov; Christmas Eve 2026 is a Thursday.
+    assert ch.us_early_close(date(2026, 11, 27)) and ch.us_early_close(date(2026, 12, 24))
+    assert not ch.us_early_close(date(2026, 11, 26)) and not ch.us_early_close(date(2026, 11, 30))
+    assert ch.last_completed_session_day(datetime(2026, 11, 27, 18, 25, tzinfo=UTC)) == date(2026, 11, 27)  # 13:25 NY
+    assert ch.last_completed_session_day(datetime(2026, 11, 27, 18, 10, tzinfo=UTC)) == date(2026, 11, 26)  # 13:10 NY

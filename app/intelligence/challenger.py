@@ -390,7 +390,17 @@ def last_completed_session_day(now_utc: datetime) -> date:
     embargo: today after 16:20 New York time, otherwise yesterday."""
     from zoneinfo import ZoneInfo
     ny = now_utc.astimezone(ZoneInfo("America/New_York"))
-    return ny.date() if (ny.hour, ny.minute) >= (16, 20) else ny.date() - timedelta(days=1)
+    close = (13, 20) if us_early_close(ny.date()) else (16, 20)
+    return ny.date() if (ny.hour, ny.minute) >= close else ny.date() - timedelta(days=1)
+
+
+def us_early_close(d: date) -> bool:
+    """NYSE 13:00 closes: the day after Thanksgiving, Christmas Eve and 3 July, when trading days."""
+    if d.weekday() >= 5:
+        return False
+    first_thu = 1 + (3 - date(d.year, 11, 1).weekday()) % 7
+    thanksgiving = date(d.year, 11, first_thu + 21)
+    return d in (thanksgiving + timedelta(days=1), date(d.year, 12, 24), date(d.year, 7, 3))
 
 
 def cmd_forecast(a: argparse.Namespace) -> None:
