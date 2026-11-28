@@ -39,5 +39,17 @@ jobs:
       - run: |
           extra=()
           if [ -n "${{ inputs.args }}" ]; then extra=("--args=${{ inputs.args }}"); fi
+          set +e
           gcloud run jobs execute ${{ inputs.job }} --project ${{ steps.cfg.outputs.project }} \
-            --region europe-west1 --wait "${extra[@]}"
+            --region europe-west1 --wait "${extra[@]}" 2>&1 | tee exec.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" != 0 ]; then
+            # Failure diagnostics: error-severity entries of this execution only (tracebacks),
+            # never INFO output, because Actions logs of this public repository are public.
+            ex=$(grep -oE "${{ inputs.job }}-[a-z0-9]{5}" exec.log | head -n 1)
+            if [ -n "$ex" ]; then
+              gcloud logging read "resource.type=\"cloud_run_job\" AND labels.\"run.googleapis.com/execution_name\"=\"$ex\" AND severity>=ERROR" \
+                --project ${{ steps.cfg.outputs.project }} --limit 60 --order asc --format='value(textPayload)' | cut -c1-400 || true
+            fi
+          fi
+          exit $rc
