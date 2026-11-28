@@ -21,7 +21,7 @@ from app.learning.datasets import (
 
 def write_dataset(out: Path, market: str = "US", n_sym: int = 10, start: date = date(2018, 1, 2),
                   end: date = date(2026, 11, 25), tier: str = "examined", boundary: str = "2026-11-25",
-                  seed: int = 3) -> Path:
+                  seed: int = 3, stale: float = 0.0) -> Path:
     rng = np.random.default_rng(seed)
     rows = []
     days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
@@ -34,6 +34,8 @@ def write_dataset(out: Path, market: str = "US", n_sym: int = 10, start: date = 
             if rng.random() < 0.01:
                 regime = 2.5 if regime == 1.0 else 1.0          # persistent vol regimes (predictable)
             r = rng.standard_t(4) * vol * regime / np.sqrt(2)
+            if stale and rng.random() < stale:
+                r = 0.0                                         # stale print (illiquid market)
             o = p
             p *= float(np.exp(r))
             rows.append([f"S{k}", d.isoformat(), o, max(o, p) * 1.003, min(o, p) * 0.997, p, p,
@@ -89,3 +91,39 @@ def test_benchmark_pipeline_runs_and_is_point_in_time(tmp_path) -> None:
         assert 0.0 < t[name]["mean_ltv_ex_ante"] < 1.0
     # learned models exploit persistent regimes that a long-memory estimator smooths over
     assert t["gbt"]["qlike"] < t["rc1"]["qlike"] * 1.5
+
+
+def test_stale_price_windows_do_not_degenerate_forecasts(tmp_path) -> None:
+    """NGX-style stale windows (10 sessions with no price change) give rv == 0.
+    v1 fitted log(rv + 1e-6) and collapsed LTV to ~0; v2 floors per market."""
+    from app.intelligence.benchmark import _splits, build_panel, evaluate, fit_predict
+    ds = load_research_dataset(write_dataset(tmp_path / "s", market="NGX", n_sym=10, stale=0.7, seed=5))
+    p = build_panel([ds], step=10, rc1=True)
+    assert (p.rv == 0).mean() > 0.01                              # the failure mode is present
+    sp = _splits(p)
+    preds = fit_predict(p, sp)
+    fl = preds["_floor"]["floor"]
+    assert np.all(fl > 0)
+    ev = evaluate(p, sp, preds)
+    t = ev["test"]
+    assert t["zero_realised_share"] > 0
+    for name in ("har", "ridge", "gbt", "hier"):
+        assert np.all(preds[name]["sigma"] >= fl - 1e-15)
+        assert t[name]["qlike"] < 5.0                             # v1: thousands
+        assert t[name]["mean_ltv_ex_ante"] > 0.5                  # v1: ~0
+        assert 0.0 <= t[name]["exceedance_rate"] <= 0.2
+
+
+def test_market_without_training_rows_uses_pooled_calibration(tmp_path) -> None:
+    from app.intelligence.benchmark import _splits, build_panel, evaluate, fit_predict
+    us = load_research_dataset(write_dataset(tmp_path / "u", n_sym=8))
+    ng = load_research_dataset(write_dataset(tmp_path / "n", market="NGX", n_sym=4, start=date(2023, 1, 2), seed=9))
+    p = build_panel([us, ng], step=20)
+    sp = _splits(p)
+    assert not (sp["train"] & (p.market == "NGX")).any()        # NGX history starts after TRAIN_END
+    preds = fit_predict(p, sp)
+    for name in ("har", "ridge", "gbt", "hier", "rc1"):
+        assert np.all(np.isfinite(preds[name]["q"]))
+        assert set(preds[name]["z_by_market"]) == {"US", "NGX"}
+    t = evaluate(p, sp, preds)["test"]
+    assert np.isfinite(t["ridge"]["pinball_q05"])

@@ -165,12 +165,14 @@ def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 
                 var = 0.94 * var + 0.06 * x * x
                 ew[t] = math.sqrt(var)
             down = np.minimum(r, 0.0)
+            stale = (np.abs(r) < 1e-12).astype(float)
             pre = {"r": r, "rv1": np.abs(r), "rv5": _roll_std(r, 5), "rv22": _roll_std(r, 22),
                    "rv66": _roll_std(r, 66), "ew": ew, "down22": np.sqrt(_roll_mean(down * down, 22)),
                    "park22": np.sqrt(_roll_mean(park, 22)), "gap22": _roll_mean(gap, 22),
                    "mom22": np.concatenate([np.full(22, np.nan), np.log(px[22:] / px[:-22])]),
                    "dd66": np.array([px[i] / px[max(0, i - 65):i + 1].max() - 1 for i in range(px.size)]),
                    "adv20": _roll_mean(vol * cl, 20), "adv5": _roll_mean(vol * cl, 5),
+                   "zero22": _roll_mean(stale, 22),
                    "range_ok": np.array([float(x["range_reported"]) for x in rows]),
                    "volume_ok": np.array([float(x["volume_reported"]) for x in rows])}
             per.append((m, s, rows, pre))
@@ -187,7 +189,7 @@ def build_panel(datasets: list[Any], h: int = H, step: int = 5, min_hist: int = 
                  math.log(pre["park22"][i] + 1e-5), pre["gap22"][i], pre["mom22"][i], pre["dd66"][i],
                  math.log(pre["adv20"][i] + 1.0), math.log((pre["adv5"][i] + 1.0) / (pre["adv20"][i] + 1.0)),
                  math.log(mkt_med.get((m, d), np.nan) + 1e-5), pre["range_ok"][i - 21:i + 1].mean(),
-                 pre["volume_ok"][i - 21:i + 1].mean(), math.log(i)]
+                 pre["volume_ok"][i - 21:i + 1].mean(), math.log(i), pre["zero22"][i]]
             if not np.all(np.isfinite(x)):
                 continue
             feats.append(x)
@@ -235,17 +237,18 @@ def fit_predict(p: Panel, sp: dict[str, np.ndarray], seed: int = 7) -> dict[str,
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
-    y = np.log(p.rv + 1e-6)
     tr = sp["train"]
-    out: dict[str, dict[str, np.ndarray]] = {}
+    fl = vol_floor(p, tr)
+    y = np.log(np.maximum(p.rv, fl))
+    out: dict[str, dict[str, np.ndarray]] = {"_floor": {"floor": fl}}
     har = LinearRegression().fit(p.X[tr][:, :4], y[tr])
-    out["har"] = {"sigma": np.exp(har.predict(p.X[:, :4]))}
+    out["har"] = {"sigma": np.maximum(np.exp(har.predict(p.X[:, :4])), fl)}
     ridge = make_pipeline(StandardScaler(), Ridge(alpha=1.0)).fit(p.X[tr], y[tr])
-    out["ridge"] = {"sigma": np.exp(ridge.predict(p.X))}
+    out["ridge"] = {"sigma": np.maximum(np.exp(ridge.predict(p.X)), fl)}
     gbt = HistGradientBoostingRegressor(max_iter=300, learning_rate=0.05, max_leaf_nodes=31, l2_regularization=1.0,
                                         random_state=seed).fit(p.X[tr], y[tr])
     g = gbt.predict(p.X)
-    out["gbt"] = {"sigma": np.exp(g)}
+    out["gbt"] = {"sigma": np.maximum(np.exp(g), fl)}
     # Hierarchical: instrument intercepts from training residuals, shrunk by n/(n+k);
     # k chosen on validation; unseen instruments get the pooled prediction.
     res = y - g
@@ -256,18 +259,37 @@ def fit_predict(p: Panel, sp: dict[str, np.ndarray], seed: int = 7) -> dict[str,
         mse = float(np.mean((y[sp["val"]] - g[sp["val"]] - a[sp["val"]]) ** 2))
         best = min(best, (mse, k))
     adj = _shrunk_intercepts(p.sym, res, tr, best[1])
-    out["hier"] = {"sigma": np.exp(g + np.array([adj.get(s, 0.0) for s in p.sym])), "k": np.array([best[1]])}
+    out["hier"] = {"sigma": np.maximum(np.exp(g + np.array([adj.get(s, 0.0) for s in p.sym])), fl),
+                   "k": np.array([best[1]])}
     out["rc1"] = {"sigma": p.rc1}
     gq = HistGradientBoostingRegressor(loss="quantile", quantile=Q, max_iter=300, learning_rate=0.05,
                                        max_leaf_nodes=31, random_state=seed).fit(p.X[tr], p.ret[tr])
     out["gbt_q"] = {"q": gq.predict(p.X)}
     for d in out.values():
         if "sigma" in d:
-            ok = tr & np.isfinite(d["sigma"]) & (d["sigma"] > 0)
-            z = float(np.quantile(p.ret[ok] / d["sigma"][ok], Q))
+            pooled = tr & np.isfinite(d["sigma"]) & (d["sigma"] > 0)
+            z_all = float(np.quantile(p.ret[pooled] / d["sigma"][pooled], Q))
+            z = np.full(p.rv.size, z_all)
+            zm: dict[str, float] = {}
+            for m in np.unique(p.market):           # per market; pooled fallback without training rows
+                ok = pooled & (p.market == m)
+                zm[str(m)] = float(np.quantile(p.ret[ok] / d["sigma"][ok], Q)) if ok.any() else z_all
+                z[p.market == m] = zm[str(m)]
             d["q"] = d["sigma"] * z
-            d["z"] = np.array([z])
+            d["z_by_market"] = zm  # type: ignore[assignment]
     return out
+
+
+def vol_floor(p: Panel, tr: np.ndarray, pct: float = 0.05) -> np.ndarray:
+    """Per-market minimum meaningful h-session volatility: the 5th percentile of
+    positive training realised volatility. Stale-price windows (rv == 0, common on
+    NGX) otherwise produce a degenerate log target and an undefined QLIKE."""
+    fl = np.full(p.rv.size, 1e-4)
+    for m in np.unique(p.market):
+        pos = tr & (p.market == m) & (p.rv > 0)
+        if pos.any():
+            fl[p.market == m] = max(1e-4, float(np.quantile(p.rv[pos], pct)))
+    return fl
 
 
 def _shrunk_intercepts(sym: np.ndarray, res: np.ndarray, mask: np.ndarray, k: float) -> dict[str, float]:
@@ -301,7 +323,11 @@ def evaluate(p: Panel, sp: dict[str, np.ndarray], preds: dict[str, dict[str, np.
     for seg in ("test", "test_unseen"):
         base = sp[seg] & np.isfinite(p.rc1)          # common sample: every model has a forecast
         res: dict[str, Any] = {"n": int(base.sum())}
+        fl = preds["_floor"]["floor"]
+        res["zero_realised_share"] = float(np.mean(p.rv[base] <= 0))
         for name, d in preds.items():
+            if name.startswith("_"):
+                continue
             r: dict[str, Any] = {}
             q = d["q"][base]
             y = p.ret[base]
@@ -311,7 +337,7 @@ def evaluate(p: Panel, sp: dict[str, np.ndarray], preds: dict[str, dict[str, np.
             r["kupiec_p"] = _kupiec(hits, y.size)
             if "sigma" in d:
                 s = d["sigma"][base]
-                v = p.rv[base] ** 2
+                v = np.maximum(p.rv[base], fl[base]) ** 2
                 r["qlike"] = float(np.mean(v / s ** 2 - np.log(v / s ** 2 + 1e-12) - 1))
                 r["log_rv_rmse"] = float(np.sqrt(np.mean((np.log(p.rv[base] + 1e-6) - np.log(s + 1e-6)) ** 2)))
                 # haircut equivalence at 1% breach: k from validation (ex ante), and k from test (ex post)
@@ -344,7 +370,7 @@ def paired_bootstrap(p: Panel, sp: dict[str, np.ndarray], preds: dict[str, dict[
                      a: str, b: str = "rc1", n: int = 500, seed: int = 11) -> dict[str, Any]:
     """QLIKE(a) - QLIKE(b) on test with a block bootstrap over calendar months (dependence-aware)."""
     base = sp["test"] & np.isfinite(p.rc1)
-    v = p.rv[base] ** 2
+    v = np.maximum(p.rv[base], preds["_floor"]["floor"][base]) ** 2
 
     def ql(s: np.ndarray) -> np.ndarray:
         return v / s ** 2 - np.log(v / s ** 2 + 1e-12) - 1
@@ -372,7 +398,7 @@ def main() -> None:
     t0 = time.time()
     tmp = Path(tempfile.mkdtemp())
     dss = []
-    for i, d in enumerate(a.dataset):
+    for i, d in enumerate(x for arg in a.dataset for x in arg.split("+")):
         path = _gcs_download(d, tmp / f"ds{i}") if d.startswith("gs://") else Path(d)
         dss.append(load_research_dataset(path))
     panel = build_panel(dss, step=a.step)
@@ -380,14 +406,16 @@ def main() -> None:
     preds = fit_predict(panel, sp, seed=a.seed)
     ev = evaluate(panel, sp, preds)
     boot = {m: paired_bootstrap(panel, sp, preds, m) for m in ("har", "ridge", "gbt", "hier")}
-    report = {"experiment": "intelligence.forward_vol_downside.v1", "horizon_sessions": H, "quantile": Q,
+    report = {"experiment": "intelligence.forward_vol_downside.v2", "horizon_sessions": H, "quantile": Q,
               "breach_target": BREACH, "step_sessions": a.step, "seed": a.seed,
               "datasets": [ds.meta["dataset_id"] for ds in dss],
               "data_through": max(ds.meta["last_date"] for ds in dss), "evidence_class": "public_historical",
               "panel": {"rows": int(panel.X.shape[0]), "instruments": len(set(panel.sym)),
                         **{k: int(v.sum()) for k, v in sp.items()}},
               "hier_shrinkage_k": float(preds["hier"]["k"][0]),
-              "z_q05": {k: float(v["z"][0]) for k, v in preds.items() if "z" in v},
+              "z_q05_by_market": {k: v["z_by_market"] for k, v in preds.items() if "z_by_market" in v},
+              "vol_floor_by_market": {m: float(preds["_floor"]["floor"][panel.market == m][0])
+                                      for m in sorted(set(panel.market))},
               "results": ev, "qlike_minus_rc1_block_bootstrap": boot, "seconds": round(time.time() - t0, 1)}
     blob = json.dumps(report, indent=1, default=float).encode()
     if a.out.startswith("gs://"):
